@@ -1,0 +1,223 @@
+/* Palette from xav-ie.github.io: deep purple-black bg, warm-yellow fg, green accent.
+   All rules are global (not scoped): the tab buttons are created at runtime by
+   takeover.ts, so Astro's scoped styling wouldn't reach them. */
+:root {
+  color-scheme: dark;
+  --bg: #12081a;
+  --bar: #1b0e28;
+  --panel: #0e0716;
+  --border: #3a2350;
+  --fg: #e7dcc0;
+  --muted: #9d8fb5;
+  --accent: #fff17b;
+  --green: #51d136;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font:
+    14px/1.4 system-ui,
+    sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--bar);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+}
+header b {
+  color: var(--accent);
+}
+#status {
+  color: var(--muted);
+}
+
+#capture {
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+/* off = stealth = good → green */
+#capture[data-on="0"] {
+  border-color: var(--green);
+  color: var(--green);
+}
+
+#done {
+  margin-left: auto;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--green);
+  color: #0b1206;
+  font-weight: 700;
+  cursor: pointer;
+}
+#done:hover {
+  filter: brightness(1.08);
+}
+#done:disabled {
+  background: #2a2336;
+  color: #6f6685;
+  cursor: default;
+  filter: none;
+}
+
+#wrap {
+  display: flex;
+  justify-content: center;
+  padding: 0;
+}
+canvas {
+  background: #000;
+  max-width: 100%;
+  height: auto;
+  outline: 2px solid var(--green);
+  cursor: default;
+}
+
+#vaultbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bar);
+  border-bottom: 1px solid var(--border);
+}
+#vaultbar input {
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 8px;
+  min-width: 150px;
+}
+#vaultbar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--green);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--green);
+  cursor: pointer;
+}
+#vaultbar button:hover {
+  background: rgba(81, 209, 54, 0.14);
+}
+
+#tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 12px 0;
+  background: var(--bar);
+  overflow-x: auto;
+}
+#tabs .tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 240px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: var(--panel);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 13px;
+}
+#tabs .tab.active {
+  background: var(--bar);
+  color: var(--accent);
+  border-color: var(--green);
+}
+#tabs .tab.newtab {
+  color: var(--green);
+  flex: 0 0 auto;
+}
+#tabs .tablabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#tabs .tabclose {
+  flex: 0 0 auto;
+  color: var(--muted);
+  display: inline-flex;
+}
+#tabs .tabclose:hover {
+  color: #ff6b8a;
+}
+
+#nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bar);
+  border-bottom: 1px solid var(--border);
+}
+#nav button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--fg);
+  cursor: pointer;
+}
+#nav button:hover {
+  background: rgba(255, 241, 123, 0.1);
+  color: var(--accent);
+}
+#nav #url {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 10px;
+  font: inherit;
+}
+#nav #url:focus {
+  outline: none;
+  border-color: var(--green);
+}
+
+button svg,
+.tabclose svg {
+  display: block;
+}
+
+#overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 4, 16, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--accent);
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  font-size: 32px;
+  z-index: 1000;
+}

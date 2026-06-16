@@ -1,0 +1,69 @@
+---
+import Base from "../layouts/base.astro";
+---
+
+<Base>
+  <header>
+    <b>Human takeover</b>
+    <span id="status">connecting…</span>
+    <button
+      id="capture"
+      title="Toggle CDP console capture. OFF is stealthier (removes the CDP signal bot-detectors catch); ON re-enables console logging."
+      >console capture</button
+    >
+    <button id="done" disabled>I'm done — hand back to agent</button>
+  </header>
+
+  <section id="vaultbar">
+    {
+      /* A real login form so your local extension recognizes it and autofills.
+        Values are read same-origin and typed into the remote page over CDP. */
+    }
+    <form id="vault" autocomplete="on" action="#" onsubmit="return false">
+      <input
+        id="vu"
+        type="text"
+        name="username"
+        autocomplete="username"
+        placeholder="username"
+      />
+      <button type="button" data-for="vu"
+        ><span class="bl">into focused field</span></button
+      >
+      <input
+        id="vp"
+        type="password"
+        name="password"
+        autocomplete="current-password"
+        placeholder="password"
+      />
+      <button type="button" data-for="vp"
+        ><span class="bl">into focused field</span></button
+      >
+    </form>
+  </section>
+
+  <nav id="tabs"></nav>
+
+  <div id="nav">
+    <button id="back" title="Back"></button>
+    <button id="fwd" title="Forward"></button>
+    <button id="reload" title="Reload"></button>
+    <input
+      id="url"
+      type="text"
+      spellcheck="false"
+      autocomplete="off"
+      placeholder="Enter a URL and press Enter"
+    />
+  </div>
+
+  <div id="wrap">
+    <canvas id="screen" width="1280" height="800" tabindex="0"></canvas>
+  </div>
+  <div id="overlay"></div>
+
+  <script>
+    import "../lib/takeover.ts";
+  </script>
+</Base>
