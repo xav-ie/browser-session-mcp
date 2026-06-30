@@ -922,7 +922,7 @@ async fn iso_eval_function(page: &Page, function_declaration: &str) -> Result<Va
         .await?;
     let call = CallFunctionOnParams::builder()
         .function_declaration(function_declaration)
-        .execution_context_id(world.result.execution_context_id.clone())
+        .execution_context_id(world.result.execution_context_id)
         .await_promise(true)
         .return_by_value(true)
         .build()

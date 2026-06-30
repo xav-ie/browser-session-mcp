@@ -199,7 +199,7 @@ async fn claim(token: &str, presented: Option<&str>) -> std::io::Result<Option<S
             Err(Error::new(ErrorKind::PermissionDenied, "already claimed"))
         };
     }
-    let secret = mint_token().map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?;
+    let secret = mint_token().map_err(|e| Error::other(e.to_string()))?;
     tokio::fs::create_dir_all(claims_dir()).await.ok();
     // Write the secret to a per-attempt temp file (named with the secret so two
     // concurrent first-claims never share a temp), then `hard_link` it into
@@ -453,7 +453,7 @@ fn extract_cookie(head: &str, name: &str) -> Option<String> {
     let line = head
         .lines()
         .find(|l| l.to_ascii_lowercase().starts_with("cookie:"))?;
-    let value = line.splitn(2, ':').nth(1)?;
+    let value = line.split_once(':')?.1;
     let prefix = format!("{name}=");
     value
         .split(';')
