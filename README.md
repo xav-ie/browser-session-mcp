@@ -51,8 +51,8 @@ the Chrome DevTools Protocol via a lightly-forked
   bundle Chrome — you point it at a running one (e.g.
   `chrome-headless-shell --remote-debugging-port=9222`, or a remote Chrome behind
   a TLS proxy). Without it the server has nothing to drive.
-- **Linux (x86_64 or aarch64)** for the prebuilt binaries. On other platforms,
-  [build from source with Nix](#building-from-source-nix).
+- **Linux or macOS (x86_64 or aarch64)** for the prebuilt binaries. On other
+  platforms, [build from source with Nix](#building-from-source-nix) (Linux only).
 - **An MCP client** (Claude Code, or any MCP-capable agent host).
 
 ## Quick start
@@ -70,10 +70,12 @@ takeover UI. Download, verify, extract:
 
 ```sh
 ver=v0.1.0                                   # pick a release tag
-arch=x86_64-unknown-linux-gnu                # or aarch64-unknown-linux-gnu
+arch=x86_64-unknown-linux-gnu                # aarch64-unknown-linux-gnu,
+                                             # aarch64-apple-darwin, x86_64-apple-darwin
 base=https://github.com/xav-ie/browser-session-mcp/releases/download/$ver
 curl -fsSLO "$base/browser-session-$ver-$arch.tar.gz"
-curl -fsSL  "$base/SHA256SUMS" | sha256sum --check --ignore-missing
+# verify (macOS: swap `sha256sum -c` for `shasum -a 256 -c`)
+curl -fsSL "$base/SHA256SUMS" | grep "browser-session-$ver-$arch.tar.gz" | sha256sum -c -
 tar -xzf "browser-session-$ver-$arch.tar.gz"
 cd "browser-session-$ver-$arch"              # → the browser-session binary + webroot/
 ```
