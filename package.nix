@@ -110,7 +110,7 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "MCP server giving each caller an isolated browser session against a shared persistent Chrome, with a human-takeover web UI.";
     license = lib.licenses.mit;
-    platforms = lib.platforms.linux;
+    platforms = lib.platforms.unix;
     mainProgram = "browser-session";
   };
 }

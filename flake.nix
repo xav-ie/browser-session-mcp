@@ -16,6 +16,7 @@
         systems = [
           "x86_64-linux"
           "aarch64-linux"
+          "aarch64-darwin"
         ];
         imports = [ inputs.treefmt-nix.flakeModule ];
 
@@ -33,14 +34,20 @@
         flake.nixosModules.default = inputs.self.nixosModules.browser-session;
 
         perSystem =
-          { config, pkgs, ... }:
+          {
+            config,
+            lib,
+            pkgs,
+            ...
+          }:
           {
             packages.browser-session-mcp = pkgs.callPackage ./package.nix { };
             packages.default = config.packages.browser-session-mcp;
 
-            # The package (all four binaries) must build.
-            checks.build = config.packages.default;
-
+            checks = {
+              # The package (all four binaries) must build.
+              build = config.packages.default;
+            }
             # End-to-end integration test in a throwaway NixOS VM. It imports the
             # real nixos-module.nix, enables the whole stack (persistent Chrome +
             # listener + reaper timer + takeover daemon), and asserts the systemd
@@ -50,71 +57,74 @@
             # real Chrome over CDP. So one check covers both the module and the
             # protocol. `nix flake check` runs it automatically.
             #
-            # Note: NixOS VM tests are x86_64/aarch64-linux only and need KVM on
-            # the builder (see the `nixos-test` CI job).
-            checks.smoke = pkgs.testers.runNixOSTest {
-              name = "browser-session-smoke";
-              nodes.machine =
-                { pkgs, ... }:
-                {
-                  imports = [ ./nixos-module.nix ];
-                  # Two Chromes are live during the run (the module's persistent
-                  # one + the self-contained one smoke.sh spins up), so give the
-                  # VM headroom.
-                  virtualisation.memorySize = 4096;
+            # Note: NixOS VM tests are Linux-only and need KVM on the builder
+            # (see the `nixos-test` CI job), so this check is omitted on Darwin —
+            # the flake still targets aarch64-darwin for the package build.
+            // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+              smoke = pkgs.testers.runNixOSTest {
+                name = "browser-session-smoke";
+                nodes.machine =
+                  { pkgs, ... }:
+                  {
+                    imports = [ ./nixos-module.nix ];
+                    # Two Chromes are live during the run (the module's persistent
+                    # one + the self-contained one smoke.sh spins up), so give the
+                    # VM headroom.
+                    virtualisation.memorySize = 4096;
 
-                  services.browser-session = {
-                    enable = true;
-                    package = config.packages.browser-session-mcp;
-                    chrome.package = pkgs.ungoogled-chromium;
-                    chrome.executable = "chromium";
-                    # The module targets chrome-headless-shell (headless by
-                    # default); plain chromium must be told to run headless AND
-                    # to use the headless ozone backend (old `--headless` is a
-                    # no-op in current chromium, so it still tries X11), and the
-                    # VM has no GPU.
-                    chrome.extraArgs = [
-                      "--headless=new"
-                      "--ozone-platform=headless"
-                      "--disable-gpu"
+                    services.browser-session = {
+                      enable = true;
+                      package = config.packages.browser-session-mcp;
+                      chrome.package = pkgs.ungoogled-chromium;
+                      chrome.executable = "chromium";
+                      # The module targets chrome-headless-shell (headless by
+                      # default); plain chromium must be told to run headless AND
+                      # to use the headless ozone backend (old `--headless` is a
+                      # no-op in current chromium, so it still tries X11), and the
+                      # VM has no GPU.
+                      chrome.extraArgs = [
+                        "--headless=new"
+                        "--ozone-platform=headless"
+                        "--disable-gpu"
+                      ];
+                      # takeover asserts a non-empty chromeWsBase; the daemon only
+                      # binds + serves here (nothing connects), so a dummy suffices.
+                      takeover.chromeWsBase = "ws://127.0.0.1:9222";
+                    };
+
+                    # smoke.sh's harness: coproc/bash, JSON extraction, /json probe.
+                    environment.systemPackages = [
+                      config.packages.browser-session-mcp
+                      pkgs.bash
+                      pkgs.python3
+                      pkgs.curl
                     ];
-                    # takeover asserts a non-empty chromeWsBase; the daemon only
-                    # binds + serves here (nothing connects), so a dummy suffices.
-                    takeover.chromeWsBase = "ws://127.0.0.1:9222";
                   };
+                testScript = ''
+                  machine.wait_for_unit("multi-user.target")
 
-                  # smoke.sh's harness: coproc/bash, JSON extraction, /json probe.
-                  environment.systemPackages = [
-                    config.packages.browser-session-mcp
-                    pkgs.bash
-                    pkgs.python3
-                    pkgs.curl
-                  ];
-                };
-              testScript = ''
-                machine.wait_for_unit("multi-user.target")
+                  # --- module wiring: the host-side daemons come up ---
+                  machine.wait_for_unit("chrome-headless.service")
+                  machine.wait_for_open_port(9222)
+                  machine.wait_for_unit("browser-session-listener.service")
+                  machine.wait_for_unit("browser-session-takeover.service")
+                  machine.wait_for_open_port(9223)
+                  machine.succeed("curl -fsS http://127.0.0.1:9223/healthz")
 
-                # --- module wiring: the host-side daemons come up ---
-                machine.wait_for_unit("chrome-headless.service")
-                machine.wait_for_open_port(9222)
-                machine.wait_for_unit("browser-session-listener.service")
-                machine.wait_for_unit("browser-session-takeover.service")
-                machine.wait_for_open_port(9223)
-                machine.succeed("curl -fsS http://127.0.0.1:9223/healthz")
+                  # The reaper is a timer-driven oneshot; trigger a sweep now and
+                  # assert it exits cleanly against the live Chrome.
+                  machine.succeed("systemctl start browser-session-reaper.service")
+                  machine.succeed("systemctl is-active --quiet chrome-headless.service")
 
-                # The reaper is a timer-driven oneshot; trigger a sweep now and
-                # assert it exits cleanly against the live Chrome.
-                machine.succeed("systemctl start browser-session-reaper.service")
-                machine.succeed("systemctl is-active --quiet chrome-headless.service")
-
-                # --- protocol: the full MCP tool surface end-to-end ---
-                machine.succeed(
-                    "env "
-                    "CHROME_BIN=${pkgs.ungoogled-chromium}/bin/chromium "
-                    "MCP_BIN=${config.packages.browser-session-mcp}/bin/browser-session "
-                    "bash ${./scripts/smoke.sh} 2>&1"
-                )
-              '';
+                  # --- protocol: the full MCP tool surface end-to-end ---
+                  machine.succeed(
+                      "env "
+                      "CHROME_BIN=${pkgs.ungoogled-chromium}/bin/chromium "
+                      "MCP_BIN=${config.packages.browser-session-mcp}/bin/browser-session "
+                      "bash ${./scripts/smoke.sh} 2>&1"
+                  )
+                '';
+              };
             };
 
             # treefmt covers Nix + Rust; the frontend keeps its own pnpm
