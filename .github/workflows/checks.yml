@@ -36,8 +36,11 @@ jobs:
       - run: pnpm check:${{ matrix.check }}
 
   # Rust build (all binaries) + the frontend build + treefmt, reproducibly via
-  # Nix. `nix flake check` runs checks.build and the treefmt check.
-  nix:
+  # Nix. Deliberately builds the individual checks rather than `nix flake
+  # check`, so the KVM-only VM test (checks.smoke) stays in its own job below
+  # instead of failing here for lack of /dev/kvm.
+  build-linux:
+    name: build (x86-64 linux)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -46,12 +49,40 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-      - run: nix flake check -L
+      - run: |
+          nix build -L \
+            ".#checks.x86_64-linux.build" \
+            ".#checks.x86_64-linux.treefmt"
 
-  # The Nix build is Linux-only (the flake targets linux); this compiles the
-  # binary on macOS with plain cargo — the same path the prebuilt macOS release
-  # tarballs take — so a regression that only breaks Apple targets is caught.
-  macos:
+  # NixOS VM integration test (checks.smoke): boots a VM running the real
+  # nixos-module.nix stack and drives the full MCP surface. VM tests need
+  # /dev/kvm, which GitHub's Linux runners expose but don't grant the runner
+  # user access to by default — the udev rule below fixes that.
+  nixos-test:
+    needs: build-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix build -L ".#checks.x86_64-linux.smoke"
+
+  # Compiles the binary on macOS (arm64 runner) with plain cargo — the same
+  # path the prebuilt macOS release tarballs take — so a regression that only
+  # breaks Apple targets is caught. This mirrors the *release* toolchain rather
+  # than `nix build .#packages.aarch64-darwin.default`, which the flake now also
+  # exposes but is not exercised here.
+  build-darwin:
+    name: build (aarch64-darwin)
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
