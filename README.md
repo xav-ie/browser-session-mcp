@@ -1,111 +1,114 @@
 # browser-session-mcp
 
-An MCP server that gives each caller an **isolated, long-lived browser session**
-against one shared Chrome. Sessions are addressed by an id you pass into every
-tool call — so they survive MCP transport churn and even MCP-subprocess
-restarts. A separate daemon captures every console + network event to disk
-losslessly, and the whole stack is tuned to avoid the usual headless-Chrome
-automation tells.
+An MCP server that gives each AI agent its own **isolated, long-lived Chrome
+browser session** — with full console + network capture, built-in anti-bot
+stealth, and a "hand it to a human" flow for logins the agent must not see.
 
-Written in Rust (talks the Chrome DevTools Protocol via a lightly-forked
-[`chromiumoxide`](vendor/chromiumoxide)). Ships one multi-call `browser-session`
-binary with four roles (`mcp` | `listener` | `reaper` | `takeover`).
+Sessions are addressed by an id you pass into every tool call, so they survive
+MCP transport churn and even MCP-subprocess restarts. Written in Rust, driving
+the Chrome DevTools Protocol via a lightly-forked
+[`chromiumoxide`](vendor/chromiumoxide).
 
-## Why sessions are a tool argument, not a transport concept
+## Why you'd want it
 
-Most Chrome-over-MCP servers tie a "session" to the transport (an SSE session,
-a WebSocket, a streamable-http id). Transports reconnect constantly, and when
-they do the browser goes with them — you lose cookies, tabs, and any state the
-agent was building.
+- **Isolated sessions** — each agent gets its own cookies/storage/tabs; run many
+  in parallel against one shared Chrome with zero cross-talk.
+- **Survives restarts** — because a session is a tool argument (not a transport
+  concept), it outlives transport reconnects and MCP-subprocess restarts (though
+  *not* a Chrome restart — see [Operational notes](#operational-notes)).
+- **Full capture** — every console message and network request is logged to disk
+  losslessly, queryable per page-visit.
+- **Anti-detection** — no `Runtime.enable` tell, coherent User-Agent +
+  Client-Hints, `navigator.webdriver` masking, and trusted CDP input; toggle
+  stealth per session.
+- **Human takeover** — hand a live page to a person for password/passkey/2FA
+  login without the agent ever seeing the credentials.
+- **Saved cookie states** — log in once, reuse across future sessions.
+- **[28 tools](#tool-surface-28-tools)** covering tabs, navigation, trusted
+  input, screenshots, accessibility snapshots, and logs.
 
-This server inverts that: **the session is a tool argument.** An agent calls
-`open_browser_session` once, gets back a `sessionId`, and passes that id into
-every subsequent call. Under the hood `sessionId` *is* a Chrome
-`BrowserContextId` — an incognito-style isolated profile (own cookies, storage,
-tabs). The session lives as long as the Chrome process does. Reconnect the
-transport, restart the MCP subprocess — the context is still there, found again
-by id.
+## Table of contents
 
-Contexts are cheap; one Chrome holds many. Two agents in parallel → two
-sessions → two contexts → zero shared state.
+- [Prerequisites](#prerequisites)
+- [Quick start](#quick-start)
+- [Tool surface (28 tools)](#tool-surface-28-tools)
+- [Workflows](#workflows)
+  - [Human takeover](#human-takeover)
+  - [Saved cookie state](#saved-cookie-state)
+- [How it works](#how-it-works)
+  - [Sessions are a tool argument](#sessions-are-a-tool-argument)
+  - [Architecture](#architecture)
+  - [Anti-detection (stealth)](#anti-detection-stealth)
+  - [Storage layout](#storage-layout)
+- [Deployment](#deployment)
+  - [Building from source (Nix)](#building-from-source-nix)
+  - [Environment](#environment)
+  - [Operational notes](#operational-notes)
 
-## Architecture
+## Prerequisites
 
-Four processes cooperate around one Chrome. Three are long-running daemons; the
-MCP server itself is a stdio subprocess that can be killed and respawned freely.
+- **A Chrome exposing the DevTools Protocol.** This server does not launch or
+  bundle Chrome — you point it at a running one (e.g.
+  `chrome-headless-shell --remote-debugging-port=9222`, or a remote Chrome behind
+  a TLS proxy). Without it the server has nothing to drive.
+- **Linux (x86_64 or aarch64)** for the prebuilt binaries. On other platforms,
+  [build from source with Nix](#building-from-source-nix).
+- **An MCP client** (Claude Code, or any MCP-capable agent host).
 
-```mermaid
-flowchart TB
-    chrome["<b>Chrome</b> (CDP :9222)<br/>one BrowserContext per session"]
+## Quick start
 
-    mcp["<b>browser-session-mcp</b> (stdio)<br/>the MCP tool surface<br/>list_*_messages read the NDJSON"]
-    listener["<b>browser-session-listener</b><br/>captures console + network<br/>→ NDJSON on disk"]
-    reaper["<b>browser-session-reaper</b> (timer)<br/>closes idle contexts + orphan tabs"]
-    takeover["<b>browser-session-takeover</b> (HTTP)<br/>serves the human-takeover page<br/>browser ↔ Chrome, no agent"]
+**1. Start a Chrome exposing CDP:**
 
-    mcp -->|"CDP, per tool call"| chrome
-    listener -->|"CDP attach, always-on"| chrome
-    reaper -->|"CDP, on timer"| chrome
-    chrome <-.->|"screencast WebSocket"| takeover
-
-    disk[("shared state dir<br/>(NDJSON, cookies, tickets)")]
-    listener --> disk
-    mcp --> disk
-    takeover --> disk
+```sh
+chrome-headless-shell --remote-debugging-port=9222 &
 ```
 
-- **`browser-session-mcp`** — the MCP server (stdio). Connects to Chrome
-  lazily, hands out contexts, drives navigation/interaction, and reads the
-  on-disk event logs back. Stateless beyond Chrome + the shared state dir, so
-  mcp-proxy churn or cache eviction can restart it at will.
-- **`browser-session-listener`** — long-running CDP listener. The single source
-  of truth for console + network capture: it attaches to every target and
-  writes per-visit NDJSON. Decoupled from the MCP subprocess on purpose — run it
-  with `Restart=always` so the capture gap during a crash is seconds.
-- **`browser-session-reaper`** — one-shot sweeper (run on a timer). Disposes
-  contexts idle longer than `MAX_IDLE_HOURS` and closes orphan tabs that belong
-  to no tracked session, then prunes the state file and stale logs.
-- **`browser-session-takeover`** — tiny HTTP daemon serving the human-takeover
-  UI (a static [Astro app](frontend)). It never touches Chrome; the page's JS
-  talks CDP straight to the browser. See [Human takeover](#human-takeover).
+**2. Grab a prebuilt binary.** Each tagged
+[release](https://github.com/xav-ie/browser-session-mcp/releases) ships a tarball
+per platform containing the single `browser-session` binary plus the built
+takeover UI. Download, verify, extract:
 
-## Anti-detection (stealth)
+```sh
+ver=v0.1.0                                   # pick a release tag
+arch=x86_64-unknown-linux-gnu                # or aarch64-unknown-linux-gnu
+base=https://github.com/xav-ie/browser-session-mcp/releases/download/$ver
+curl -fsSLO "$base/browser-session-$ver-$arch.tar.gz"
+curl -fsSL  "$base/SHA256SUMS" | sha256sum --check --ignore-missing
+tar -xzf "browser-session-$ver-$arch.tar.gz"
+cd "browser-session-$ver-$arch"              # → the browser-session binary + webroot/
+```
 
-This stack is meant to drive real sites without tripping bot gates, so it
-removes the common headless/automation tells:
+`browser-session` is a multi-call binary; its first argument picks the role
+(`mcp` | `listener` | `reaper` | `takeover`). The MCP server is the `mcp` role.
 
-- **No `Runtime.enable`.** The vendored chromiumoxide fork never sends
-  `Runtime.enable` — the primary CDP automation tell systems like Cloudflare
-  watch for. The MCP evaluates JS in an on-demand isolated world (or the main
-  world, see below) instead.
-- **User-Agent + Client Hints override.** Every target gets a coherent UA and
-  matching `Sec-CH-UA-*` metadata so `HeadlessChrome` never leaks. Default is
-  Chrome-on-Linux desktop; `useMobileUA: true` switches to Chrome-on-Android
-  (Pixel 8). The version is read live from the real Chrome so hints stay
-  consistent.
-- **JS tell masking.** An init script (run before page scripts, on every tab)
-  hides `navigator.webdriver`, installs a realistic PDF plugin set and
-  `window.chrome.runtime`, etc. WebGL is deliberately *not* spoofed — Chrome
-  renders on a real GPU, so the genuine renderer passes consistency checks a
-  software-GL spoof would fail.
-- **Loopback firewall.** `Network.setBlockedURLs` blocks in-page requests to
-  `localhost`/`127.0.0.1`/`::1`/`0.0.0.0` on every target, so a page can't
-  port-scan the DevTools port, the takeover daemon, or any other local service.
-- **Trusted input.** `click`/`type`/`press_key`/`scroll`/`move_mouse` dispatch
-  real CDP input events (not synthetic JS), which fire handlers reliably, grant
-  user activation (can open popups), and produce human-like behavioral signals.
+**3. Wire it into your MCP client** by absolute path — e.g. Claude Code:
 
-### The stealth toggle
+```sh
+claude mcp add browser-session -e BROWSER_URL=http://localhost:9222 \
+  -- /abs/path/to/browser-session mcp
+```
 
-`set_stealth(enabled: true/false)` trades capture for invisibility per session:
+(To run it directly instead: `BROWSER_URL=http://localhost:9222 ./browser-session mcp`.)
 
-| | console capture | `evaluate` runs in | CDP `Runtime.enable` tell |
-|---|---|---|---|
-| stealth **off** (default) | ✅ on | main world (reads `window.dataLayer`, `__NEXT_DATA__`, …) | present |
-| stealth **on** | ❌ off | isolated world (DOM/navigator only) | absent |
+**4. Your first tool calls** — open a session, navigate, screenshot:
 
-Typical flow for a bot-gated page: `set_stealth(true)` → `navigate` past the
-gate → `set_stealth(false)` → `evaluate` to read page globals.
+```ts
+const { sessionId } = (
+  await tools.browser_session_mcp.open_browser_session({})
+).structuredContent;
+
+await tools.browser_session_mcp.navigate({ sessionId, url: "https://example.com" });
+await tools.browser_session_mcp.take_screenshot({ sessionId });
+```
+
+That's the whole loop. For login flows and cookie reuse, see
+[Workflows](#workflows). For the full stealth/capture story, see
+[How it works](#how-it-works).
+
+> For lossless console/network capture and idle cleanup, also run the
+> `listener` and `reaper` roles as daemons — see [Deployment](#deployment). The
+> `mcp` role works standalone without them; you just won't get the
+> `list_console_messages` / `list_network_requests` logs.
 
 ## Tool surface (28 tools)
 
@@ -231,7 +234,108 @@ mode 0600, dir 0700). v1 is **cookies-only** — localStorage is not yet
 supported, but the on-disk schema reserves an `origins[]` field for forward
 compat.
 
-## Storage layout
+## How it works
+
+### Sessions are a tool argument
+
+Most Chrome-over-MCP servers tie a "session" to the transport (an SSE session,
+a WebSocket, a streamable-http id). Transports reconnect constantly, and when
+they do the browser goes with them — you lose cookies, tabs, and any state the
+agent was building.
+
+This server inverts that: **the session is a tool argument.** An agent calls
+`open_browser_session` once, gets back a `sessionId`, and passes that id into
+every subsequent call. Under the hood `sessionId` *is* a Chrome
+`BrowserContextId` — an incognito-style isolated profile (own cookies, storage,
+tabs). The session lives as long as the Chrome process does. Reconnect the
+transport, restart the MCP subprocess — the context is still there, found again
+by id.
+
+Contexts are cheap; one Chrome holds many. Two agents in parallel → two
+sessions → two contexts → zero shared state.
+
+### Architecture
+
+Four processes cooperate around one Chrome. Three are long-running daemons; the
+MCP server itself is a stdio subprocess that can be killed and respawned freely.
+
+```mermaid
+flowchart TB
+    chrome["<b>Chrome</b> (CDP :9222)<br/>one BrowserContext per session"]
+
+    mcp["<b>browser-session-mcp</b> (stdio)<br/>the MCP tool surface<br/>list_*_messages read the NDJSON"]
+    listener["<b>browser-session-listener</b><br/>captures console + network<br/>→ NDJSON on disk"]
+    reaper["<b>browser-session-reaper</b> (timer)<br/>closes idle contexts + orphan tabs"]
+    takeover["<b>browser-session-takeover</b> (HTTP)<br/>serves the human-takeover page<br/>browser ↔ Chrome, no agent"]
+
+    mcp -->|"CDP, per tool call"| chrome
+    listener -->|"CDP attach, always-on"| chrome
+    reaper -->|"CDP, on timer"| chrome
+    chrome <-.->|"screencast WebSocket"| takeover
+
+    disk[("shared state dir<br/>(NDJSON, cookies, tickets)")]
+    listener --> disk
+    mcp --> disk
+    takeover --> disk
+```
+
+All four roles are the one `browser-session` binary invoked with a different
+first argument:
+
+- **`browser-session mcp`** — the MCP server (stdio). Connects to Chrome
+  lazily, hands out contexts, drives navigation/interaction, and reads the
+  on-disk event logs back. Stateless beyond Chrome + the shared state dir, so
+  mcp-proxy churn or cache eviction can restart it at will.
+- **`browser-session listener`** — long-running CDP listener. The single source
+  of truth for console + network capture: it attaches to every target and
+  writes per-visit NDJSON. Decoupled from the MCP subprocess on purpose — run it
+  with `Restart=always` so the capture gap during a crash is seconds.
+- **`browser-session reaper`** — one-shot sweeper (run on a timer). Disposes
+  contexts idle longer than `MAX_IDLE_HOURS` and closes orphan tabs that belong
+  to no tracked session, then prunes the state file and stale logs.
+- **`browser-session takeover`** — tiny HTTP daemon serving the human-takeover
+  UI (a static [Astro app](frontend)). It never touches Chrome; the page's JS
+  talks CDP straight to the browser. See [Human takeover](#human-takeover).
+
+### Anti-detection (stealth)
+
+This stack is meant to drive real sites without tripping bot gates, so it
+removes the common headless/automation tells:
+
+- **No `Runtime.enable`.** The vendored chromiumoxide fork never sends
+  `Runtime.enable` — the primary CDP automation tell systems like Cloudflare
+  watch for. The MCP evaluates JS in an on-demand isolated world (or the main
+  world, see below) instead.
+- **User-Agent + Client Hints override.** Every target gets a coherent UA and
+  matching `Sec-CH-UA-*` metadata so `HeadlessChrome` never leaks. Default is
+  Chrome-on-Linux desktop; `useMobileUA: true` switches to Chrome-on-Android
+  (Pixel 8). The version is read live from the real Chrome so hints stay
+  consistent.
+- **JS tell masking.** An init script (run before page scripts, on every tab)
+  hides `navigator.webdriver`, installs a realistic PDF plugin set and
+  `window.chrome.runtime`, etc. WebGL is deliberately *not* spoofed — Chrome
+  renders on a real GPU, so the genuine renderer passes consistency checks a
+  software-GL spoof would fail.
+- **Loopback firewall.** `Network.setBlockedURLs` blocks in-page requests to
+  `localhost`/`127.0.0.1`/`::1`/`0.0.0.0` on every target, so a page can't
+  port-scan the DevTools port, the takeover daemon, or any other local service.
+- **Trusted input.** `click`/`type`/`press_key`/`scroll`/`move_mouse` dispatch
+  real CDP input events (not synthetic JS), which fire handlers reliably, grant
+  user activation (can open popups), and produce human-like behavioral signals.
+
+#### The stealth toggle
+
+`set_stealth(enabled: true/false)` trades capture for invisibility per session:
+
+| | console capture | `evaluate` runs in | CDP `Runtime.enable` tell |
+|---|---|---|---|
+| stealth **off** (default) | ✅ on | main world (reads `window.dataLayer`, `__NEXT_DATA__`, …) | present |
+| stealth **on** | ❌ off | isolated world (DOM/navigator only) | absent |
+
+Typical flow for a bot-gated page: `set_stealth(true)` → `navigate` past the
+gate → `set_stealth(false)` → `evaluate` to read page globals.
+
+### Storage layout
 
 All daemons share one state dir (default `/var/lib/browser-session-mcp`),
 typically a volume mounted into the MCP container and visible to the host
@@ -260,49 +364,13 @@ followed by one line per console + network event. The document request that
 triggered a visit fires *before* `frameNavigated`, so it's retroactively
 reassigned to the new visit.
 
-## Install (prebuilt binaries, no Nix)
+## Deployment
 
-Each tagged [release](https://github.com/xav-ie/browser-session-mcp/releases)
-ships a tarball per platform (`x86_64` and `aarch64` Linux) containing the single
-`browser-session` binary plus the built takeover UI. Grab one, verify it, and
-extract:
+The [Quick start](#quick-start) covers the prebuilt-binary path. This section
+covers building from source, the full env-var reference, and running the
+supporting daemons in production.
 
-```sh
-ver=v0.1.0                                   # pick a release tag
-arch=x86_64-unknown-linux-gnu                # or aarch64-unknown-linux-gnu
-base=https://github.com/xav-ie/browser-session-mcp/releases/download/$ver
-curl -fsSLO "$base/browser-session-$ver-$arch.tar.gz"
-curl -fsSL  "$base/SHA256SUMS" | sha256sum --check --ignore-missing
-tar -xzf "browser-session-$ver-$arch.tar.gz"
-cd "browser-session-$ver-$arch"              # → the browser-session binary + webroot/
-```
-
-`browser-session` is a multi-call binary; its first argument picks the role
-(`mcp` | `listener` | `reaper` | `takeover`). Run the MCP server against a Chrome
-exposing the DevTools Protocol (see below):
-
-```sh
-BROWSER_URL=http://localhost:9222 ./browser-session mcp
-```
-
-The bundled `webroot/` is the takeover UI. Without the Nix wrapper you point the
-takeover daemon at it yourself:
-
-```sh
-TAKEOVER_WEBROOT=$PWD/webroot CHROME_WS_BASE=ws://localhost:9222 \
-  ./browser-session takeover
-```
-
-Wire the MCP server into an MCP client by absolute path, e.g. Claude Code:
-
-```sh
-claude mcp add browser-session -e BROWSER_URL=http://localhost:9222 \
-  -- /abs/path/to/browser-session mcp
-```
-
-To build from source instead, use Nix.
-
-## Building & running
+### Building from source (Nix)
 
 Build with Nix (produces the `browser-session` binary, wrapped so its `takeover`
 role finds the bundled Astro UI):
@@ -318,6 +386,14 @@ or `https://chrome.<domain>` behind a TLS proxy — TLS is supported):
 
 ```sh
 BROWSER_URL=http://localhost:9222 browser-session mcp
+```
+
+Without the Nix wrapper, point the takeover daemon at the bundled `webroot/`
+yourself:
+
+```sh
+TAKEOVER_WEBROOT=$PWD/webroot CHROME_WS_BASE=ws://localhost:9222 \
+  ./browser-session takeover
 ```
 
 ### Environment
@@ -345,7 +421,7 @@ ordered `After=` Chrome.
 `TAKEOVER_WEBROOT` (set automatically by the Nix wrapper). Run as a systemd
 service.
 
-## Operational notes
+### Operational notes
 
 - The listener is the only source of console + network events. While it's down
   those events are lost; `Restart=always` keeps that window to seconds.
