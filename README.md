@@ -8,7 +8,8 @@ losslessly, and the whole stack is tuned to avoid the usual headless-Chrome
 automation tells.
 
 Written in Rust (talks the Chrome DevTools Protocol via a lightly-forked
-[`chromiumoxide`](vendor/chromiumoxide)). Ships four binaries; built with Nix.
+[`chromiumoxide`](vendor/chromiumoxide)). Ships one multi-call `browser-session`
+binary with four roles (`mcp` | `listener` | `reaper` | `takeover`).
 
 ## Why sessions are a tool argument, not a transport concept
 
@@ -259,13 +260,55 @@ followed by one line per console + network event. The document request that
 triggered a visit fires *before* `frameNavigated`, so it's retroactively
 reassigned to the new visit.
 
-## Building & running
+## Install (prebuilt binaries, no Nix)
 
-Build with Nix (produces all four binaries; the takeover binary is wrapped to
-find its bundled Astro UI):
+Each tagged [release](https://github.com/xav-ie/browser-session-mcp/releases)
+ships a tarball per platform (`x86_64` and `aarch64` Linux) containing the single
+`browser-session` binary plus the built takeover UI. Grab one, verify it, and
+extract:
 
 ```sh
-nix build           # → ./result/bin/browser-session-{mcp,listener,reaper,takeover}
+ver=v0.1.0                                   # pick a release tag
+arch=x86_64-unknown-linux-gnu                # or aarch64-unknown-linux-gnu
+base=https://github.com/xav-ie/browser-session-mcp/releases/download/$ver
+curl -fsSLO "$base/browser-session-$ver-$arch.tar.gz"
+curl -fsSL  "$base/SHA256SUMS" | sha256sum --check --ignore-missing
+tar -xzf "browser-session-$ver-$arch.tar.gz"
+cd "browser-session-$ver-$arch"              # → the browser-session binary + webroot/
+```
+
+`browser-session` is a multi-call binary; its first argument picks the role
+(`mcp` | `listener` | `reaper` | `takeover`). Run the MCP server against a Chrome
+exposing the DevTools Protocol (see below):
+
+```sh
+BROWSER_URL=http://localhost:9222 ./browser-session mcp
+```
+
+The bundled `webroot/` is the takeover UI. Without the Nix wrapper you point the
+takeover daemon at it yourself:
+
+```sh
+TAKEOVER_WEBROOT=$PWD/webroot CHROME_WS_BASE=ws://localhost:9222 \
+  ./browser-session takeover
+```
+
+Wire the MCP server into an MCP client by absolute path, e.g. Claude Code:
+
+```sh
+claude mcp add browser-session -e BROWSER_URL=http://localhost:9222 \
+  -- /abs/path/to/browser-session mcp
+```
+
+To build from source instead, use Nix.
+
+## Building & running
+
+Build with Nix (produces the `browser-session` binary, wrapped so its `takeover`
+role finds the bundled Astro UI):
+
+```sh
+nix build           # → ./result/bin/browser-session   (subcommands: mcp|listener|reaper|takeover)
 nix develop         # dev shell with cargo, rustc, node/pnpm for the frontend
 ```
 
@@ -274,12 +317,12 @@ Protocol at `BROWSER_URL` (e.g. `chrome-headless-shell --remote-debugging-port=9
 or `https://chrome.<domain>` behind a TLS proxy — TLS is supported):
 
 ```sh
-BROWSER_URL=http://localhost:9222 browser-session-mcp
+BROWSER_URL=http://localhost:9222 browser-session mcp
 ```
 
 ### Environment
 
-`browser-session-mcp` (the MCP server):
+`browser-session mcp` (the MCP server):
 
 | var | default | notes |
 |---|---|---|
@@ -290,14 +333,14 @@ BROWSER_URL=http://localhost:9222 browser-session-mcp
 | `TAKEOVER_DIR` | `/var/lib/browser-session-mcp/takeover` | takeover IPC |
 | `TAKEOVER_BASE_URL` | — | public URL of the takeover daemon; without it `request_human_takeover` errors |
 
-`browser-session-listener` — `BROWSER_URL` (default `http://127.0.0.1:9222`),
+`browser-session listener` — `BROWSER_URL` (default `http://127.0.0.1:9222`),
 `LOGS_DIR`, `TAKEOVER_DIR`. Run as a systemd service with `Restart=always`,
 ordered `After=` Chrome.
 
-`browser-session-reaper` — `BROWSER_URL`, `STATE_FILE`, `LOGS_DIR`,
+`browser-session reaper` — `BROWSER_URL`, `STATE_FILE`, `LOGS_DIR`,
 `MAX_IDLE_HOURS` (default 24). Run on a timer (e.g. every 12h).
 
-`browser-session-takeover` — `TAKEOVER_BIND` (default `127.0.0.1:9223`),
+`browser-session takeover` — `TAKEOVER_BIND` (default `127.0.0.1:9223`),
 `TAKEOVER_DIR`, `CHROME_WS_BASE` (**required**, e.g. `wss://chrome.<domain>`),
 `TAKEOVER_WEBROOT` (set automatically by the Nix wrapper). Run as a systemd
 service.

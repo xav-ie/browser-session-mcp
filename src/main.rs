@@ -1,62 +1,51 @@
-//! browser-session-mcp — MCP server over stdio.
+//! browser-session — a single multi-call binary for the whole stack.
 //!
-//! Connects (lazily) to a persistent Chrome via the DevTools Protocol and
-//! hands out isolated BrowserContexts per caller-managed sessionId.
+//! Dispatches on the first argument to one of four long-lived roles that
+//! cooperate around one Chrome (see the README architecture diagram):
 //!
-//! Required env: BROWSER_URL (e.g. http://localhost:9222).
-//! Optional env: STATE_FILE, LOGS_DIR, STATES_DIR.
+//!   browser-session mcp        MCP server over stdio (the tool surface)
+//!   browser-session listener   always-on CDP console/network capture → NDJSON
+//!   browser-session reaper     one-shot sweep of idle contexts (run on a timer)
+//!   browser-session takeover   HTTP daemon serving the human-takeover page
+//!
+//! Folding them into one binary keeps the shared async/TLS/CDP runtime compiled
+//! once and gives non-Nix users a single executable to place on PATH.
+use anyhow::Result;
 
-use anyhow::{Context, Result};
-use rmcp::ServiceExt;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+const USAGE: &str = "\
+browser-session — isolated browser sessions over a shared Chrome
 
-use browser_session_mcp::chrome_ctx::ChromeContext;
-use browser_session_mcp::logs::default_logs_dir;
-use browser_session_mcp::saved_states::{SavedStateStore, default_states_dir};
-use browser_session_mcp::server::BrowserSessionServer;
-use browser_session_mcp::state::{StateStore, default_state_file};
+Usage: browser-session <command>
+
+Commands:
+  mcp         MCP server over stdio (needs BROWSER_URL)
+  listener    always-on console + network capture to NDJSON
+  reaper      one-shot sweep of idle sessions (run on a timer)
+  takeover    HTTP daemon serving the human-takeover page
+
+Each command is configured by environment variables; see the README.";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
-
-    let browser_url = match std::env::var("BROWSER_URL") {
-        Ok(v) if !v.is_empty() => v,
-        _ => {
-            eprintln!("BROWSER_URL is required.");
-            std::process::exit(1);
+    match std::env::args().nth(1).as_deref() {
+        Some("mcp") => browser_session_mcp::mcp::run().await,
+        Some("listener") => browser_session_mcp::listener::run().await,
+        Some("reaper") => browser_session_mcp::reaper::run().await,
+        Some("takeover") => browser_session_mcp::takeover::run().await,
+        Some("-V" | "--version") => {
+            println!("browser-session {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
         }
-    };
-    let state = StateStore::load(default_state_file())
-        .await
-        .context("loading state store")?;
-    let ctx = ChromeContext::new(browser_url, state.clone());
-    let saved_states = SavedStateStore::new(default_states_dir());
-    let logs_dir = default_logs_dir();
-    let srv = BrowserSessionServer::new(ctx, logs_dir, saved_states);
-
-    tracing::info!("browser-session-mcp starting");
-
-    let svc = srv
-        .serve((tokio::io::stdin(), tokio::io::stdout()))
-        .await
-        .context("starting stdio service")?;
-    let _ = svc.waiting().await;
-    if let Err(err) = state.flush_now().await {
-        tracing::warn!(error = %err, "final state flush failed");
+        Some("-h" | "--help") => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        other => {
+            if let Some(cmd) = other {
+                eprintln!("unknown command: {cmd}\n");
+            }
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
     }
-    Ok(())
-}
-
-fn init_tracing() {
-    let filter = EnvFilter::try_from_env("RUST_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("browser_session_mcp=info,rmcp=warn"));
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr)
-                .with_target(false),
-        )
-        .init();
 }

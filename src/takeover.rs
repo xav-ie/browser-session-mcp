@@ -327,6 +327,7 @@ async fn sweep_expired() {
 ///   TAKEOVER_DIR      (default /var/lib/browser-session-mcp/takeover)
 ///   CHROME_WS_BASE    (required) — e.g. wss://chrome.lalala.casa
 pub async fn run() -> Result<()> {
+    crate::init_tracing("browser_session_mcp=info");
     let bind = std::env::var("TAKEOVER_BIND").unwrap_or_else(|_| "127.0.0.1:9223".to_string());
     let chrome_ws_base = std::env::var("CHROME_WS_BASE")
         .ok()

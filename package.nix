@@ -83,9 +83,10 @@ rustPlatform.buildRustPackage {
 
   doCheck = false;
 
-  # The takeover daemon serves the built Astro UI from TAKEOVER_WEBROOT.
+  # `browser-session takeover` serves the built Astro UI from TAKEOVER_WEBROOT.
+  # Wrapping the one multi-call binary is harmless for the other subcommands.
   postInstall = ''
-    wrapProgram $out/bin/browser-session-takeover \
+    wrapProgram $out/bin/browser-session \
       --set TAKEOVER_WEBROOT ${frontend}
   '';
 
@@ -93,6 +94,6 @@ rustPlatform.buildRustPackage {
     description = "MCP server giving each caller an isolated browser session against a shared persistent Chrome, with a human-takeover web UI.";
     license = lib.licenses.mit;
     platforms = lib.platforms.linux;
-    mainProgram = "browser-session-mcp";
+    mainProgram = "browser-session";
   };
 }

@@ -5,21 +5,11 @@ edition = "2021"
 description = "MCP server giving each caller an isolated browser session against a shared persistent Chrome."
 license = "MIT"
 
+# One multi-call binary; the first argument selects the role
+# (mcp | listener | reaper | takeover). See src/main.rs.
 [[bin]]
-name = "browser-session-mcp"
+name = "browser-session"
 path = "src/main.rs"
-
-[[bin]]
-name = "browser-session-listener"
-path = "src/bin/listener.rs"
-
-[[bin]]
-name = "browser-session-reaper"
-path = "src/bin/reaper.rs"
-
-[[bin]]
-name = "browser-session-takeover"
-path = "src/bin/takeover.rs"
 
 [dependencies]
 rmcp = { version = "1.6", features = ["server", "transport-io"] }

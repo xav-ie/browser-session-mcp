@@ -36,12 +36,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::Mutex;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use browser_session_mcp::chrome;
-use browser_session_mcp::logs::{ConsoleEntry, LogWriter, NetworkEntry, default_logs_dir};
-use browser_session_mcp::takeover;
-use browser_session_mcp::user_agent::{self, UaOverride};
+use crate::chrome;
+use crate::logs::{ConsoleEntry, LogWriter, NetworkEntry, default_logs_dir};
+use crate::takeover;
+use crate::user_agent::{self, UaOverride};
 
 /// JS predicate: does this target still leak "Headless" (UA string or UA-CH
 /// brands)? Used to gate the UA override so we don't clobber an intentional
@@ -50,9 +49,8 @@ const LEAKS_CHECK: &str = "(() => { try { const b = navigator.userAgentData && n
 
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    init_tracing();
+pub async fn run() -> Result<()> {
+    crate::init_tracing("browser_session_mcp=info,rmcp=warn");
     let browser_url =
         std::env::var("BROWSER_URL").unwrap_or_else(|_| "http://127.0.0.1:9222".to_string());
     let writer = LogWriter::new(default_logs_dir());
@@ -81,19 +79,6 @@ async fn main() -> Result<()> {
         }
         tokio::time::sleep(RECONNECT_BACKOFF).await;
     }
-}
-
-fn init_tracing() {
-    let filter = EnvFilter::try_from_env("RUST_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("browser_session_listener=info,rmcp=warn"));
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stdout)
-                .with_target(false),
-        )
-        .init();
 }
 
 fn is_connect_err(err: &anyhow::Error) -> bool {

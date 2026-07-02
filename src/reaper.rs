@@ -20,15 +20,13 @@ use chromiumoxide::cdp::browser_protocol::{
     target::{CloseTargetParams, GetBrowserContextsParams, GetTargetsParams, TargetId},
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use browser_session_mcp::chrome;
-use browser_session_mcp::logs::{LogWriter, default_logs_dir};
-use browser_session_mcp::state::{default_state_file, read_state_file, write_state_file};
+use crate::chrome;
+use crate::logs::{LogWriter, default_logs_dir};
+use crate::state::{default_state_file, read_state_file, write_state_file};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    init_tracing();
+pub async fn run() -> Result<()> {
+    crate::init_tracing("browser_session_mcp=info,rmcp=warn");
     let browser_url =
         std::env::var("BROWSER_URL").unwrap_or_else(|_| "http://127.0.0.1:9222".to_string());
     let state_file = default_state_file();
@@ -147,17 +145,4 @@ async fn main() -> Result<()> {
         sessions.len()
     );
     Ok(())
-}
-
-fn init_tracing() {
-    let filter = EnvFilter::try_from_env("RUST_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("browser_session_reaper=info,rmcp=warn"));
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr)
-                .with_target(false),
-        )
-        .init();
 }

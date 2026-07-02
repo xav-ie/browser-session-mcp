@@ -9,7 +9,7 @@
 #
 # Overrides:
 #   CHROME_BIN  — path to chrome-headless-shell (default: nix build .#chrome-headless-shell)
-#   MCP_BIN     — path to browser-session-mcp   (default: target/release/browser-session-mcp)
+#   MCP_BIN     — path to browser-session       (default: target/release/browser-session)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -27,7 +27,7 @@ if [[ ! -x $CHROME_BIN ]]; then
 fi
 
 if [[ -z ${MCP_BIN:-} ]]; then
-  MCP_BIN="target/release/browser-session-mcp"
+  MCP_BIN="target/release/browser-session"
 fi
 if [[ ! -x $MCP_BIN ]]; then
   echo "+ building release binary"
@@ -90,7 +90,7 @@ fi
 
 # ---- start MCP server ----------------------------------------------------
 
-coproc SERVER (exec "$MCP_BIN" 2>"$TMP/mcp.log")
+coproc SERVER (exec "$MCP_BIN" mcp 2>"$TMP/mcp.log")
 SERVER_PID=$SERVER_PID
 
 req() {
