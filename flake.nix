@@ -43,10 +43,6 @@
                 ".direnv/**"
                 "target/**"
                 "frontend/**"
-                # Vendored, in-tree fork of chromiumoxide — keep it byte-for-byte
-                # upstream (plus our minimal patches); don't let treefmt reformat
-                # the whole crate.
-                "vendor/**"
               ];
             };
           };

@@ -67,7 +67,17 @@ rustPlatform.buildRustPackage {
       );
   };
 
-  cargoLock.lockFile = ./Cargo.lock;
+  cargoLock = {
+    lockFile = ./Cargo.lock;
+    # chromiumoxide is our git fork (see [patch.crates-io] in Cargo.toml), so the
+    # hermetic build needs its checkout hash pinned. Recompute after bumping the
+    # fork rev with:
+    #   nix run nixpkgs#nix-prefetch-git -- \
+    #     --url https://github.com/xav-ie/chromiumoxide.git --rev <rev>
+    outputHashes = {
+      "chromiumoxide-0.9.1" = "sha256-lhEf7w5k+H7Lvnpnv0tUyrDVp6EOghDp7LZtvYlxu6o=";
+    };
+  };
 
   # aws-lc-rs (pulled by reqwest's rustls-tls feature) needs cmake and a C
   # toolchain at build time; makeWrapper to point the daemon at the built UI.

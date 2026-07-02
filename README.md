@@ -7,7 +7,7 @@ stealth, and a "hand it to a human" flow for logins the agent must not see.
 Sessions are addressed by an id you pass into every tool call, so they survive
 MCP transport churn and even MCP-subprocess restarts. Written in Rust, driving
 the Chrome DevTools Protocol via a lightly-forked
-[`chromiumoxide`](vendor/chromiumoxide).
+[`chromiumoxide`](https://github.com/xav-ie/chromiumoxide).
 
 ## Why you'd want it
 
@@ -302,7 +302,7 @@ first argument:
 This stack is meant to drive real sites without tripping bot gates, so it
 removes the common headless/automation tells:
 
-- **No `Runtime.enable`.** The vendored chromiumoxide fork never sends
+- **No `Runtime.enable`.** The [chromiumoxide fork](https://github.com/xav-ie/chromiumoxide) never sends
   `Runtime.enable` — the primary CDP automation tell systems like Cloudflare
   watch for. The MCP evaluates JS in an on-demand isolated world (or the main
   world, see below) instead.

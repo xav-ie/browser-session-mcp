@@ -56,12 +56,13 @@ base64 = "0.22"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 once_cell = "1"
 
-# Local, in-tree fork of chromiumoxide 0.9.1 that does NOT send `Runtime.enable`
-# (the primary CDP automation tell anti-bot systems detect). See
-# vendor/chromiumoxide/src/handler/frame.rs. Evaluations run in an on-demand
-# isolated world instead. Not published anywhere — purely local.
+# Minimal fork of chromiumoxide 0.9.1 that does NOT send `Runtime.enable` (the
+# primary CDP automation tell anti-bot systems detect) and empties the eval
+# sourceURL. Evaluations run in an on-demand isolated world instead. The fork is
+# a two-commit repo — pristine 0.9.1, then a one-file patch to handler/frame.rs:
+# https://github.com/xav-ie/chromiumoxide/commit/cf6cc08f05bd4d0eb5d3c00c21e49b17e98073db
 [patch.crates-io]
-chromiumoxide = { path = "vendor/chromiumoxide" }
+chromiumoxide = { git = "https://github.com/xav-ie/chromiumoxide", rev = "cf6cc08f05bd4d0eb5d3c00c21e49b17e98073db" }
 
 [profile.release]
 strip = true
