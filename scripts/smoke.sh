@@ -52,6 +52,9 @@ cleanup() {
   rc=$?
   [[ -n ${SERVER_PID:-} ]] && kill "$SERVER_PID" 2>/dev/null || true
   [[ -n ${CHROME_PID:-} ]] && kill "$CHROME_PID" 2>/dev/null || true
+  # Wait for chrome to fully exit before removing its data dir — otherwise it's
+  # still writing chrome-data/ and `rm -rf` races it ("Directory not empty").
+  [[ -n ${CHROME_PID:-} ]] && wait "$CHROME_PID" 2>/dev/null || true
   if ((rc != 0)); then
     echo
     echo "---- chrome log (tail) ----"
@@ -59,7 +62,7 @@ cleanup() {
     echo "---- mcp log (tail) ----"
     tail -n 40 "$TMP/mcp.log" 2>/dev/null || true
   fi
-  rm -rf "$TMP"
+  rm -rf "$TMP" 2>/dev/null || true
   exit $rc
 }
 trap cleanup EXIT
