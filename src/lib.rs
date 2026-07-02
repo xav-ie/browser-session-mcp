@@ -18,8 +18,8 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 /// the `mcp` subcommand speaks the MCP protocol over stdout, and stderr is
 /// captured by journald for the daemons all the same.
 pub fn init_tracing(default_filter: &str) {
-    let filter = EnvFilter::try_from_env("RUST_LOG")
-        .unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let filter =
+        EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new(default_filter));
     tracing_subscriber::registry()
         .with(filter)
         .with(
