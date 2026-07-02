@@ -17,21 +17,35 @@ let
   pnpm10ConfigHook = pnpmConfigHook.override { pnpm = pnpm_10; };
   fetchPnpm10Deps = fetchPnpmDeps.override { pnpm = pnpm_10; };
 
+  # pnpm's fd juggling makes Node emit tens of thousands of harmless "File
+  # descriptor opened in unmanaged mode" *process* warnings on Darwin (Linux is
+  # silent). --no-warnings mutes them at the source: pnpm install (the pnpmDeps
+  # fixed-output derivation — hash is content-addressed, so it's unchanged) and
+  # pnpm build below.
+  pnpmQuiet = "--no-warnings";
+
   # Static Astro takeover UI, served by the daemon out of $TAKEOVER_WEBROOT.
   frontend = stdenvNoCC.mkDerivation (finalAttrs: {
     pname = "browser-session-mcp-frontend";
     inherit version;
     src = ./frontend;
+    NODE_OPTIONS = pnpmQuiet;
     nativeBuildInputs = [
       nodejs_22
       pnpm_10
       pnpm10ConfigHook
     ];
-    pnpmDeps = fetchPnpm10Deps {
-      inherit (finalAttrs) pname version src;
-      fetcherVersion = 3;
-      hash = "sha256-kMv0/b4cb1F1LhuPzp6QIYFcUqyqdS+fr2y6wW1hf3Y=";
-    };
+    pnpmDeps =
+      (fetchPnpm10Deps {
+        inherit (finalAttrs) pname version src;
+        fetcherVersion = 3;
+        hash = "sha256-kMv0/b4cb1F1LhuPzp6QIYFcUqyqdS+fr2y6wW1hf3Y=";
+      }).overrideAttrs
+        (o: {
+          env = (o.env or { }) // {
+            NODE_OPTIONS = pnpmQuiet;
+          };
+        });
     buildPhase = ''
       runHook preBuild
       pnpm build
