@@ -4,6 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
+    crane.url = "github:ipetkov/crane";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
@@ -41,7 +42,9 @@
             ...
           }:
           {
-            packages.browser-session-mcp = pkgs.callPackage ./package.nix { };
+            packages.browser-session-mcp = pkgs.callPackage ./package.nix {
+              craneLib = inputs.crane.mkLib pkgs;
+            };
             packages.default = config.packages.browser-session-mcp;
 
             checks = {

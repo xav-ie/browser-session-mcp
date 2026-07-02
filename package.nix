@@ -1,6 +1,6 @@
 {
   lib,
-  rustPlatform,
+  craneLib,
   cmake,
   pkg-config,
   makeWrapper,
@@ -57,74 +57,53 @@ let
       runHook postInstall
     '';
   });
+  # Only the Rust sources (Cargo.toml/lock + *.rs); drops the frontend, nix
+  # files, target/, etc. so a doc/frontend edit doesn't invalidate the build.
+  src = craneLib.cleanCargoSource ./.;
+
+  commonArgs = {
+    inherit src version;
+    pname = "browser-session-mcp";
+    strictDeps = true;
+
+    # aws-lc-rs (via reqwest's rustls feature) needs cmake + a C toolchain to
+    # build. Its build script runs its own cmake, so suppress the nixpkgs cmake
+    # configure hook (there's no CMakeLists at the crate root).
+    nativeBuildInputs = [
+      cmake
+      pkg-config
+    ];
+    dontUseCmakeConfigure = true;
+
+    # No unit tests in the crate; skip crane's default `cargo test` phase.
+    doCheck = false;
+  };
+
+  # The dependency closure (aws-lc-rs, the chromiumoxide git fork, rustls, …)
+  # built on its own. Keyed on Cargo.lock + toolchain, independent of src/, so
+  # source-only changes reuse it — this is the layer the Nix store / magic-nix-
+  # cache reuses across builds. Git deps (the fork) are fetched from Cargo.lock;
+  # no manual outputHashes needed.
+  cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 in
-rustPlatform.buildRustPackage {
-  pname = "browser-session-mcp";
-  inherit version;
+craneLib.buildPackage (
+  commonArgs
+  // {
+    inherit cargoArtifacts;
+    nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ makeWrapper ];
 
-  src = lib.cleanSourceWith {
-    src = ./.;
-    filter =
-      path: _type:
-      let
-        base = baseNameOf path;
-      in
-      !(
-        base == "package.nix"
-        || base == "flake.nix"
-        || base == "flake.lock"
-        || base == "frontend" # built separately as `frontend`; not part of the Rust build
-        || base == "target"
-        || base == "result"
-        || base == ".direnv"
-        || lib.hasSuffix ".log" base
-      );
-  };
+    # `browser-session takeover` serves the built Astro UI from TAKEOVER_WEBROOT.
+    # Wrapping the one multi-call binary is harmless for the other subcommands.
+    postInstall = ''
+      wrapProgram $out/bin/browser-session \
+        --set TAKEOVER_WEBROOT ${frontend}
+    '';
 
-  cargoLock = {
-    lockFile = ./Cargo.lock;
-    # chromiumoxide is our git fork (see [patch.crates-io] in Cargo.toml). It is a
-    # workspace, so the fork supplies all four member crates via git; they share
-    # one checkout and therefore one hash. Recompute after bumping the fork rev:
-    #   nix run nixpkgs#nix-prefetch-git -- \
-    #     --url https://github.com/xav-ie/chromiumoxide.git --rev <rev>
-    outputHashes =
-      let
-        forkHash = "sha256-rSZ5ruvRZK+C7vZxT2r1M8ywW4zUcTfPkp48P0RoidE=";
-      in
-      {
-        "chromiumoxide-0.9.1" = forkHash;
-        "chromiumoxide_cdp-0.9.1" = forkHash;
-        "chromiumoxide_pdl-0.9.1" = forkHash;
-        "chromiumoxide_types-0.9.1" = forkHash;
-      };
-  };
-
-  # aws-lc-rs (pulled by reqwest's rustls-tls feature) needs cmake and a C
-  # toolchain at build time; makeWrapper to point the daemon at the built UI.
-  nativeBuildInputs = [
-    cmake
-    pkg-config
-    makeWrapper
-  ];
-
-  # aws-lc-rs's build script invokes cmake which expects to manage its own
-  # build dir; nixpkgs' default cmake hook gets in the way.
-  dontUseCmakeConfigure = true;
-
-  doCheck = false;
-
-  # `browser-session takeover` serves the built Astro UI from TAKEOVER_WEBROOT.
-  # Wrapping the one multi-call binary is harmless for the other subcommands.
-  postInstall = ''
-    wrapProgram $out/bin/browser-session \
-      --set TAKEOVER_WEBROOT ${frontend}
-  '';
-
-  meta = {
-    description = "MCP server giving each caller an isolated browser session against a shared persistent Chrome, with a human-takeover web UI.";
-    license = lib.licenses.mit;
-    platforms = lib.platforms.unix;
-    mainProgram = "browser-session";
-  };
-}
+    meta = {
+      description = "MCP server giving each caller an isolated browser session against a shared persistent Chrome, with a human-takeover web UI.";
+      license = lib.licenses.mit;
+      platforms = lib.platforms.unix;
+      mainProgram = "browser-session";
+    };
+  }
+)

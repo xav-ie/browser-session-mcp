@@ -43,12 +43,14 @@ jobs:
     name: build (x86-64 linux)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # magic-nix-cache needs the OIDC token to talk to the GitHub Actions cache.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v30
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
       - run: |
           nix build -L \
             ".#checks.x86_64-linux.build" \
@@ -62,6 +64,9 @@ jobs:
     needs: build-linux
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - name: Enable KVM for the runner user
@@ -70,10 +75,8 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - uses: cachix/install-nix-action@v30
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
       - run: nix build -L ".#checks.x86_64-linux.smoke"
 
   # Builds the aarch64-darwin package output via Nix on an arm64 macOS runner,
@@ -84,10 +87,11 @@ jobs:
     name: build (aarch64-darwin)
     runs-on: macos-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v30
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
       - run: nix build -L ".#packages.aarch64-darwin.default"
