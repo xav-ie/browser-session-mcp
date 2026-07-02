@@ -268,13 +268,23 @@ print(json.dumps({"jsonrpc":"2.0","id":16,"method":"tools/call","params":{
 CLOSE=$(req "$CLOSE_REQ")
 check "close_browser_session succeeds" "$CLOSE" 'Closed'
 
-# State file should no longer mention the session.
-if [[ -f $STATE_FILE ]] && grep -q "$SID" "$STATE_FILE"; then
-  echo "[FAIL] state.json still references closed session"
-  FAIL=$((FAIL + 1))
-else
+# State file should no longer mention the session. State writes are debounced
+# (~1s, see src/state.rs), so poll for a few seconds rather than checking the
+# instant close returns — otherwise this races the background flusher.
+cleared=0
+for _ in $(seq 1 20); do
+  if [[ ! -f $STATE_FILE ]] || ! grep -q "$SID" "$STATE_FILE"; then
+    cleared=1
+    break
+  fi
+  sleep 0.25
+done
+if ((cleared)); then
   echo "[PASS] state.json cleared closed session"
   PASS=$((PASS + 1))
+else
+  echo "[FAIL] state.json still references closed session"
+  FAIL=$((FAIL + 1))
 fi
 
 echo

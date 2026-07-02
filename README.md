@@ -398,6 +398,39 @@ TAKEOVER_WEBROOT=$PWD/webroot CHROME_WS_BASE=ws://localhost:9222 \
   ./browser-session takeover
 ```
 
+### NixOS module
+
+The flake exports `nixosModules.default`, which runs the host-side stack — a
+persistent headless Chrome plus the `listener`, `reaper` and `takeover` daemons —
+as systemd units sharing one state dir. (The MCP server itself is a stdio
+subprocess your MCP client/proxy spawns; it is not a daemon, so the module does
+not manage it — point it at the same `stateDir` and `browserUrl`.)
+
+```nix
+{
+  inputs.browser-session-mcp.url = "github:xav-ie/browser-session-mcp";
+
+  # in your NixOS configuration:
+  imports = [ inputs.browser-session-mcp.nixosModules.default ];
+
+  services.browser-session = {
+    enable = true;
+    chrome.package = pkgs.chrome-headless-shell; # or chromium (+ chrome.executable)
+    # Required once takeover is enabled — the public CDP WebSocket base the
+    # takeover page connects to directly:
+    takeover.chromeWsBase = "wss://chrome.example.com";
+    # Optional: real-GPU WebGL, idle policy, external Chrome, etc.
+    # chrome.extraArgs = [ "--use-gl=angle" "--use-angle=vulkan" ];
+    # reaper.maxIdleHours = 2;
+  };
+}
+```
+
+`package` defaults to this flake's build for the host's system. Key options:
+`stateDir`, `browserUrl`, `chrome.{enable,port,dataDir,extraArgs,environment}`,
+`listener.enable`, `reaper.{interval,maxIdleHours}`, `takeover.{address,port}`.
+Reverse-proxy/TLS routing to Chrome and the takeover daemon is left to you.
+
 ### Environment
 
 `browser-session mcp` (the MCP server):
