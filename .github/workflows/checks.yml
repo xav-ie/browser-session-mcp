@@ -76,17 +76,18 @@ jobs:
             experimental-features = nix-command flakes
       - run: nix build -L ".#checks.x86_64-linux.smoke"
 
-  # Compiles the binary on macOS (arm64 runner) with plain cargo — the same
-  # path the prebuilt macOS release tarballs take — so a regression that only
-  # breaks Apple targets is caught. This mirrors the *release* toolchain rather
-  # than `nix build .#packages.aarch64-darwin.default`, which the flake now also
-  # exposes but is not exercised here.
+  # Builds the aarch64-darwin package output via Nix on an arm64 macOS runner,
+  # so the Darwin build path the flake exposes is actually exercised (the same
+  # reproducible build Nix users on macOS get). macos-latest is arm64, matching
+  # aarch64-darwin.
   build-darwin:
     name: build (aarch64-darwin)
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --bins
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix build -L ".#packages.aarch64-darwin.default"
