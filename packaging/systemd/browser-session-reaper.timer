@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic reaper for browser-session
+
+[Timer]
+# Give Chrome a chance to come up before the first sweep.
+OnBootSec=5min
+OnUnitActiveSec=30min
+# Catch up if a run was missed while powered off.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

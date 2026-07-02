@@ -96,6 +96,8 @@ jobs:
           mkdir -p "${stage}"
           cp "target/${{ matrix.target }}/release/browser-session" "${stage}/"
           cp -r webroot "${stage}/webroot"
+          # systemd units + env example for running the daemons without Nix.
+          cp -r packaging/systemd "${stage}/systemd"
           cp README.md LICENSE "${stage}/"
           tar -C staging -czf "${name}.tar.gz" "${name}"
           # macOS ships `shasum -a 256`, not GNU `sha256sum`; both emit the

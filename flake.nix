@@ -68,6 +68,16 @@
                     package = config.packages.browser-session-mcp;
                     chrome.package = pkgs.ungoogled-chromium;
                     chrome.executable = "chromium";
+                    # The module targets chrome-headless-shell (headless by
+                    # default); plain chromium must be told to run headless AND
+                    # to use the headless ozone backend (old `--headless` is a
+                    # no-op in current chromium, so it still tries X11), and the
+                    # VM has no GPU.
+                    chrome.extraArgs = [
+                      "--headless=new"
+                      "--ozone-platform=headless"
+                      "--disable-gpu"
+                    ];
                     # takeover asserts a non-empty chromeWsBase; the daemon only
                     # binds + serves here (nothing connects), so a dummy suffices.
                     takeover.chromeWsBase = "ws://127.0.0.1:9222";

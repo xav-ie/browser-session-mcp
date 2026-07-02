@@ -1,0 +1,9 @@
+[Unit]
+Description=Close idle browser-session sessions
+# After=chrome-headless.service   # if you run Chrome as a unit
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/browser-session/browser-session.env
+ExecStart=/usr/local/bin/browser-session reaper
+StateDirectory=browser-session

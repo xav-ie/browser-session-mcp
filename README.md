@@ -431,6 +431,14 @@ not manage it — point it at the same `stateDir` and `browserUrl`.)
 `listener.enable`, `reaper.{interval,maxIdleHours}`, `takeover.{address,port}`.
 Reverse-proxy/TLS routing to Chrome and the takeover daemon is left to you.
 
+### Running the daemons without Nix (systemd)
+
+The release tarball bundles a `systemd/` directory: units for the `listener`,
+`reaper` (+ timer) and `takeover` roles, plus a `browser-session.env` you point
+them at. See [`packaging/systemd/README.md`](packaging/systemd/README.md) for the
+install steps (drop the binary in `/usr/local/bin`, the units in
+`/etc/systemd/system`, edit the env file, `systemctl enable --now`).
+
 ### Environment
 
 `browser-session mcp` (the MCP server):
