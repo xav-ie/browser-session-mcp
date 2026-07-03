@@ -9,6 +9,23 @@
   pnpm_10,
   pnpmConfigHook,
   fetchPnpmDeps,
+  # Wrap the binary to bake in TAKEOVER_WEBROOT. NixOS/dev builds want this so
+  # `takeover` finds the UI with zero config. The portable release build sets
+  # this false: a wrapper is a `/nix/store/…/bash` shebang script, so it would
+  # not run on a non-Nix host even over a fully static binary — the release ships
+  # the UI in the tarball and points at it via the systemd env instead.
+  # (Not named `wrap`: nixpkgs has a `wrap` package, which callPackage would
+  # inject over this default.)
+  wrapUi ? true,
+  # Portable static Linux release build. `staticTarget` is a musl triple (e.g.
+  # "x86_64-unknown-linux-musl"); the caller must pass a `craneLib` whose rust
+  # toolchain has that target (rust-overlay's self-contained musl honours
+  # `+crt-static`, unlike nixpkgs' cross-musl which links dynamic). `staticCc` is
+  # a musl C toolchain used to compile aws-lc's C for the target. Both null → an
+  # ordinary (dynamic, glibc) build. With them set, the result has no dynamic
+  # loader and runs on any Linux host, Nix or not.
+  staticTarget ? null,
+  staticCc ? null,
 }:
 let
   version = "0.1.0";
@@ -77,6 +94,16 @@ let
 
     # No unit tests in the crate; skip crane's default `cargo test` phase.
     doCheck = false;
+  }
+  # Static musl release: target musl + force the static C runtime (self-contained
+  # musl from the caller's toolchain → no dynamic loader), and point aws-lc's C
+  # build at the musl cc. aws-lc-rs ships pre-generated bindings for both
+  # x86_64/aarch64 musl, so no bindgen/libclang is pulled in.
+  // lib.optionalAttrs (staticTarget != null) {
+    CARGO_BUILD_TARGET = staticTarget;
+    CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
+    "CC_${lib.replaceStrings [ "-" ] [ "_" ] staticTarget}" =
+      "${staticCc}/bin/${staticCc.targetPrefix}cc";
   };
 
   # The dependency closure (aws-lc-rs, the chromiumoxide git fork, rustls, …)
@@ -90,6 +117,8 @@ craneLib.buildPackage (
   commonArgs
   // {
     inherit cargoArtifacts;
+  }
+  // lib.optionalAttrs wrapUi {
     nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ makeWrapper ];
 
     # `browser-session takeover` serves the built Astro UI from TAKEOVER_WEBROOT.
@@ -98,7 +127,8 @@ craneLib.buildPackage (
       wrapProgram $out/bin/browser-session \
         --set TAKEOVER_WEBROOT ${frontend}
     '';
-
+  }
+  // {
     meta = {
       description = "MCP server giving each caller an isolated browser session against a shared persistent Chrome, with a human-takeover web UI.";
       license = lib.licenses.mit;

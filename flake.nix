@@ -7,6 +7,11 @@
     crane.url = "github:ipetkov/crane";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
+    # Provides a rust toolchain with the musl target added, whose self-contained
+    # musl honours `+crt-static` — the only reliable way to get a fully static
+    # (portable, non-Nix) release binary. Used only by `packages.release`.
+    rust-overlay.url = "github:oxalica/rust-overlay";
+    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -18,6 +23,9 @@
           "x86_64-linux"
           "aarch64-linux"
           "aarch64-darwin"
+          # Intel macOS: only to expose packages.x86_64-darwin.release for the
+          # release tarball (CI's Nix checks don't target it).
+          "x86_64-darwin"
         ];
         imports = [ inputs.treefmt-nix.flakeModule ];
 
@@ -39,6 +47,7 @@
             config,
             lib,
             pkgs,
+            system,
             ...
           }:
           {
@@ -47,6 +56,16 @@
                 craneLib = inputs.crane.mkLib pkgs;
               };
               default = config.packages.browser-session-mcp;
+
+              # Unwrapped binary for the release tarball. On Darwin this is an
+              # ordinary Nix build — macOS cannot be statically linked (libSystem
+              # is always dynamic), so the darwin tarball's binary needs /nix/store
+              # present, i.e. Nix installed. On Linux this attr is replaced below
+              # by a fully static musl build that runs on any host.
+              release = pkgs.callPackage ./package.nix {
+                craneLib = inputs.crane.mkLib pkgs;
+                wrapUi = false;
+              };
             }
             # Portable systemd units for the release tarball, generated from
             # nixos-module.nix so they can't drift from what NixOS users run.
@@ -56,6 +75,37 @@
                 nixpkgs = inputs.nixpkgs;
                 system = pkgs.stdenv.hostPlatform.system;
               };
+
+              # Fully static (musl) release binary: no dynamic loader, so nothing
+              # points into /nix/store and it runs on any Linux host, Nix or not.
+              #
+              # Recipe (crane's documented one): a rust-overlay toolchain with the
+              # musl target added — its self-contained musl honours `+crt-static`,
+              # unlike nixpkgs' cross-musl (dynamic) or pkgsStatic (forces the
+              # host-side build scripts static → they fail to link glibc). aws-lc's
+              # C is compiled for the target by the musl cc borrowed from the
+              # nixpkgs cross set (proven to build aws-lc under musl).
+              release =
+                let
+                  isArm = pkgs.stdenv.hostPlatform.isAarch64;
+                  muslTarget = if isArm then "aarch64-unknown-linux-musl" else "x86_64-unknown-linux-musl";
+                  muslCc =
+                    (if isArm then pkgs.pkgsCross.aarch64-multiplatform-musl else pkgs.pkgsCross.musl64).stdenv.cc;
+                  rustPkgs = import inputs.nixpkgs {
+                    inherit system;
+                    overlays = [ inputs.rust-overlay.overlays.default ];
+                  };
+                  toolchain = rustPkgs.rust-bin.stable.latest.default.override {
+                    targets = [ muslTarget ];
+                  };
+                  craneLibMusl = (inputs.crane.mkLib pkgs).overrideToolchain toolchain;
+                in
+                pkgs.callPackage ./package.nix {
+                  craneLib = craneLibMusl;
+                  wrapUi = false;
+                  staticTarget = muslTarget;
+                  staticCc = muslCc;
+                };
             };
 
             checks = {

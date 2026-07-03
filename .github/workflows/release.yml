@@ -70,40 +70,36 @@ jobs:
           path: systemd
           if-no-files-found: error
 
-  # One native runner per target — no cross-compilation, so aws-lc-rs (pulled by
-  # reqwest's rustls) builds against the host toolchain with just cmake + cc.
+  # Build every target's release binary with Nix (`.#release` resolves to the
+  # runner's own system). Linux → fully static musl, portable to any Linux, Nix
+  # or not. macOS → an ordinary Nix build: macOS can't be statically linked, so
+  # those binaries resolve libraries through /nix/store and only run where Nix is
+  # installed (a NOTE-macos.txt in the tarball says so).
   build:
     needs: [frontend, systemd]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             runner: macos-latest
           - target: x86_64-apple-darwin
             runner: macos-13
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
 
-      # aws-lc-rs's build script drives cmake; the Linux images ship a C
-      # toolchain but pin cmake explicitly so the build never depends on it
-      # being preinstalled. (The macOS images already carry cmake + clang.)
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - run: cargo build --release --bins --target ${{ matrix.target }}
+      - run: nix build -L .#release
 
       - uses: actions/download-artifact@v4
         with:
@@ -127,12 +123,23 @@ jobs:
           name="browser-session-${version}-${{ matrix.target }}"
           stage="staging/${name}"
           mkdir -p "${stage}"
-          cp "target/${{ matrix.target }}/release/browser-session" "${stage}/"
+          install -m755 "$(readlink -f result)/bin/browser-session" "${stage}/browser-session"
           cp -r webroot "${stage}/webroot"
           # systemd units (generated from nixos-module.nix) + env example for
           # running the daemons without Nix.
           cp -r systemd "${stage}/systemd"
           cp README.md LICENSE "${stage}/"
+          # macOS binaries are Nix-built, not static — flag that they need Nix.
+          case "${{ matrix.target }}" in
+            *-apple-darwin)
+              printf '%s\n' \
+                'This macOS binary is built by Nix and is NOT statically linked' \
+                '(macOS cannot be). Its libraries resolve through /nix/store, so it' \
+                'only runs on a machine with Nix installed. Without Nix, build from' \
+                'source (cargo build --release) or use the flake/NixOS module.' \
+                > "${stage}/NOTE-macos.txt"
+              ;;
+          esac
           tar -C staging -czf "${name}.tar.gz" "${name}"
           # macOS ships `shasum -a 256`, not GNU `sha256sum`; both emit the
           # same "<hash>  <file>" format the release job concatenates.

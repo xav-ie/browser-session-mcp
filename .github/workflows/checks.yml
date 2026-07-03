@@ -55,7 +55,8 @@ jobs:
           nix build -L \
             ".#checks.x86_64-linux.build" \
             ".#checks.x86_64-linux.treefmt" \
-            ".#packages.x86_64-linux.systemd-units"
+            ".#packages.x86_64-linux.systemd-units" \
+            ".#packages.x86_64-linux.release"
 
   # NixOS VM integration test (checks.smoke): boots a VM running the real
   # nixos-module.nix stack and drives the full MCP surface. VM tests need
