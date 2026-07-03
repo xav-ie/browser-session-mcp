@@ -10,6 +10,15 @@ your MCP client/proxy spawns — not a daemon — so it has no unit here. You al
 need a **Chrome exposing the DevTools Protocol** running separately (the units
 talk to it via `BROWSER_URL`).
 
+The `.service`/`.timer` files ship in the tarball's `systemd/` directory
+alongside this README, but are **generated from `nixos-module.nix`** (via `nix
+build .#systemd-units`) so they never drift from what NixOS users run. Don't
+hand-edit them: the store paths are rewritten to `/usr/local/bin`, the module's
+`Environment=` defaults are baked in, and every unit carries
+`EnvironmentFile=-/etc/browser-session/browser-session.env` — so the env file
+below overrides those defaults without touching the units. `browser-session.env`
+is the one file you edit.
+
 ## Install
 
 From the extracted release tarball (`browser-session-<ver>-<target>/`):

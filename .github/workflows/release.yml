@@ -42,10 +42,38 @@ jobs:
           path: frontend/dist
           if-no-files-found: error
 
+  # Generate the portable systemd units from nixos-module.nix once (they're
+  # platform-independent text) and ship them alongside the hand-written env +
+  # README. Generating rather than committing keeps them from drifting from the
+  # module NixOS users run.
+  systemd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Assemble systemd dir
+        run: |
+          set -euo pipefail
+          nix build -L .#systemd-units
+          mkdir -p systemd
+          cp result/*.service result/*.timer systemd/
+          cp packaging/systemd/browser-session.env packaging/systemd/README.md systemd/
+          chmod -R u+w systemd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: systemd
+          path: systemd
+          if-no-files-found: error
+
   # One native runner per target — no cross-compilation, so aws-lc-rs (pulled by
   # reqwest's rustls) builds against the host toolchain with just cmake + cc.
   build:
-    needs: frontend
+    needs: [frontend, systemd]
     strategy:
       fail-fast: false
       matrix:
@@ -82,6 +110,11 @@ jobs:
           name: webroot
           path: webroot
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: systemd
+          path: systemd
+
       - name: Package tarball
         id: package
         run: |
@@ -96,8 +129,9 @@ jobs:
           mkdir -p "${stage}"
           cp "target/${{ matrix.target }}/release/browser-session" "${stage}/"
           cp -r webroot "${stage}/webroot"
-          # systemd units + env example for running the daemons without Nix.
-          cp -r packaging/systemd "${stage}/systemd"
+          # systemd units (generated from nixos-module.nix) + env example for
+          # running the daemons without Nix.
+          cp -r systemd "${stage}/systemd"
           cp README.md LICENSE "${stage}/"
           tar -C staging -czf "${name}.tar.gz" "${name}"
           # macOS ships `shasum -a 256`, not GNU `sha256sum`; both emit the

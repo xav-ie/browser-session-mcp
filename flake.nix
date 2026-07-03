@@ -42,10 +42,21 @@
             ...
           }:
           {
-            packages.browser-session-mcp = pkgs.callPackage ./package.nix {
-              craneLib = inputs.crane.mkLib pkgs;
+            packages = {
+              browser-session-mcp = pkgs.callPackage ./package.nix {
+                craneLib = inputs.crane.mkLib pkgs;
+              };
+              default = config.packages.browser-session-mcp;
+            }
+            # Portable systemd units for the release tarball, generated from
+            # nixos-module.nix so they can't drift from what NixOS users run.
+            # Linux-only: it evaluates a NixOS system (no darwin equivalent).
+            // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+              systemd-units = pkgs.callPackage ./systemd-units.nix {
+                nixpkgs = inputs.nixpkgs;
+                system = pkgs.stdenv.hostPlatform.system;
+              };
             };
-            packages.default = config.packages.browser-session-mcp;
 
             checks = {
               # The package (all four binaries) must build.
