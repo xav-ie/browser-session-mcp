@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   # Frontend quality gates, one job per check so failures stay isolated.
   frontend:
@@ -23,11 +26,11 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           package_json_file: frontend/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
           cache: pnpm
@@ -43,14 +46,13 @@ jobs:
     name: build (x86-64 linux)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # magic-nix-cache needs the OIDC token to talk to the GitHub Actions cache.
     permissions:
       contents: read
-      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: ./.github/actions/nix-cache
+        with:
+          push-token: ${{ secrets.ATTIC_TOKEN }}
       - run: |
           nix build -L \
             ".#checks.x86_64-linux.build" \
@@ -68,17 +70,17 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Enable KVM for the runner user
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/nix-cache
+        with:
+          push-token: ${{ secrets.ATTIC_TOKEN }}
       - run: nix build -L ".#checks.x86_64-linux.smoke"
 
   # Builds the aarch64-darwin package output via Nix on an arm64 macOS runner,
@@ -91,9 +93,9 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: ./.github/actions/nix-cache
+        with:
+          push-token: ${{ secrets.ATTIC_TOKEN }}
       - run: nix build -L ".#packages.aarch64-darwin.default"
