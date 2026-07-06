@@ -1,0 +1,9 @@
+{
+  "name": "browser-session",
+  "description": "Isolated, long-lived Chrome automation over the Chrome DevTools Protocol — sessionId-addressed tools plus a browser-session-navigator agent that drives them.",
+  "version": "0.1.0",
+  "author": {
+    "name": "xav-ie"
+  },
+  "homepage": "https://github.com/xav-ie/browser-session-mcp"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "browser-session-mcp",
+  "owner": {
+    "name": "xav-ie"
+  },
+  "plugins": [
+    {
+      "name": "browser-session",
+      "source": "./plugin",
+      "description": "Drive an isolated, long-lived Chrome session over CDP — 28 sessionId-addressed tools (sessions, tabs, navigation, trusted input, accessibility snapshots, per-visit logs, stealth, human takeover, saved cookies) plus a browser-session-navigator agent."
+    }
+  ]
+}
