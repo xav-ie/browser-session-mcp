@@ -13,6 +13,10 @@ use crate::state::StateStore;
 /// caller can retry, instead of hanging the tool call forever.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Cap the liveness probe on a cached connection. Short, since it's a single
+/// cheap CDP round trip — anything slower than this means the socket is wedged.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 #[derive(Clone)]
 pub struct ChromeContext {
     browser_url: String,
@@ -43,13 +47,20 @@ impl ChromeContext {
         if let Some(c) = guard.as_ref() {
             // The handler task drives the chromiumoxide connection; once it
             // finishes, the WS is dead and any command sent over the cached
-            // Browser would hang forever waiting on a response that never
-            // comes. Drop the stale entry and reconnect instead.
-            if c.handler.is_finished() {
-                *guard = None;
-            } else {
+            // Browser would hang forever. But a half-open socket (TCP up, no
+            // data flowing) leaves the handler still awaiting, so is_finished()
+            // stays false while every command hangs. Actively probe with a
+            // cheap CDP round trip so a wedged connection reconnects instead of
+            // hanging — a bounded probe, not a per-command timeout, so slow
+            // page loads are never mistaken for a dead connection.
+            let alive = !c.handler.is_finished()
+                && timeout(PROBE_TIMEOUT, c.sessions.ping())
+                    .await
+                    .is_ok_and(|r| r.is_ok());
+            if alive {
                 return Ok(c.sessions.clone());
             }
+            *guard = None;
         }
         let (browser, handler) = timeout(CONNECT_TIMEOUT, chrome::connect(&self.browser_url))
             .await

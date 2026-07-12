@@ -145,6 +145,13 @@ impl SessionManager {
         &self.browser
     }
 
+    /// Cheap liveness probe: one `Target.getTargets` round trip. Errors if the
+    /// underlying WS is dead; hangs if it's half-open, so callers must bound it
+    /// with a timeout (see `ChromeContext::sessions`).
+    pub async fn ping(&self) -> Result<()> {
+        self.page_targets().await.map(|_| ())
+    }
+
     pub async fn open(
         &self,
         viewport: Option<Viewport>,
