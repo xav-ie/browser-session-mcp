@@ -368,12 +368,15 @@ impl SessionManager {
 
     pub async fn new_page(&self, session_id: &str, url: Option<&str>) -> Result<Page> {
         let ctx_id = self.context_id_for(session_id).await?;
-        let target_url = url.unwrap_or("about:blank").to_string();
+        // Open blank, apply the UA override and stealth script, and only then
+        // navigate. Creating the target with the real URL starts that request
+        // before the overrides land, so it goes out as `HeadlessChrome` while
+        // the page's JS later reports Chrome: a mismatch detectors look for.
         let page = self
             .browser
             .new_page(
                 CreateTargetParams::builder()
-                    .url(target_url)
+                    .url("about:blank")
                     .browser_context_id(ctx_id)
                     .build()
                     .map_err(|e| anyhow!("CreateTargetParams: {e}"))?,
@@ -384,6 +387,9 @@ impl SessionManager {
             self.apply_user_agent(&page, &override_).await?;
         }
         self.apply_stealth(&page).await?;
+        if let Some(url) = url {
+            page.goto(url).await.context("Page.navigate")?;
+        }
         // A freshly opened tab becomes the active one (matches prior behavior).
         self.set_active(session_id, &page.target_id().inner().to_string())
             .await;
