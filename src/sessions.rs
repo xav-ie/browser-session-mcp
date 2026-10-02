@@ -14,12 +14,13 @@ use chromiumoxide::cdp::browser_protocol::{
     emulation::SetDeviceMetricsOverrideParams,
     network::SetUserAgentOverrideParams,
     page::AddScriptToEvaluateOnNewDocumentParams,
+    page::GetLayoutMetricsParams,
     target::{
         CloseTargetParams, CreateBrowserContextParams, CreateTargetParams, GetTargetsParams,
         TargetId, TargetInfo,
     },
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -37,7 +38,7 @@ pub struct SessionInfo {
     pub active_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Viewport {
     pub width: i64,
     pub height: i64,
@@ -205,6 +206,7 @@ impl SessionManager {
             self.cleanup_failed_open(&session_id, ctx_id).await;
             return Err(err);
         }
+        self.state.set_viewport(&session_id, vp).await;
 
         self.state.touch(&session_id).await;
         Ok(SessionInfo {
@@ -292,6 +294,7 @@ impl SessionManager {
             .get_page(TargetId::new(target_id.as_str()))
             .await
             .context("Browser::get_page")?;
+        self.ensure_viewport(session_id, &page).await?;
         Ok(page)
     }
 
@@ -309,10 +312,13 @@ impl SessionManager {
         let t = ordered
             .get(index)
             .ok_or_else(|| anyhow!("no tab at index {index} (session has {n} tabs)"))?;
-        self.browser
+        let page = self
+            .browser
             .get_page(TargetId::new(t.target_id.inner()))
             .await
-            .context("Browser::get_page")
+            .context("Browser::get_page")?;
+        self.ensure_viewport(session_id, &page).await?;
+        Ok(page)
     }
 
     /// Make the tab at `index` active (subsequent active-page ops target it) and
@@ -387,6 +393,7 @@ impl SessionManager {
             self.apply_user_agent(&page, &override_).await?;
         }
         self.apply_stealth(&page).await?;
+        self.ensure_viewport(session_id, &page).await?;
         if let Some(url) = url {
             page.goto(url).await.context("Page.navigate")?;
         }
@@ -463,6 +470,28 @@ impl SessionManager {
             .await
             .context("Page.addScriptToEvaluateOnNewDocument")?;
         Ok(())
+    }
+
+    /// Make sure `page` renders at the session viewport, re-applying it only
+    /// when it doesn't. Checked against the live layout rather than remembered:
+    /// popups the page opens start at Chrome's window size, and the takeover
+    /// UI's own override replaces ours and, once its connection closes, leaves
+    /// the tab at the raw window size. `Page.getLayoutMetrics` runs no page JS.
+    /// Sessions from before viewports were stored get the `open` default.
+    async fn ensure_viewport(&self, session_id: &str, page: &Page) -> Result<()> {
+        let vp = self.state.viewport(session_id).await.unwrap_or_default();
+        let metrics = page
+            .execute(GetLayoutMetricsParams::default())
+            .await
+            .context("Page.getLayoutMetrics")?;
+        let layout = &metrics.result.css_layout_viewport;
+        // The layout viewport excludes scrollbars, so a scrolling page measures
+        // up to a scrollbar's width (15px here) under the emulated size.
+        let fits = |actual: i64, want: i64| actual <= want && want - actual <= 20;
+        if fits(layout.client_width, vp.width) && fits(layout.client_height, vp.height) {
+            return Ok(());
+        }
+        self.apply_viewport(page, vp).await
     }
 
     async fn apply_viewport(&self, page: &Page, vp: Viewport) -> Result<()> {

@@ -13,6 +13,7 @@ use tokio::{
     sync::{Mutex, Notify},
 };
 
+use crate::sessions::Viewport;
 use crate::user_agent::UaOverride;
 
 pub fn state_file() -> PathBuf {
@@ -31,6 +32,10 @@ pub struct SessionRecord {
         skip_serializing_if = "Option::is_none"
     )]
     pub user_agent_metadata: Option<serde_json::Value>,
+    /// Viewport chosen at `open_browser_session`, applied to every tab of the
+    /// session (not just the first) so screenshots and coordinates agree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<Viewport>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -135,6 +140,23 @@ impl StateStore {
         rec.user_agent_metadata = Some(override_.metadata.clone());
         guard.dirty = true;
         self.notify.notify_one();
+    }
+
+    pub async fn set_viewport(&self, session_id: &str, viewport: Viewport) {
+        let mut guard = self.inner.lock().await;
+        guard
+            .data
+            .sessions
+            .entry(session_id.to_string())
+            .or_default()
+            .viewport = Some(viewport);
+        guard.dirty = true;
+        self.notify.notify_one();
+    }
+
+    pub async fn viewport(&self, session_id: &str) -> Option<Viewport> {
+        let guard = self.inner.lock().await;
+        guard.data.sessions.get(session_id)?.viewport
     }
 
     pub async fn user_agent_override(&self, session_id: &str) -> Option<UaOverride> {
