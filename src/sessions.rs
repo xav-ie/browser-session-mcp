@@ -207,6 +207,12 @@ impl SessionManager {
             return Err(err);
         }
         self.state.set_viewport(&session_id, vp).await;
+        // Write now rather than on the flusher's delay: the listener's attach
+        // guard reads this session's UA from disk to mask popups, and a page can
+        // open one within that second.
+        if let Err(err) = self.state.flush_now().await {
+            tracing::warn!(error = %err, "state flush after open failed");
+        }
 
         self.state.touch(&session_id).await;
         Ok(SessionInfo {
