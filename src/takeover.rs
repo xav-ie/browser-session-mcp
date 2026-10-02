@@ -409,7 +409,14 @@ async fn handle_conn(mut stream: TcpStream, chrome_ws_base: &str) -> Result<()> 
         let cookie = extract_cookie(&head, "tk_claim");
         route(method, path, chrome_ws_base, cookie.as_deref()).await
     };
+    // Mark the claim cookie Secure whenever the browser reached us over a
+    // secure origin: https via the reverse proxy, or loopback (an SSH tunnel to
+    // http://localhost, which browsers treat as secure). Plain http to a LAN
+    // address would silently drop a Secure cookie and break Done, so that case
+    // keeps working without it.
+    let secure = cookie_secure(&String::from_utf8_lossy(&buf));
     let set_cookie = match &r.set_cookie {
+        Some(c) if secure => format!("Set-Cookie: {c}; Secure\r\n"),
         Some(c) => format!("Set-Cookie: {c}\r\n"),
         None => String::new(),
     };
@@ -446,6 +453,29 @@ impl Resp {
         self.set_cookie = Some(c);
         self
     }
+}
+
+/// Value of the first header called `name` (case-insensitive).
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
+fn cookie_secure(head: &str) -> bool {
+    if header(head, "x-forwarded-proto").is_some_and(|p| p.eq_ignore_ascii_case("https")) {
+        return true;
+    }
+    let host = header(head, "host").unwrap_or("");
+    let host = host.rsplit_once(':').map_or(host, |(h, port)| {
+        if port.chars().all(|c| c.is_ascii_digit()) {
+            h
+        } else {
+            host
+        }
+    });
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
 /// Pull a single cookie value out of the request headers (case-insensitive
@@ -646,4 +676,24 @@ fn valid_token(token: &str) -> bool {
 /// JSON-encode a string for safe embedding in a JSON response.
 fn js_str(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cookie_secure;
+
+    #[test]
+    fn secure_cookie_origins() {
+        let req = |h: &str| format!("POST /takeover/t/claim HTTP/1.1\r\n{h}\r\n\r\n");
+        assert!(cookie_secure(&req(
+            "Host: chrome-takeover.example.com\r\nX-Forwarded-Proto: https"
+        )));
+        assert!(cookie_secure(&req("Host: localhost:9223")));
+        assert!(cookie_secure(&req("host: 127.0.0.1:9223")));
+        assert!(cookie_secure(&req("Host: [::1]:9223")));
+        assert!(!cookie_secure(&req("Host: 192.168.1.5:9223")));
+        assert!(!cookie_secure(&req(
+            "Host: chrome-takeover.example.com\r\nX-Forwarded-Proto: http"
+        )));
+    }
 }
