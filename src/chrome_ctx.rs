@@ -29,6 +29,15 @@ struct Connected {
     handler: JoinHandle<()>,
 }
 
+impl Drop for Connected {
+    /// Dropping a JoinHandle detaches the task rather than cancelling it, and on
+    /// a half-open socket the handler would otherwise run forever. Abort it so
+    /// replacing or invalidating a connection actually tears the old one down.
+    fn drop(&mut self) {
+        self.handler.abort();
+    }
+}
+
 impl ChromeContext {
     pub fn new(browser_url: String, state: StateStore) -> Self {
         Self {

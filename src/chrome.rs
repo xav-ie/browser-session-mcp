@@ -54,8 +54,9 @@ pub async fn resolve_ws_endpoint(browser_url: &str) -> Result<String> {
 }
 
 /// Connect to Chrome and spawn the chromiumoxide event-loop handler. The
-/// returned `JoinHandle` should be kept alive for the lifetime of `Browser`;
-/// dropping it cancels the task and stops the connection.
+/// handler task drives the connection for the lifetime of `Browser`. Dropping
+/// the returned `JoinHandle` only detaches the task; call `abort()` on it to
+/// actually stop the connection.
 pub async fn connect(browser_url: &str) -> Result<(Browser, JoinHandle<()>)> {
     let ws = resolve_ws_endpoint(browser_url).await?;
     let (browser, mut handler) = Browser::connect(ws.clone())
