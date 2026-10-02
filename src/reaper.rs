@@ -2,10 +2,11 @@
 //!
 //! Reads the state file written by browser-session-mcp on each tool call,
 //! connects to Chrome, and disposes any context whose `lastUsedAt` is older
-//! than MAX_IDLE_HOURS. It then closes any `page` target that belongs to no
-//! MCP-tracked context — these are orphans opened outside the MCP (a headless
-//! automation Chrome has no human browsing it) that otherwise accumulate and
-//! pin a CPU core via SwiftShader. Prunes the state file afterwards.
+//! than MAX_IDLE_HOURS. With REAP_ORPHAN_TABS set, it then closes every `page`
+//! target in Chrome's default context — orphans opened outside the MCP that
+//! otherwise accumulate and pin a CPU core via SwiftShader. That is only safe
+//! on a dedicated automation Chrome with no human browsing it, so it is off by
+//! default. Prunes the state file afterwards.
 //!
 //! Usage: invoked from a NixOS systemd timer.
 //!
@@ -13,6 +14,7 @@
 //!   BROWSER_URL       (default: http://127.0.0.1:9222)
 //!   STATE_FILE        (default: /var/lib/browser-session-mcp/state.json)
 //!   MAX_IDLE_HOURS    (default: 24)
+//!   REAP_ORPHAN_TABS  (default: off; "1"/"true" closes default-context tabs)
 
 use anyhow::{Context, Result, anyhow};
 use chromiumoxide::cdp::browser_protocol::{
@@ -37,6 +39,8 @@ pub async fn run() -> Result<()> {
     if !max_idle_hours.is_finite() || max_idle_hours <= 0.0 {
         return Err(anyhow!("invalid MAX_IDLE_HOURS: {max_idle_hours}"));
     }
+    let reap_orphan_tabs = std::env::var("REAP_ORPHAN_TABS")
+        .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
 
     let mut sessions = read_state_file(&state_file)
         .await
@@ -55,10 +59,6 @@ pub async fn run() -> Result<()> {
         })
         .map(|(id, _)| id.clone())
         .collect();
-
-    // Every context the MCP knows about — pages in these are legitimately in
-    // use and must be left alone by the orphan sweep below.
-    let tracked: std::collections::HashSet<String> = sessions.keys().cloned().collect();
 
     println!(
         "Found {} idle session(s); connecting to Chrome…",
@@ -104,36 +104,42 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // Sweep orphan tabs: page targets in no MCP-tracked context. These are
-    // opened outside the MCP (stray automation, redirect chains) and never land
-    // in the state file, so the context reaping above can't touch them.
-    let targets = browser
-        .execute(GetTargetsParams::default())
-        .await
-        .context("Target.getTargets")?;
+    // Sweep orphan tabs: page targets in Chrome's default context. Every MCP
+    // session is a context from Target.createBrowserContext, which is exactly
+    // what getBrowserContexts lists (it omits the default context), so pages in
+    // a listed context are never touched here, even if the state file lost
+    // track of their session. Default-context pages were opened outside the MCP
+    // (stray automation, redirect chains), or by a human if this is someone's
+    // own Chrome, hence the opt-in.
     let mut orphans = 0usize;
-    for info in &targets.result.target_infos {
-        if info.r#type != "page" {
-            continue;
-        }
-        let in_tracked = info
-            .browser_context_id
-            .as_ref()
-            .is_some_and(|id| tracked.contains(id.inner()));
-        if in_tracked {
-            continue;
-        }
-        let target_id = TargetId::new(info.target_id.inner());
-        match browser.execute(CloseTargetParams::new(target_id)).await {
-            Ok(_) => {
-                orphans += 1;
-                println!(
-                    "Closed orphan tab {} ({})",
-                    info.target_id.inner(),
-                    info.url
-                );
+    if reap_orphan_tabs {
+        let targets = browser
+            .execute(GetTargetsParams::default())
+            .await
+            .context("Target.getTargets")?;
+        for info in &targets.result.target_infos {
+            if info.r#type != "page" {
+                continue;
             }
-            Err(err) => eprintln!("Failed to close orphan {}: {err}", info.target_id.inner()),
+            let in_session_context = info
+                .browser_context_id
+                .as_ref()
+                .is_some_and(|id| existing_ids.contains(id.inner()));
+            if in_session_context {
+                continue;
+            }
+            let target_id = TargetId::new(info.target_id.inner());
+            match browser.execute(CloseTargetParams::new(target_id)).await {
+                Ok(_) => {
+                    orphans += 1;
+                    println!(
+                        "Closed orphan tab {} ({})",
+                        info.target_id.inner(),
+                        info.url
+                    );
+                }
+                Err(err) => eprintln!("Failed to close orphan {}: {err}", info.target_id.inner()),
+            }
         }
     }
 

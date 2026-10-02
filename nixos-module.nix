@@ -169,6 +169,17 @@ in
         default = 24;
         description = "Close sessions idle longer than this many hours.";
       };
+      closeOrphanTabs = lib.mkOption {
+        type = lib.types.bool;
+        default = cfg.chrome.enable;
+        defaultText = lib.literalExpression "config.services.browser-session.chrome.enable";
+        description = ''
+          Also close every tab in Chrome's default context (tabs opened outside
+          the MCP). Only safe on a dedicated automation Chrome, so it defaults on
+          just for the Chrome this module runs. Tabs inside session contexts are
+          never closed by this sweep.
+        '';
+      };
     };
 
     takeover = {
@@ -282,6 +293,9 @@ in
             BROWSER_URL = cfg.browserUrl;
             STATE_FILE = "${cfg.stateDir}/state.json";
             MAX_IDLE_HOURS = toString cfg.reaper.maxIdleHours;
+          }
+          // lib.optionalAttrs cfg.reaper.closeOrphanTabs {
+            REAP_ORPHAN_TABS = "1";
           };
           serviceConfig = {
             Type = "oneshot";
