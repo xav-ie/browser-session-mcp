@@ -82,7 +82,15 @@ removes the common headless/automation tells:
   matching `Sec-CH-UA-*` metadata so `HeadlessChrome` never leaks. Default is
   Chrome-on-Linux desktop; `useMobileUA: true` switches to Chrome-on-Android
   (Pixel 8). The version is read live from the real Chrome so hints stay
-  consistent.
+  consistent, and the GREASE brand is derived from it the way Chrome does.
+- **New tabs are masked before their first request.** The listener holds a
+  browser-wide auto-attach that creates every new tab paused, applies its
+  session's UA override and init script, then resumes it, so popups and
+  `target=_blank` links never send `HeadlessChrome`. (A `target=_blank`
+  link's first client hints are computed before the tab exists, so that one
+  request's `Sec-CH-UA*` headers are rewritten via `Fetch` interception.) If the
+  listener dies, Chrome releases held tabs; only a listener that hangs while
+  alive would stall new tabs.
 - **JS tell masking.** An init script (run before page scripts, on every tab)
   hides `navigator.webdriver`, installs a realistic PDF plugin set and
   `window.chrome.runtime`, etc. WebGL is deliberately *not* spoofed — Chrome

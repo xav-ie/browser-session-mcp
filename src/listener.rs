@@ -108,6 +108,27 @@ async fn run_once(browser_url: String, writer: LogWriter) -> Result<()> {
     // popups) get the same masking. None if the version probe fails.
     let ua = user_agent::resolve(&browser, false).await.ok();
 
+    // Pause-and-mask new tabs before their first request (see attach_guard).
+    // Lives as long as this connection; restarts if its own socket drops.
+    let guard_url = browser_url.clone();
+    let guard_ua = ua.clone();
+    let guard = tokio::spawn(async move {
+        loop {
+            if let Err(err) = crate::attach_guard::run(&guard_url, guard_ua.clone()).await {
+                tracing::warn!(error = %err, "attach guard stopped; restarting");
+            }
+            tokio::time::sleep(RECONNECT_BACKOFF).await;
+        }
+    });
+    // Aborted on every exit path, including `?` returns below.
+    struct AbortOnDrop(tokio::task::JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _guard = AbortOnDrop(guard);
+
     let wired: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
     // Wire every page we know about so far.

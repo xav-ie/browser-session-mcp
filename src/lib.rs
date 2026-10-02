@@ -1,3 +1,4 @@
+pub mod attach_guard;
 pub mod chrome;
 pub mod chrome_ctx;
 pub mod listener;
