@@ -182,6 +182,7 @@ struct InflightRequest {
     resource_type: Option<ResourceType>,
     status: Option<i64>,
     post_data: Option<String>,
+    redirected_to: Option<String>,
 }
 
 #[derive(Debug)]
@@ -344,7 +345,7 @@ async fn target_loop(page: Page, writer: LogWriter, ua: Option<UaOverride>) -> R
                 None => break,
             },
             e = req_sent.next() => match e {
-                Some(e) => on_request_will_be_sent(&state, &e).await,
+                Some(e) => on_request_will_be_sent(&writer, &state, &e).await,
                 None => break,
             },
             e = resp.next() => match e {
@@ -414,7 +415,22 @@ async fn on_frame_navigated(
     }
 }
 
-async fn on_request_will_be_sent(state: &Arc<Mutex<TargetState>>, e: &EventRequestWillBeSent) {
+async fn on_request_will_be_sent(
+    writer: &LogWriter,
+    state: &Arc<Mutex<TargetState>>,
+    e: &EventRequestWillBeSent,
+) {
+    // A redirect reuses the requestId, so this event would overwrite the
+    // previous hop. Write that hop out first with its 3xx status and where it
+    // went, or redirect chains (logins, tracking hops) vanish from the log.
+    if let Some(redirect) = e.redirect_response.as_ref() {
+        let hop = state.lock().await.inflight.remove(e.request_id.inner());
+        if let Some(mut hop) = hop {
+            hop.status = Some(redirect.status);
+            hop.redirected_to = Some(e.request.url.clone());
+            write_network(writer, state, hop, None).await;
+        }
+    }
     let mut s = state.lock().await;
     let seq = s.current_seq;
     s.inflight.insert(
@@ -427,6 +443,7 @@ async fn on_request_will_be_sent(state: &Arc<Mutex<TargetState>>, e: &EventReque
             frame_id: e.frame_id.as_ref().map(|f| f.inner().to_string()),
             resource_type: e.r#type.clone(),
             status: None,
+            redirected_to: None,
             // Chrome inlines the request body in `postDataEntries` (base64) for
             // small bodies; decode + concat so callers see e.g. analytics POST
             // payloads. Larger bodies only set `has_post_data` (not fetched here).
@@ -502,6 +519,7 @@ async fn write_network(
         status: inf.status,
         failure,
         post_data: inf.post_data,
+        redirected_to: inf.redirected_to,
     };
     if let Err(err) = writer
         .append_network(&ctx_id, inf.seq, &target_id, entry)

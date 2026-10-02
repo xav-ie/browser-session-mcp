@@ -67,6 +67,10 @@ pub struct NetworkEntry {
     /// page POSTed (e.g. analytics pixel payloads) without a per-page JS hook.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_data: Option<String>,
+    /// For a redirect hop (3xx `status`): the URL it redirected to. The next
+    /// hop is logged as its own entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirected_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -687,7 +687,11 @@ impl BrowserSessionServer {
                             Some(b) => format!("  body={b}"),
                             None => String::new(),
                         };
-                        Some(format!("{} {} [{status}]{body}", n.method, n.url))
+                        let redirect = match &n.redirected_to {
+                            Some(to) => format!("  -> {to}"),
+                            None => String::new(),
+                        };
+                        Some(format!("{} {} [{status}]{redirect}{body}", n.method, n.url))
                     }
                     _ => None,
                 })
