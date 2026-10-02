@@ -1320,7 +1320,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "stop_profiling",
-            "Stop the CPU profiler started by start_profiling, save a .cpuprofile (flame graph in DevTools Performance panel or speedscope.app) and return the culprits: longest main-thread busy stretches with their heaviest stack, top functions by self and total time (with url:line:col), and self time per script. If page JS is hung, the renderer can't answer until it yields, so after `terminateAfterMs` (default 5000; 0 disables) the running script is terminated to get the profile out. `top` (default 15) caps each list; `timeout` (ms, default 30000) bounds the stop call.",
+            "Stop the CPU profiler started by start_profiling, save a .cpuprofile (flame graph in DevTools Performance panel or speedscope.app) and return the culprits: long tasks (>=50ms) split into JS vs browser-native (parse/style/layout) vs GC time with their top scripts, top JS functions and heaviest JS stack, top functions by self and total time (with url:line:col), and self time per script. If page JS is hung, the renderer can't answer until it yields, so after `terminateAfterMs` (default 5000; 0 disables) the running script is terminated to get the profile out. `top` (default 15) caps each list; `timeout` (ms, default 30000) bounds the stop call.",
             object_schema(
                 &[
                     ("sessionId", &str_t),

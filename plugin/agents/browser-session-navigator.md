@@ -72,8 +72,10 @@ requests for the relevant visit.
 
 **Profiling** — `start_profiling({ sessionId, tabIndex? })`, reproduce the
 slowness or freeze, then `stop_profiling({ sessionId, tabIndex? })`. It returns
-the long tasks with their heaviest stack, the hottest functions with
-`url:line:col`, and the path of a `.cpuprofile` flame graph. A hung page is
+each long task split into JS, browser-native (parse/style/layout) and GC time
+with the scripts and functions behind it, the hottest functions with
+`url:line:col`, and the path of a `.cpuprofile` flame graph. A task that is
+mostly browser-native points at DOM/layout churn rather than one slow script. A hung page is
 handled: after `terminateAfterMs` (default 5000) the stuck script is terminated
 so the profile still comes back.
 

@@ -109,7 +109,7 @@ pub struct Summary {
     pub top_self: Vec<FnStat>,
     pub top_total: Vec<FnStat>,
     pub top_scripts: Vec<ScriptStat>,
-    pub longest_busy: Vec<BusyStretch>,
+    pub long_tasks: Vec<LongTask>,
 }
 
 #[derive(Debug, Serialize)]
@@ -131,11 +131,23 @@ pub struct ScriptStat {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BusyStretch {
+pub struct LongTask {
     /// Offset from profile start.
     pub start_ms: f64,
     pub duration_ms: f64,
-    /// Heaviest stack in the stretch, innermost frame first.
+    /// Browser-native work V8 can't attribute to a script: parsing, style,
+    /// layout, paint. A task dominated by this is layout/DOM churn, not one
+    /// slow function.
+    pub native_ms: f64,
+    pub gc_ms: f64,
+    /// JS functions with the most self time in this task (`percent` is of the
+    /// task).
+    pub top_js: Vec<FnStat>,
+    /// Scripts with the most self time in this task (`percent` is of the
+    /// task). Usually the clearest culprit: a task's self time is often spread
+    /// thin across many small functions of one script.
+    pub top_scripts: Vec<ScriptStat>,
+    /// Stack of the heaviest JS frame, innermost first.
     pub stack: Vec<String>,
 }
 
@@ -260,32 +272,73 @@ pub fn summarize(p: &Profile, top: usize) -> Summary {
     // Only long tasks (>=50ms, the browser's own threshold) make a page janky.
     runs.retain(|r| r.2 >= LONG_TASK_US);
     runs.sort_by(|a, b| b.2.total_cmp(&a.2));
-    let longest_busy = runs
+    let long_tasks = runs
         .iter()
         .take(top.min(5))
         .map(|&(s, e, d)| {
-            let mut weight: HashMap<i64, f64> = HashMap::new();
+            let (mut native_us, mut gc_us) = (0.0, 0.0);
+            let mut js_node_us: HashMap<i64, f64> = HashMap::new();
+            let mut js_fn_us: HashMap<(String, String), f64> = HashMap::new();
+            let mut script_us: HashMap<String, f64> = HashMap::new();
             for (j, &id) in samples.iter().enumerate().take(e).skip(s) {
-                *weight.entry(id).or_default() += dur_us(j);
+                let Some(n) = by_id.get(&id) else { continue };
+                let us = dur_us(j);
+                match n.call_frame.function_name.as_str() {
+                    "(program)" => native_us += us,
+                    "(garbage collector)" => gc_us += us,
+                    name if is_meta(name) => {}
+                    _ => {
+                        *js_node_us.entry(id).or_default() += us;
+                        *js_fn_us.entry((label(n), location(n))).or_default() += us;
+                        if !n.call_frame.url.is_empty() {
+                            *script_us.entry(n.call_frame.url.clone()).or_default() += us;
+                        }
+                    }
+                }
             }
-            let heaviest = weight
+            // Heaviest JS leaf, skipping native/GC samples: those carry no
+            // stack, so picking them would hide whatever JS the task ran.
+            let stack = js_node_us
                 .into_iter()
                 .max_by(|a, b| a.1.total_cmp(&b.1))
-                .map(|(id, _)| id);
-            let stack = heaviest
-                .map(|id| {
+                .map(|(id, _)| {
                     stack_of(id)
                         .into_iter()
                         .map(|sid| by_id[&sid])
-                        .filter(|n| n.call_frame.function_name != "(root)")
+                        .filter(|n| !is_meta(&n.call_frame.function_name))
                         .take(15)
                         .map(frame)
                         .collect()
                 })
                 .unwrap_or_default();
-            BusyStretch {
+            let mut top_js: Vec<_> = js_fn_us.into_iter().collect();
+            top_js.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let mut scripts: Vec<_> = script_us.into_iter().collect();
+            scripts.sort_by(|a, b| b.1.total_cmp(&a.1));
+            LongTask {
                 start_ms: (times[s] - p.start_time) / 1000.0,
                 duration_ms: d / 1000.0,
+                native_ms: native_us / 1000.0,
+                gc_ms: gc_us / 1000.0,
+                top_js: top_js
+                    .into_iter()
+                    .take(3)
+                    .map(|((function, location), us)| FnStat {
+                        function,
+                        location,
+                        ms: us / 1000.0,
+                        percent: us / d * 100.0,
+                    })
+                    .collect(),
+                top_scripts: scripts
+                    .into_iter()
+                    .take(3)
+                    .map(|(url, us)| ScriptStat {
+                        url,
+                        self_ms: us / 1000.0,
+                        percent: us / d * 100.0,
+                    })
+                    .collect(),
                 stack,
             }
         })
@@ -329,7 +382,7 @@ pub fn summarize(p: &Profile, top: usize) -> Summary {
                 percent: pct(us),
             })
             .collect(),
-        longest_busy,
+        long_tasks,
     }
 }
 
@@ -344,17 +397,45 @@ pub fn render(s: &Summary, path: &Path) -> String {
         s.samples,
         path.display()
     );
-    let _ = writeln!(
-        out,
-        "\nLong tasks >=50ms (heaviest stack, innermost first):"
-    );
-    if s.longest_busy.is_empty() {
+    let _ = writeln!(out, "\nLong tasks >=50ms:");
+    if s.long_tasks.is_empty() {
         let _ = writeln!(out, "  none");
     }
-    for b in &s.longest_busy {
-        let _ = writeln!(out, "  {:.0}ms at +{:.0}ms", b.duration_ms, b.start_ms);
-        for f in &b.stack {
-            let _ = writeln!(out, "      {f}");
+    for t in &s.long_tasks {
+        let js_ms = t.duration_ms - t.native_ms - t.gc_ms;
+        let _ = writeln!(
+            out,
+            "  {:.0}ms at +{:.0}ms: JS {:.0}ms, browser-native {:.0}ms (parse/style/layout), GC {:.0}ms",
+            t.duration_ms,
+            t.start_ms,
+            js_ms.max(0.0),
+            t.native_ms,
+            t.gc_ms
+        );
+        for sc in &t.top_scripts {
+            let _ = writeln!(
+                out,
+                "    {:>7.1}ms {:>5.1}%  script {}",
+                sc.self_ms,
+                sc.percent,
+                short_url(&sc.url)
+            );
+        }
+        for f in &t.top_js {
+            let _ = writeln!(
+                out,
+                "    {:>7.1}ms {:>5.1}%  {} {}",
+                f.ms,
+                f.percent,
+                f.function,
+                short_loc(&f.location)
+            );
+        }
+        if !t.stack.is_empty() {
+            let _ = writeln!(out, "    heaviest JS stack, innermost first:");
+            for f in &t.stack {
+                let _ = writeln!(out, "      {}", short_frame(f));
+            }
         }
     }
     let _ = writeln!(out, "\nTop self time:");
@@ -362,7 +443,10 @@ pub fn render(s: &Summary, path: &Path) -> String {
         let _ = writeln!(
             out,
             "  {:>8.1}ms {:>5.1}%  {} {}",
-            f.ms, f.percent, f.function, f.location
+            f.ms,
+            f.percent,
+            f.function,
+            short_loc(&f.location)
         );
     }
     let _ = writeln!(out, "\nTop total time:");
@@ -370,7 +454,10 @@ pub fn render(s: &Summary, path: &Path) -> String {
         let _ = writeln!(
             out,
             "  {:>8.1}ms {:>5.1}%  {} {}",
-            f.ms, f.percent, f.function, f.location
+            f.ms,
+            f.percent,
+            f.function,
+            short_loc(&f.location)
         );
     }
     let _ = writeln!(out, "\nSelf time by script:");
@@ -378,8 +465,76 @@ pub fn render(s: &Summary, path: &Path) -> String {
         let _ = writeln!(
             out,
             "  {:>8.1}ms {:>5.1}%  {}",
-            sc.self_ms, sc.percent, sc.url
+            sc.self_ms,
+            sc.percent,
+            short_url(&sc.url)
         );
     }
     out
+}
+
+/// Text-output form of a script URL. Full URLs stay in the structured result
+/// and the .cpuprofile; here a `data:` page or a long query string would bury
+/// the summary, so keep the start (scheme, host) and the end (file name).
+fn short_url(url: &str) -> String {
+    const MAX: usize = 100;
+    if let Some(rest) = url.strip_prefix("data:") {
+        let kind: String = rest.chars().take_while(|&c| c != ',').take(30).collect();
+        return format!("data:{kind},…");
+    }
+    let chars: Vec<char> = url.chars().collect();
+    if chars.len() <= MAX {
+        return url.to_string();
+    }
+    let head: String = chars[..40].iter().collect();
+    let tail: String = chars[chars.len() - 55..].iter().collect();
+    format!("{head}…{tail}")
+}
+
+/// `short_url` for a `url:line:col` location.
+fn short_loc(loc: &str) -> String {
+    let mut parts = loc.rsplitn(3, ':');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(col), Some(line), Some(url))
+            if col.chars().all(|c| c.is_ascii_digit())
+                && line.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            format!("{}:{line}:{col}", short_url(url))
+        }
+        _ => short_url(loc),
+    }
+}
+
+/// `short_loc` for a rendered `name url:line:col` frame.
+fn short_frame(frame: &str) -> String {
+    match frame.split_once(' ') {
+        Some((name, loc)) => format!("{name} {}", short_loc(loc)),
+        None => frame.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{short_loc, short_url};
+
+    #[test]
+    fn shortens_urls_for_display() {
+        assert_eq!(short_url("https://a.com/x.js"), "https://a.com/x.js");
+        assert_eq!(
+            short_url("data:text/html,<script>long</script>"),
+            "data:text/html,…"
+        );
+        let long = format!("https://example.com/{}/app.js?cb=1", "a".repeat(200));
+        let s = short_url(&long);
+        assert!(s.starts_with("https://example.com/") && s.ends_with("/app.js?cb=1"));
+        assert!(s.chars().count() <= 100);
+        assert_eq!(
+            short_loc("data:text/html,%3Cp%3E:2:19"),
+            "data:text/html,…:2:19"
+        );
+        assert_eq!(
+            short_loc("https://a.com/x.js:10:5"),
+            "https://a.com/x.js:10:5"
+        );
+    }
 }
