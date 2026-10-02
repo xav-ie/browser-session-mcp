@@ -23,7 +23,7 @@ use chromiumoxide::cdp::browser_protocol::{
         AddScriptToEvaluateOnNewDocumentParams, EnableParams as PageEnableParams,
         EventFrameNavigated, NavigationType,
     },
-    target::TargetId,
+    target::{GetTargetsParams, TargetId},
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
     DisableParams as RuntimeDisableParams, EnableParams as RuntimeEnableParams,
@@ -48,6 +48,11 @@ use crate::user_agent::{self, UaOverride};
 const LEAKS_CHECK: &str = "(() => { try { const b = navigator.userAgentData && navigator.userAgentData.brands; return navigator.userAgent.indexOf('Headless') >= 0 || (b ? b.some(x => /Headless/.test(x.brand)) : false); } catch (e) { return true; } })()";
 
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
+
+/// How often to check the CDP connection is still answering, and how long a
+/// single check may take before the connection is considered dead.
+const LIVENESS_INTERVAL: Duration = Duration::from_secs(30);
+const LIVENESS_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run() -> Result<()> {
     crate::init_tracing("browser_session_mcp=info,rmcp=warn");
@@ -124,8 +129,24 @@ async fn run_once(browser_url: String, writer: LogWriter) -> Result<()> {
         .await
         .context("Target.attachedToTarget")?;
 
+    // A half-open socket (TCP up, no data flowing) never finishes the handler
+    // task, so capture would silently stop. Probe with a cheap CDP round trip
+    // and reconnect when it doesn't answer in time.
+    let mut liveness = tokio::time::interval(LIVENESS_INTERVAL);
+    liveness.tick().await;
+
     loop {
         tokio::select! {
+            _ = liveness.tick() => {
+                let probe = tokio::time::timeout(
+                    LIVENESS_TIMEOUT,
+                    browser.execute(GetTargetsParams::default()),
+                )
+                .await;
+                if !matches!(probe, Ok(Ok(_))) {
+                    break;
+                }
+            }
             Some(event) = attached.next() => {
                 let info = &event.target_info;
                 if info.r#type != "page" { continue; }
@@ -145,6 +166,10 @@ async fn run_once(browser_url: String, writer: LogWriter) -> Result<()> {
             }
         }
     }
+    // Dropping a JoinHandle detaches the task rather than cancelling it; abort
+    // so the wedged connection (and every target loop fed by it) goes away.
+    handler_task.abort();
+    anyhow::bail!("CDP liveness probe failed; reconnecting")
 }
 
 #[derive(Debug, Default)]
@@ -310,28 +335,38 @@ async fn target_loop(page: Page, writer: LogWriter, ua: Option<UaOverride>) -> R
                     tracing::info!(ctx = %ctx_id, "console capture resumed");
                 }
             }
-            Some(e) = frame_navs.next() => {
-                on_frame_navigated(&page, &writer, &state, &e).await;
-            }
-            Some(e) = req_sent.next() => {
-                on_request_will_be_sent(&state, &e).await;
-            }
-            Some(e) = resp.next() => {
-                on_response_received(&state, &e).await;
-            }
-            Some(e) = fin.next() => {
-                on_loading_finished(&writer, &state, &e).await;
-            }
-            Some(e) = failed.next() => {
-                on_loading_failed(&writer, &state, &e).await;
-            }
-            Some(e) = console.next() => {
-                on_console(&writer, &state, &e).await;
-            }
-            Some(e) = excs.next() => {
-                on_exception(&writer, &state, &e).await;
-            }
-            else => break,
+            // The per-target streams all end together when the target is
+            // destroyed or the connection drops. Exit on the first `None`: the
+            // stealth tick above never disables, so a `select!` `else` arm
+            // would never fire and the loop would outlive its tab.
+            e = frame_navs.next() => match e {
+                Some(e) => on_frame_navigated(&page, &writer, &state, &e).await,
+                None => break,
+            },
+            e = req_sent.next() => match e {
+                Some(e) => on_request_will_be_sent(&state, &e).await,
+                None => break,
+            },
+            e = resp.next() => match e {
+                Some(e) => on_response_received(&state, &e).await,
+                None => break,
+            },
+            e = fin.next() => match e {
+                Some(e) => on_loading_finished(&writer, &state, &e).await,
+                None => break,
+            },
+            e = failed.next() => match e {
+                Some(e) => on_loading_failed(&writer, &state, &e).await,
+                None => break,
+            },
+            e = console.next() => match e {
+                Some(e) => on_console(&writer, &state, &e).await,
+                None => break,
+            },
+            e = excs.next() => match e {
+                Some(e) => on_exception(&writer, &state, &e).await,
+                None => break,
+            },
         }
     }
     Ok(())
