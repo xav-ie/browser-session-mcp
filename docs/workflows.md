@@ -47,7 +47,7 @@ await tools.browser_session_mcp.navigate({
 How it works:
 
 1. `request_human_takeover` writes a ticket (sessionId + the active page's CDP
-   targetId) to `${TAKEOVER_DIR}/tokens/<token>.json` and returns a link,
+   targetId) to `${STATE_DIR}/takeover/tokens/<token>.json` and returns a link,
    `${TAKEOVER_BASE_URL}/takeover/<token>`.
 2. The `browser-session-takeover` daemon serves that page. Its JavaScript opens
    a WebSocket directly to Chrome's DevTools endpoint (`${CHROME_WS_BASE}`),
@@ -55,7 +55,7 @@ How it works:
    mouse/keyboard back as CDP input.
 3. Because that WebSocket goes page→Chrome directly, credentials never pass
    through the agent or the takeover daemon.
-4. Clicking "Done" POSTs back and drops `${TAKEOVER_DIR}/done/<token>`, which
+4. Clicking "Done" POSTs back and drops `${STATE_DIR}/takeover/done/<token>`, which
    unblocks `await_human_takeover`.
 
 Security: the URL is a bearer credential (default TTL 5 min, max 30). The first
@@ -78,7 +78,7 @@ await tools.browser_session_mcp.navigate({ sessionId: sid2, url: "https://github
 // already logged in
 ```
 
-Cookies are saved as JSON under `${STATES_DIR}/<name>.json` in plaintext (file
+Cookies are saved as JSON under `${STATE_DIR}/states/<name>.json` in plaintext (file
 mode 0600, dir 0700). v1 is **cookies-only** — localStorage is not yet
 supported, but the on-disk schema reserves an `origins[]` field for forward
 compat.

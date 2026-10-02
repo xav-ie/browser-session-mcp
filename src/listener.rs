@@ -5,7 +5,7 @@
 //! network events captured here survive any number of mcp-proxy churns.
 //!
 //! Layout:
-//!   <LOGS_DIR>/<sessionId>/<padded-seq>-<targetId>.ndjson
+//!   <STATE_DIR>/logs/<sessionId>/<padded-seq>-<targetId>.ndjson
 //!
 //! Top-level navigation (Page.frameNavigated on the main frame) opens a fresh
 //! visit file. The Document-level request that triggered the nav fires
@@ -38,7 +38,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::Mutex;
 
 use crate::chrome;
-use crate::logs::{ConsoleEntry, LogWriter, NetworkEntry, default_logs_dir};
+use crate::logs::{ConsoleEntry, LogWriter, NetworkEntry, logs_dir};
 use crate::takeover;
 use crate::user_agent::{self, UaOverride};
 
@@ -58,7 +58,7 @@ pub async fn run() -> Result<()> {
     crate::init_tracing("browser_session_mcp=info,rmcp=warn");
     let browser_url =
         std::env::var("BROWSER_URL").unwrap_or_else(|_| "http://127.0.0.1:9222".to_string());
-    let writer = LogWriter::new(default_logs_dir());
+    let writer = LogWriter::new(logs_dir());
 
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);

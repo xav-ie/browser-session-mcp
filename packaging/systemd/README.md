@@ -46,8 +46,8 @@ sudo systemctl enable --now browser-session-reaper.timer
 `ExecStart` and the paths in `browser-session.env` assume `/usr/local`; adjust
 the units if you install elsewhere. The units create `/var/lib/browser-session`
 (via `StateDirectory=`) and run as root by default — the same state dir the MCP
-process must read/write, so keep their `STATE_FILE`/`LOGS_DIR`/`TAKEOVER_DIR`
-identical to the MCP's env.
+process must read/write, so keep their `STATE_DIR` identical to the
+MCP's env.
 
 ## Verify
 

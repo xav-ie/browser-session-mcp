@@ -86,26 +86,26 @@ install steps (drop the binary in `/usr/local/bin`, the units in
 | var | default | notes |
 |---|---|---|
 | `BROWSER_URL` | — (**required**) | DevTools HTTP(S) endpoint |
-| `STATE_FILE` | `/var/lib/browser-session-mcp/state.json` | |
-| `LOGS_DIR` | `/var/lib/browser-session-mcp/logs` | |
-| `STATES_DIR` | `/var/lib/browser-session-mcp/states` | saved cookies |
-| `TAKEOVER_DIR` | `/var/lib/browser-session-mcp/takeover` | takeover IPC |
+| `STATE_DIR` | — (**required**) | shared by every role: `state.json`, `logs/`, `states/` (saved cookies), `takeover/` (takeover IPC) |
 | `TAKEOVER_BASE_URL` | — | public URL of the takeover daemon; without it `request_human_takeover` errors |
 
-> Running the `mcp` role standalone (not under systemd)? The defaults live under
-> `/var/lib/browser-session-mcp`, which a non-root user can't write. Point them
-> at a writable dir, e.g.
-> `STATE_FILE=./bs/state.json LOGS_DIR=./bs/logs STATES_DIR=./bs/states TAKEOVER_DIR=./bs/takeover`.
+> Every role must get the same `STATE_DIR`; they cooperate through files in it.
+> Running standalone, point it at any writable dir, e.g. `STATE_DIR=./bs`. The
+> old `STATE_FILE`, `LOGS_DIR`, `STATES_DIR` and `TAKEOVER_DIR` are rejected at
+> startup so a half-migrated config can't silently split state.
 
 `browser-session listener` — `BROWSER_URL` (default `http://127.0.0.1:9222`),
-`LOGS_DIR`, `TAKEOVER_DIR`. Run as a systemd service with `Restart=always`,
+`STATE_DIR`. Run as a systemd service with `Restart=always`,
 ordered `After=` Chrome.
 
-`browser-session reaper` — `BROWSER_URL`, `STATE_FILE`, `LOGS_DIR`,
-`MAX_IDLE_HOURS` (default 24). Run on a timer (e.g. every 12h).
+`browser-session reaper` — `BROWSER_URL`, `STATE_DIR`,
+`MAX_IDLE_HOURS` (default 24), `REAP_ORPHAN_TABS` (default off; set to `1` to
+also close every tab in Chrome's default context, i.e. tabs opened outside the
+MCP. Only do this on a dedicated automation Chrome, never one a human browses).
+Run on a timer (e.g. every 30min).
 
 `browser-session takeover` — `TAKEOVER_BIND` (default `127.0.0.1:9223`),
-`TAKEOVER_DIR`, `CHROME_WS_BASE` (**required**, e.g. `wss://chrome.<domain>`),
+`STATE_DIR`, `CHROME_WS_BASE` (**required**, e.g. `wss://chrome.<domain>`),
 `TAKEOVER_WEBROOT` (set automatically by the Nix wrapper). Run as a systemd
 service.
 

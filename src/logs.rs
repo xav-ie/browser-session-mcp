@@ -21,10 +21,8 @@ use tokio::{
 
 const SEQ_PAD: usize = 5;
 
-pub fn default_logs_dir() -> PathBuf {
-    std::env::var_os("LOGS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/lib/browser-session-mcp/logs"))
+pub fn logs_dir() -> PathBuf {
+    crate::state_dir().join("logs")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -42,13 +42,11 @@ pub struct Ticket {
     pub expires_at_ms: u128,
 }
 
-/// Shared takeover dir under the state dir (`/var/lib/browser-session-mcp`).
-/// Both the container MCP and the host daemon see the same path via the volume
-/// mount, so file-based IPC works across the process boundary.
+/// Shared takeover dir under `STATE_DIR`. Both the container MCP and the host
+/// daemon see the same path via the volume mount, so file-based IPC works
+/// across the process boundary.
 pub fn takeover_dir() -> PathBuf {
-    std::env::var("TAKEOVER_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/var/lib/browser-session-mcp/takeover"))
+    crate::state_dir().join("takeover")
 }
 
 /// Public, human-facing base URL of the takeover daemon (e.g. an SSH-tunnelled
@@ -324,7 +322,7 @@ async fn sweep_expired() {
 
 /// Run the takeover HTTP daemon until killed. Env:
 ///   TAKEOVER_BIND     (default 127.0.0.1:9223) — where to listen
-///   TAKEOVER_DIR      (default /var/lib/browser-session-mcp/takeover)
+///   STATE_DIR         (required) — takeover IPC lives in $STATE_DIR/takeover
 ///   CHROME_WS_BASE    (required) — e.g. wss://chrome.lalala.casa
 pub async fn run() -> Result<()> {
     crate::init_tracing("browser_session_mcp=info");

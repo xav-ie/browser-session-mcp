@@ -12,10 +12,8 @@ use tokio::{fs, io::AsyncWriteExt};
 
 static NAME_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]*$").unwrap());
 
-pub fn default_states_dir() -> PathBuf {
-    std::env::var_os("STATES_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/lib/browser-session-mcp/states"))
+pub fn states_dir() -> PathBuf {
+    crate::state_dir().join("states")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

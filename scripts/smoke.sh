@@ -43,9 +43,7 @@ fi
 
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 TMP=$(mktemp -d /tmp/browser-session-mcp-smoke.XXXXXX)
-export STATE_FILE="$TMP/state.json"
-export LOGS_DIR="$TMP/logs"
-export STATES_DIR="$TMP/states"
+export STATE_DIR="$TMP"
 export BROWSER_URL="http://127.0.0.1:$PORT"
 
 cleanup() {
@@ -235,7 +233,7 @@ DEL=$(req '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"dele
 check "delete_browser_state succeeds" "$DEL" 'Deleted'
 
 # Disk artifact left over?
-if [[ -e "$STATES_DIR/smoke_test.json" ]]; then
+if [[ -e "$STATE_DIR/states/smoke_test.json" ]]; then
   echo "[FAIL] delete_browser_state left smoke_test.json on disk"
   FAIL=$((FAIL + 1))
 else
@@ -276,7 +274,7 @@ check "close_browser_session succeeds" "$CLOSE" 'Closed'
 # instant close returns — otherwise this races the background flusher.
 cleared=0
 for _ in $(seq 1 20); do
-  if [[ ! -f $STATE_FILE ]] || ! grep -q "$SID" "$STATE_FILE"; then
+  if [[ ! -f $STATE_DIR/state.json ]] || ! grep -q "$SID" "$STATE_DIR/state.json"; then
     cleared=1
     break
   fi

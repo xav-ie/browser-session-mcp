@@ -271,7 +271,7 @@ in
           wantedBy = [ "multi-user.target" ];
           environment = {
             BROWSER_URL = cfg.browserUrl;
-            LOGS_DIR = "${cfg.stateDir}/logs";
+            STATE_DIR = cfg.stateDir;
           };
           serviceConfig = {
             Type = "simple";
@@ -291,7 +291,7 @@ in
           requires = lib.optional cfg.chrome.enable "chrome-headless.service";
           environment = {
             BROWSER_URL = cfg.browserUrl;
-            STATE_FILE = "${cfg.stateDir}/state.json";
+            STATE_DIR = cfg.stateDir;
             MAX_IDLE_HOURS = toString cfg.reaper.maxIdleHours;
           }
           // lib.optionalAttrs cfg.reaper.closeOrphanTabs {
@@ -334,7 +334,7 @@ in
           wantedBy = [ "multi-user.target" ];
           environment = {
             TAKEOVER_BIND = "${cfg.takeover.address}:${toString cfg.takeover.port}";
-            TAKEOVER_DIR = "${cfg.stateDir}/takeover";
+            STATE_DIR = cfg.stateDir;
             CHROME_WS_BASE = cfg.takeover.chromeWsBase;
           };
           serviceConfig = {

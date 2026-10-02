@@ -15,10 +15,8 @@ use tokio::{
 
 use crate::user_agent::UaOverride;
 
-pub fn default_state_file() -> PathBuf {
-    std::env::var_os("STATE_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/lib/browser-session-mcp/state.json"))
+pub fn state_file() -> PathBuf {
+    crate::state_dir().join("state.json")
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

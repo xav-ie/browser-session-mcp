@@ -13,7 +13,42 @@ pub mod state;
 pub mod takeover;
 pub mod user_agent;
 
+use anyhow::{Result, bail};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+
+static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Path env vars that `STATE_DIR` replaced. Refusing to start while one is set
+/// turns a half-migrated config into a startup error instead of processes
+/// silently reading and writing different directories.
+const REPLACED_VARS: [&str; 4] = ["STATE_FILE", "LOGS_DIR", "STATES_DIR", "TAKEOVER_DIR"];
+
+/// Resolve the required `STATE_DIR`, which every role derives its paths from
+/// (`state.json`, `logs/`, `states/`, `takeover/`). One variable means the
+/// cooperating processes can't disagree about where shared files live.
+pub fn init_state_dir() -> Result<()> {
+    if let Some(old) = REPLACED_VARS.iter().find(|v| std::env::var_os(v).is_some()) {
+        bail!(
+            "{old} is no longer supported; set STATE_DIR (all paths derive from it) and unset {old}"
+        );
+    }
+    let dir = std::env::var_os("STATE_DIR")
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("STATE_DIR is required (e.g. /var/lib/browser-session-mcp)")
+        })?;
+    let _ = STATE_DIR.set(PathBuf::from(dir));
+    Ok(())
+}
+
+/// The directory from [`init_state_dir`], which `main` calls before any role runs.
+pub fn state_dir() -> &'static Path {
+    STATE_DIR
+        .get()
+        .expect("init_state_dir must run before state_dir")
+}
 
 /// Install the tracing subscriber for a subcommand. Always logs to stderr:
 /// the `mcp` subcommand speaks the MCP protocol over stdout, and stderr is

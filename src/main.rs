@@ -23,11 +23,19 @@ Commands:
   reaper      one-shot sweep of idle sessions (run on a timer)
   takeover    HTTP daemon serving the human-takeover page
 
-Each command is configured by environment variables; see the README.";
+All commands need STATE_DIR (shared state, logs, saved states, takeover
+IPC). Other settings are environment variables too; see the README.";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    match std::env::args().nth(1).as_deref() {
+    let cmd = std::env::args().nth(1);
+    if matches!(
+        cmd.as_deref(),
+        Some("mcp" | "listener" | "reaper" | "takeover")
+    ) {
+        browser_session_mcp::init_state_dir()?;
+    }
+    match cmd.as_deref() {
         Some("mcp") => browser_session_mcp::mcp::run().await,
         Some("listener") => browser_session_mcp::listener::run().await,
         Some("reaper") => browser_session_mcp::reaper::run().await,
