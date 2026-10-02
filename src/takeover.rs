@@ -166,6 +166,9 @@ pub async fn set_stealth(session_id: &str, stealth: bool) -> Result<()> {
 
 /// Whether stealth is currently on for a session.
 pub async fn is_stealth(session_id: &str) -> bool {
+    if !valid_ctx(session_id) {
+        return false;
+    }
     tokio::fs::try_exists(stealth_path(session_id))
         .await
         .unwrap_or(false)
@@ -251,6 +254,9 @@ pub async fn write_ticket(token: &str, ticket: &Ticket) -> Result<()> {
 }
 
 async fn read_ticket(token: &str) -> Result<Ticket> {
+    if !valid_token(token) {
+        return Err(anyhow!("invalid token"));
+    }
     let bytes = tokio::fs::read(ticket_path(token))
         .await
         .context("reading ticket")?;
@@ -259,16 +265,21 @@ async fn read_ticket(token: &str) -> Result<Ticket> {
 
 /// Block until the human clicks Done (sentinel appears) or the timeout elapses.
 /// Returns `true` if completed, `false` on timeout. Called by
-/// `await_human_takeover`.
-pub async fn wait_for_done(token: &str, timeout: Duration) -> bool {
+/// `await_human_takeover`. The token comes straight from the MCP caller, so it
+/// is validated before it becomes a path: `../../state.json` would otherwise
+/// report "completed" and then get deleted by `cleanup`.
+pub async fn wait_for_done(token: &str, timeout: Duration) -> Result<bool> {
+    if !valid_token(token) {
+        return Err(anyhow!("invalid token"));
+    }
     let deadline = tokio::time::Instant::now() + timeout;
     let path = done_path(token);
     loop {
         if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return true;
+            return Ok(true);
         }
         if tokio::time::Instant::now() >= deadline {
-            return false;
+            return Ok(false);
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -276,6 +287,9 @@ pub async fn wait_for_done(token: &str, timeout: Duration) -> bool {
 
 /// Best-effort cleanup of a finished/abandoned takeover's files.
 pub async fn cleanup(token: &str) {
+    if !valid_token(token) {
+        return;
+    }
     let _ = tokio::fs::remove_file(ticket_path(token)).await;
     let _ = tokio::fs::remove_file(done_path(token)).await;
     let _ = tokio::fs::remove_file(claim_path(token)).await;
@@ -678,7 +692,41 @@ fn js_str(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::cookie_secure;
+    use super::{
+        cleanup, cookie_secure, is_stealth, read_ticket, valid_ctx, valid_token, wait_for_done,
+    };
+    use std::time::Duration;
+
+    const TRAVERSALS: [&str; 5] = [
+        "../../state.json",
+        "../../../../etc/passwd",
+        "/etc/passwd",
+        "0123456789abcdef0123456789abcde/",
+        "",
+    ];
+
+    #[test]
+    fn rejects_traversal_ids() {
+        assert!(valid_token("0123456789abcdef0123456789abcdef"));
+        assert!(valid_ctx("6B7F1C2D9E8A4B3C"));
+        for bad in TRAVERSALS {
+            assert!(!valid_token(bad), "{bad}");
+            assert!(!valid_ctx(bad), "{bad}");
+        }
+    }
+
+    // These run before STATE_DIR is initialised: any of them building a path
+    // from the bad id would panic in `state_dir()`, so passing proves the id
+    // is refused first.
+    #[tokio::test]
+    async fn caller_supplied_ids_never_become_paths() {
+        for bad in TRAVERSALS {
+            assert!(wait_for_done(bad, Duration::ZERO).await.is_err(), "{bad}");
+            assert!(read_ticket(bad).await.is_err(), "{bad}");
+            assert!(!is_stealth(bad).await, "{bad}");
+            cleanup(bad).await;
+        }
+    }
 
     #[test]
     fn secure_cookie_origins() {

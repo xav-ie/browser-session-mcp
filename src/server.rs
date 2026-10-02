@@ -472,9 +472,7 @@ impl BrowserSessionServer {
         // isolated world, which is invisible to page scripts but can't see those
         // globals. The session already exposes Runtime via the listener when not
         // in stealth, so main-world execution costs no extra detectability there.
-        let stealth = tokio::fs::try_exists(takeover::stealth_path(&session_id))
-            .await
-            .unwrap_or(false);
+        let stealth = takeover::is_stealth(&session_id).await;
         let wrapped = wrap_expression(&page, &expression, stealth).await?;
         let value = if stealth {
             iso_eval_function(&page, &wrapped).await
@@ -573,7 +571,7 @@ impl BrowserSessionServer {
         let timeout_ms = optional_u64(&args, "timeout")
             .unwrap_or(300_000)
             .min(1_800_000);
-        let completed = takeover::wait_for_done(&token, Duration::from_millis(timeout_ms)).await;
+        let completed = takeover::wait_for_done(&token, Duration::from_millis(timeout_ms)).await?;
         if completed {
             takeover::cleanup(&token).await;
         }
