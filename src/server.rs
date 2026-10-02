@@ -15,8 +15,6 @@ use chromiumoxide::cdp::js_protocol::runtime::{CallFunctionOnParams, EvaluatePar
 use chromiumoxide::keys::USKEYBOARD_LAYOUT;
 use chromiumoxide::layout::Point;
 use chromiumoxide::page::ScreenshotParams;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, ErrorData as McpError, Implementation,
     JsonObject, ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities,
@@ -468,14 +466,6 @@ impl BrowserSessionServer {
             Some(idx) => sessions.page_at(&session_id, idx as usize).await?,
             None => sessions.active_page(&session_id).await?,
         };
-        // Word-bounded so `document.returnValue` etc. don't false-match.
-        static RETURN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\breturn\b").unwrap());
-        let body = if RETURN_RE.is_match(&expression) {
-            expression.clone()
-        } else {
-            format!("return ({expression});")
-        };
-        let wrapped = format!("async function() {{ {body} }}");
         // Main world by default — so `window.dataLayer`, `__NEXT_DATA__`, and
         // other page-author globals are readable. Only stealth sessions
         // (console-capture toggled OFF → stealth flag present) fall back to an
@@ -485,6 +475,7 @@ impl BrowserSessionServer {
         let stealth = tokio::fs::try_exists(takeover::stealth_path(&session_id))
             .await
             .unwrap_or(false);
+        let wrapped = wrap_expression(&page, &expression, stealth).await?;
         let value = if stealth {
             iso_eval_function(&page, &wrapped).await
         } else {
@@ -979,6 +970,35 @@ async fn iso_eval_function(page: &Page, function_declaration: &str) -> Result<Va
         bail!("JS exception: {}", exc.text);
     }
     Ok(resp.result.result.value.clone().unwrap_or(Value::Null))
+}
+
+/// Turn `evaluate` input into an async function declaration. Bare expressions
+/// get an implicit `return`; anything that doesn't parse that way (statements,
+/// an explicit `return`) runs as a function body. Deciding by parsing rather
+/// than by spotting the word `return` keeps `arr.map(x => { return x * 2 })`
+/// returning its value.
+///
+/// The parse check nests the candidate in a function that is declared but
+/// never called: the whole declaration must parse, so a syntax error still
+/// throws, yet none of the input runs (it can't run twice, and a runtime
+/// `SyntaxError` like `JSON.parse('x')` isn't mistaken for a parse failure).
+/// `Runtime.compileScript` would be cleaner but requires `Runtime.enable`.
+async fn wrap_expression(page: &Page, expression: &str, stealth: bool) -> Result<String> {
+    let trimmed = expression.trim().trim_end_matches(';').trim_end();
+    // Newlines so a trailing `// comment` can't swallow the closing paren.
+    let body = format!("return (\n{trimmed}\n);");
+    let probe = format!("function() {{ return true; async function probe() {{ {body} }} }}");
+    let parses = if stealth {
+        iso_eval_function(page, &probe).await
+    } else {
+        main_world_eval(page, &probe).await
+    }
+    .is_ok();
+    Ok(if parses {
+        format!("async function() {{ {body} }}")
+    } else {
+        format!("async function() {{\n{expression}\n}}")
+    })
 }
 
 /// Evaluate a JS function *declaration* in the page's MAIN world and return its
