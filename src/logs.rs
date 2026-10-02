@@ -264,7 +264,7 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-fn session_dir(logs_dir: &Path, session_id: &str) -> Result<PathBuf> {
+pub fn session_dir(logs_dir: &Path, session_id: &str) -> Result<PathBuf> {
     let sanitized = sanitize(session_id);
     if sanitized.is_empty() {
         anyhow::bail!("invalid session id");

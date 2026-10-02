@@ -11,7 +11,7 @@ Protocol (CDP) via a lightly-forked
 [`chromiumoxide`](https://github.com/xav-ie/chromiumoxide).
 
 > **New here?** Jump to [Quick start](#quick-start) — start a Chrome, grab a
-> binary, make your first tool call. Then browse the [tool surface](#tool-surface-28-tools).
+> binary, make your first tool call. Then browse the [tool surface](#tool-surface-30-tools).
 > Everything deeper lives in [`docs/`](#learn-more).
 
 ## Why you'd want it
@@ -30,7 +30,7 @@ Protocol (CDP) via a lightly-forked
 - **Human takeover** — hand a live page to a person for password/passkey/2FA
   login without the agent ever seeing the credentials.
 - **Saved cookie states** — log in once, reuse across future sessions.
-- **[28 tools](#tool-surface-28-tools)** covering tabs, navigation, trusted
+- **[30 tools](#tool-surface-30-tools)** covering tabs, navigation, trusted
   input, screenshots, accessibility snapshots, and logs.
 
 ## Prerequisites
@@ -146,7 +146,7 @@ That's the whole loop. For login flows and cookie reuse, see
 > The `mcp` role works standalone without them; you just won't get the
 > `list_console_messages` / `list_network_requests` logs.
 
-## Tool surface (28 tools)
+## Tool surface (30 tools)
 
 Grouped by what they do: **session lifecycle**, **tabs**, **navigation**,
 **capture** (screenshot/snapshot), **interaction** (click/type/scroll/eval),
@@ -192,6 +192,10 @@ Quick start setup above.
 - `list_visits({ sessionId })` — visit headers, oldest first
 - `list_console_messages({ sessionId, visit?, limit? })` — `limit` default 500
 - `list_network_requests({ sessionId, visit?, limit? })` — `limit` default 500
+
+**Profiling** (find the JS behind a slow or hung page)
+- `start_profiling({ sessionId, tabIndex?, samplingIntervalUs? })` — arms the V8 CPU profiler
+- `stop_profiling({ sessionId, tabIndex?, top?, terminateAfterMs?, timeout? })` — saves a `.cpuprofile` (flame graph in DevTools or speedscope.app) under `$STATE_DIR/logs/<sessionId>/profiles/` and returns long tasks, hottest functions, and time per script. If the page is hung, the running script is terminated after `terminateAfterMs` (default 5000) so the profile can be collected
 
 **Stealth**
 - `set_stealth({ sessionId, enabled })`

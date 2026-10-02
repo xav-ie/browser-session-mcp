@@ -70,6 +70,13 @@ load event.
 for debugging: reproduce the flow, then read the console errors and failed
 requests for the relevant visit.
 
+**Profiling** — `start_profiling({ sessionId, tabIndex? })`, reproduce the
+slowness or freeze, then `stop_profiling({ sessionId, tabIndex? })`. It returns
+the long tasks with their heaviest stack, the hottest functions with
+`url:line:col`, and the path of a `.cpuprofile` flame graph. A hung page is
+handled: after `terminateAfterMs` (default 5000) the stuck script is terminated
+so the profile still comes back.
+
 **Stealth** — `set_stealth({ sessionId, enabled })`, `get_stealth({ sessionId })`.
 Leave stealth as-is unless a site is tripping bot gates.
 

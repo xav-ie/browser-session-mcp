@@ -3,6 +3,7 @@ pub mod chrome_ctx;
 pub mod listener;
 pub mod logs;
 pub mod mcp;
+pub mod profiler;
 pub mod reaper;
 pub mod saved_states;
 pub mod server;

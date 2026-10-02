@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use crate::chrome_ctx::ChromeContext;
 use crate::logs::{self, LogKind, ReadOpts, SessionLogEntry};
+use crate::profiler;
 use crate::saved_states::SavedStateStore;
 use crate::sessions::Viewport;
 use crate::snapshot;
@@ -120,6 +121,8 @@ impl BrowserSessionServer {
             "move_mouse" => self.move_mouse(args).await,
             "wait_for" => self.wait_for(args).await,
             "evaluate" => self.evaluate(args).await,
+            "start_profiling" => self.start_profiling(args).await,
+            "stop_profiling" => self.stop_profiling(args).await,
             "list_visits" => self.list_visits(args).await,
             "list_console_messages" => self.list_console_messages(args).await,
             "list_network_requests" => self.list_network_requests(args).await,
@@ -490,6 +493,50 @@ impl BrowserSessionServer {
         .context("evaluate")?;
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
         Ok(ok_text_struct(text, json!({ "result": value })))
+    }
+
+    // --- profiling ---
+
+    async fn tab_page(&self, args: &JsonObject) -> Result<Page> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(args, "sessionId")?;
+        match optional_u64(args, "tabIndex") {
+            Some(idx) => sessions.page_at(session_id, idx as usize).await,
+            None => sessions.active_page(session_id).await,
+        }
+    }
+
+    async fn start_profiling(&self, args: JsonObject) -> Result<CallToolResult> {
+        let page = self.tab_page(&args).await?;
+        let interval = optional_u64(&args, "samplingIntervalUs")
+            .map_or(profiler::DEFAULT_INTERVAL_US, |n| n as i64);
+        profiler::start(&page, interval).await?;
+        Ok(ok_text(format!(
+            "CPU profiler running ({interval}µs sampling). Reproduce the problem, then call stop_profiling on the same tab."
+        )))
+    }
+
+    async fn stop_profiling(&self, args: JsonObject) -> Result<CallToolResult> {
+        let session_id = required_str(&args, "sessionId")?;
+        let page = self.tab_page(&args).await?;
+        let timeout = Duration::from_millis(optional_u64(&args, "timeout").unwrap_or(30_000));
+        let top = optional_usize(&args, "top").unwrap_or(15);
+        let terminate_after = match optional_u64(&args, "terminateAfterMs").unwrap_or(5_000) {
+            0 => None,
+            ms => Some(Duration::from_millis(ms)),
+        };
+        let (profile, terminated) = profiler::stop(&page, timeout, terminate_after).await?;
+        let dir = logs::session_dir(&self.logs_dir, session_id)?.join("profiles");
+        let path = profiler::write(&dir, &profile).await?;
+        let summary = profiler::summarize(&profile, top);
+        let mut text = profiler::render(&summary, &path);
+        if terminated {
+            text.insert_str(0, "Page JS was still running when stopping, so it was terminated to collect the profile (the page was hung; the long task at the end is the culprit).\n");
+        }
+        let mut structured = json!(summary);
+        structured["path"] = json!(path);
+        structured["terminated"] = json!(terminated);
+        Ok(ok_text_struct(text, structured))
     }
 
     // --- human takeover ---
@@ -1237,6 +1284,32 @@ fn tool_defs() -> Vec<Tool> {
                     ("tabIndex", &nonneg_int_t),
                 ],
                 &["sessionId", "expression"],
+            ),
+        ),
+        tool(
+            "start_profiling",
+            "Start the V8 CPU profiler on a tab (active tab by default, or `tabIndex`). Use to find which JavaScript makes a page slow or unresponsive: start, reproduce the problem (navigate/click/wait), then call stop_profiling on the same tab. `samplingIntervalUs` defaults to 1000.",
+            object_schema(
+                &[
+                    ("sessionId", &str_t),
+                    ("tabIndex", &nonneg_int_t),
+                    ("samplingIntervalUs", &pos_int_t),
+                ],
+                &["sessionId"],
+            ),
+        ),
+        tool(
+            "stop_profiling",
+            "Stop the CPU profiler started by start_profiling, save a .cpuprofile (flame graph in DevTools Performance panel or speedscope.app) and return the culprits: longest main-thread busy stretches with their heaviest stack, top functions by self and total time (with url:line:col), and self time per script. If page JS is hung, the renderer can't answer until it yields, so after `terminateAfterMs` (default 5000; 0 disables) the running script is terminated to get the profile out. `top` (default 15) caps each list; `timeout` (ms, default 30000) bounds the stop call.",
+            object_schema(
+                &[
+                    ("sessionId", &str_t),
+                    ("tabIndex", &nonneg_int_t),
+                    ("top", &pos_int_t),
+                    ("terminateAfterMs", &nonneg_int_t),
+                    ("timeout", &pos_int_t),
+                ],
+                &["sessionId"],
             ),
         ),
         tool(
