@@ -38,7 +38,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check:${{ matrix.check }}
 
-  # Rust build (all binaries) + the frontend build + treefmt, reproducibly via
+  # Rust build (all binaries) + clippy + the frontend build + treefmt, reproducibly via
   # Nix. Deliberately builds the individual checks rather than `nix flake
   # check`, so the KVM-only VM test (checks.smoke) stays in its own job below
   # instead of failing here for lack of /dev/kvm.
@@ -56,6 +56,7 @@ jobs:
       - run: |
           nix build -L \
             ".#checks.x86_64-linux.build" \
+            ".#checks.x86_64-linux.clippy" \
             ".#checks.x86_64-linux.treefmt" \
             ".#packages.x86_64-linux.systemd-units" \
             ".#packages.x86_64-linux.release"

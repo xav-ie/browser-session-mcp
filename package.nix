@@ -129,6 +129,16 @@ craneLib.buildPackage (
     '';
   }
   // {
+    # Lint over the same source + dependency artifacts as the build, so the
+    # flake's `checks.clippy` only recompiles this crate. Warnings fail it.
+    passthru.clippy = craneLib.cargoClippy (
+      commonArgs
+      // {
+        inherit cargoArtifacts;
+        cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+      }
+    );
+
     meta = {
       description = "MCP server giving each caller an isolated browser session against a shared persistent Chrome, with a human-takeover web UI.";
       license = lib.licenses.mit;

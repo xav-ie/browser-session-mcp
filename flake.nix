@@ -111,6 +111,8 @@
             checks = {
               # The package (all four binaries) must build.
               build = config.packages.default;
+              # `cargo clippy --all-targets -- --deny warnings`.
+              clippy = config.packages.browser-session-mcp.clippy;
             }
             # End-to-end integration test in a throwaway NixOS VM. It imports the
             # real nixos-module.nix, enables the whole stack (persistent Chrome +
