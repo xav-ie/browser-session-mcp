@@ -8,7 +8,6 @@
 use anyhow::{Context, Result, anyhow};
 use chromiumoxide::Browser;
 use chromiumoxide::cdp::browser_protocol::browser::GetVersionParams;
-use once_cell::sync::OnceCell;
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
@@ -18,54 +17,72 @@ pub struct UaOverride {
     pub metadata: Value,
 }
 
-static CHROME_VERSION: OnceCell<ChromeVersion> = OnceCell::new();
-
 #[derive(Debug, Clone)]
 struct ChromeVersion {
     full: String,
     major: String,
 }
 
+/// Asked per call rather than cached for the process: the listener outlives
+/// Chrome upgrades, and a UA whose version doesn't match the engine is itself
+/// a bot signal. It's one cheap CDP round trip per session open or reconnect.
 async fn chrome_version(browser: &Browser) -> Result<ChromeVersion> {
-    if let Some(v) = CHROME_VERSION.get() {
-        return Ok(v.clone());
-    }
     let result = browser
         .execute(GetVersionParams::default())
         .await
         .context("Browser.getVersion")?;
-    // `product` looks like "HeadlessChrome/146.0.7680.31"; the version is the
+    // `product` looks like "HeadlessChrome/154.0.8037.92"; the version is the
     // tail after the slash.
     let product = &result.result.product;
     let full = product
         .split_once('/')
         .map(|(_, v)| v.to_string())
-        .unwrap_or_else(|| "146.0.7680.31".to_string());
+        .ok_or_else(|| anyhow!("unexpected Chrome product string {product}"))?;
     let major = full
         .split('.')
         .next()
         .ok_or_else(|| anyhow!("unexpected version string {full}"))?
         .to_string();
-    let v = ChromeVersion { full, major };
-    let _ = CHROME_VERSION.set(v.clone());
-    Ok(v)
+    Ok(ChromeVersion { full, major })
+}
+
+/// Chrome's `Sec-CH-UA` brand list for a major version, as the engine itself
+/// builds it (Chromium's `GenerateBrandVersionList`): the GREASE brand's
+/// punctuation, version and position all rotate with the major version, so a
+/// hardcoded list goes stale (and looks forged) on the next upgrade. With
+/// `full`, versions are the full form (`fullVersionList`).
+fn brand_list(major: &str, full: Option<&str>) -> Value {
+    const CHARS: [char; 11] = [' ', '(', ':', '-', '.', '/', ')', ';', '=', '?', '_'];
+    const VERSIONS: [&str; 3] = ["8", "99", "24"];
+    const ORDERS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let seed: usize = major.parse().unwrap_or(0);
+    let grease_brand = format!("Not{}A{}Brand", CHARS[seed % 11], CHARS[(seed + 1) % 11]);
+    let grease_version = match full {
+        Some(_) => format!("{}.0.0.0", VERSIONS[seed % 3]),
+        None => VERSIONS[seed % 3].to_string(),
+    };
+    let v = full.unwrap_or(major);
+    let order = ORDERS[seed % 6];
+    let mut list = vec![Value::Null; 3];
+    list[order[0]] = json!({ "brand": grease_brand, "version": grease_version });
+    list[order[1]] = json!({ "brand": "Chromium", "version": v });
+    list[order[2]] = json!({ "brand": "Google Chrome", "version": v });
+    Value::Array(list)
 }
 
 pub async fn resolve(browser: &Browser, use_mobile: bool) -> Result<UaOverride> {
     let ChromeVersion { full, major } = chrome_version(browser).await?;
-    // GREASE brand must match what this Chrome actually emits, or client-hint
-    // consistency checks flag it. Chrome 146 uses `Not-A.Brand;v="24"` (seen in
-    // the real headless UA-CH). Update if a future Chrome rotates it.
-    let brands = json!([
-        { "brand": "Chromium", "version": major },
-        { "brand": "Google Chrome", "version": major },
-        { "brand": "Not-A.Brand", "version": "24" },
-    ]);
-    let full_version_list = json!([
-        { "brand": "Chromium", "version": full },
-        { "brand": "Google Chrome", "version": full },
-        { "brand": "Not-A.Brand", "version": "24.0.0.0" },
-    ]);
+    // Must match what this Chrome actually emits, or client-hint consistency
+    // checks flag it; derived from the version rather than hardcoded.
+    let brands = brand_list(&major, None);
+    let full_version_list = brand_list(&major, Some(&full));
 
     if use_mobile {
         Ok(UaOverride {
@@ -161,3 +178,51 @@ pub const BLOCKED_LOOPBACK: &[&str] = &[
     "*://0.0.0.0/*",
     "*://0.0.0.0:*",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::brand_list;
+
+    fn brands(major: &str) -> Vec<(String, String)> {
+        brand_list(major, None)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| {
+                (
+                    b["brand"].as_str().unwrap().into(),
+                    b["version"].as_str().unwrap().into(),
+                )
+            })
+            .collect()
+    }
+
+    // Expected lists are real Sec-CH-UA headers captured from
+    // chrome-headless-shell (which says "HeadlessChrome" where branded Chrome
+    // says "Google Chrome").
+    #[test]
+    fn grease_matches_real_chrome() {
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        // 146: "Chromium";v="146", "Not-A.Brand";v="24", "HeadlessChrome";v="146"
+        assert_eq!(
+            brands("146"),
+            [
+                s("Chromium", "146"),
+                s("Not-A.Brand", "24"),
+                s("Google Chrome", "146")
+            ]
+        );
+        // 154: "Chromium";v="154", "HeadlessChrome";v="154", "Not A(Brand";v="99"
+        assert_eq!(
+            brands("154"),
+            [
+                s("Chromium", "154"),
+                s("Google Chrome", "154"),
+                s("Not A(Brand", "99")
+            ]
+        );
+        let full = brand_list("154", Some("154.0.8037.92"));
+        assert_eq!(full[2]["version"], "99.0.0.0");
+        assert_eq!(full[0]["version"], "154.0.8037.92");
+    }
+}
