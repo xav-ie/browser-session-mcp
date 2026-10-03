@@ -31,7 +31,7 @@ use chromiumoxide::cdp::js_protocol::runtime::{
 };
 use futures::StreamExt;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -215,6 +215,25 @@ struct TargetState {
     target_id: String,
     current_seq: u32,
     inflight: HashMap<String, InflightRequest>,
+    /// Keys of recently logged one-shot events (navigations, console messages,
+    /// exceptions), so a duplicate delivery isn't logged twice. Tabs that were
+    /// already open when the listener (re)started have been seen receiving
+    /// every CDP event twice; one real navigation then became two visits.
+    recent: VecDeque<String>,
+}
+
+impl TargetState {
+    /// True if `key` was already seen recently; otherwise remembers it.
+    fn is_repeat(&mut self, key: String) -> bool {
+        if self.recent.contains(&key) {
+            return true;
+        }
+        if self.recent.len() >= 64 {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(key);
+        false
+    }
 }
 
 async fn spawn_target_loop(
@@ -326,6 +345,7 @@ async fn target_loop(page: Page, writer: LogWriter, ua: Option<UaOverride>) -> R
         target_id: target_id.clone(),
         current_seq: initial_seq,
         inflight: HashMap::new(),
+        recent: VecDeque::new(),
     }));
 
     let mut frame_navs = page.event_listener::<EventFrameNavigated>().await?;
@@ -413,7 +433,12 @@ async fn on_frame_navigated(
     }
     let url = e.frame.url.clone();
     let (ctx_id, target_id) = {
-        let s = state.lock().await;
+        let mut s = state.lock().await;
+        // Every real navigation gets a new loader, even to the same URL.
+        let key = format!("nav {} {}", e.frame.id.inner(), e.frame.loader_id.inner());
+        if s.is_repeat(key) {
+            return;
+        }
         (s.ctx_id.clone(), s.target_id.clone())
     };
     match writer.open_visit(&ctx_id, &target_id, &url).await {
@@ -444,6 +469,11 @@ async fn on_request_will_be_sent(
     state: &Arc<Mutex<TargetState>>,
     e: &EventRequestWillBeSent,
 ) {
+    // Same request and timestamp is a duplicate delivery, not a new hop.
+    let key = format!("request {} {:?}", e.request_id.inner(), e.timestamp);
+    if state.lock().await.is_repeat(key) {
+        return;
+    }
     // A redirect reuses the requestId, so this event would overwrite the
     // previous hop. Write that hop out first with its 3xx status and where it
     // went, or redirect chains (logins, tracking hops) vanish from the log.
@@ -573,7 +603,11 @@ async fn on_console(
         .collect::<Vec<_>>()
         .join(" ");
     let (ctx_id, target_id, seq) = {
-        let s = state.lock().await;
+        let mut s = state.lock().await;
+        let key = format!("console {:?} {:?} {text}", e.timestamp, e.r#type);
+        if s.is_repeat(key) {
+            return;
+        }
         (s.ctx_id.clone(), s.target_id.clone(), s.current_seq)
     };
     if seq == 0 {
@@ -617,7 +651,11 @@ async fn on_exception(
         format!("{} {description}", ex.text).trim().to_string()
     };
     let (ctx_id, target_id, seq) = {
-        let s = state.lock().await;
+        let mut s = state.lock().await;
+        let key = format!("exception {} {:?}", ex.exception_id, e.timestamp);
+        if s.is_repeat(key) {
+            return;
+        }
         (s.ctx_id.clone(), s.target_id.clone(), s.current_seq)
     };
     if seq == 0 {
