@@ -123,7 +123,9 @@ daemons — the processes coordinate purely through files in it.
 
 ```
 /var/lib/browser-session-mcp/
-├── state.json                        # session lastUsedAt — read by the reaper
+├── sessions/<sessionId>.json         # per session: lastUsedAt, UA, viewport
+│                                     #   (reaper, listener; one file each so
+│                                     #   concurrent MCP processes can't clobber)
 ├── logs/
 │   └── <sessionId>/
 │       ├── 00001-<targetId>.ndjson   # per-visit event log

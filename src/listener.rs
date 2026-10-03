@@ -59,6 +59,9 @@ pub async fn run() -> Result<()> {
     let browser_url =
         std::env::var("BROWSER_URL").unwrap_or_else(|_| "http://127.0.0.1:9222".to_string());
     let writer = LogWriter::new(logs_dir());
+    // The attach guard reads session files; make sure an old state.json has
+    // been split into them even if no MCP has started since the upgrade.
+    crate::state::migrate_legacy(&crate::state::sessions_dir()).await;
 
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);

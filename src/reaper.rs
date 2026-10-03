@@ -12,7 +12,7 @@
 //!
 //! Environment:
 //!   BROWSER_URL       (default: http://127.0.0.1:9222)
-//!   STATE_DIR         (required; reads state.json, prunes logs/)
+//!   STATE_DIR         (required; reads sessions/, prunes logs/)
 //!   MAX_IDLE_HOURS    (default: 24)
 //!   REAP_ORPHAN_TABS  (default: off; "1"/"true" closes default-context tabs)
 
@@ -25,13 +25,13 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::chrome;
 use crate::logs::{LogWriter, logs_dir};
-use crate::state::{read_state_file, state_file, write_state_file};
+use crate::state::{migrate_legacy, read_sessions, remove_session, sessions_dir};
 
 pub async fn run() -> Result<()> {
     crate::init_tracing("browser_session_mcp=info,rmcp=warn");
     let browser_url =
         std::env::var("BROWSER_URL").unwrap_or_else(|_| "http://127.0.0.1:9222".to_string());
-    let state_file = state_file();
+    let sessions_dir = sessions_dir();
     let max_idle_hours: f64 = std::env::var("MAX_IDLE_HOURS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -42,9 +42,8 @@ pub async fn run() -> Result<()> {
     let reap_orphan_tabs = std::env::var("REAP_ORPHAN_TABS")
         .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
 
-    let mut sessions = read_state_file(&state_file)
-        .await
-        .with_context(|| format!("reading {}", state_file.display()))?;
+    migrate_legacy(&sessions_dir).await;
+    let mut sessions = read_sessions(&sessions_dir).await?;
 
     let now = OffsetDateTime::now_utc();
     let cutoff_secs = (max_idle_hours * 3600.0) as i64;
@@ -85,6 +84,7 @@ pub async fn run() -> Result<()> {
         if !existing_ids.contains(session_id) {
             already_gone += 1;
             sessions.remove(session_id);
+            let _ = remove_session(&sessions_dir, session_id).await;
             let _ = writer.close_session(session_id).await;
             continue;
         }
@@ -94,6 +94,7 @@ pub async fn run() -> Result<()> {
         {
             Ok(_) => {
                 sessions.remove(session_id);
+                let _ = remove_session(&sessions_dir, session_id).await;
                 let _ = writer.close_session(session_id).await;
                 reaped += 1;
                 println!("Reaped {session_id}");
@@ -143,9 +144,6 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    write_state_file(&state_file, &sessions)
-        .await
-        .with_context(|| format!("writing {}", state_file.display()))?;
     println!(
         "Done. reaped={reaped} already-gone={already_gone} orphans={orphans} remaining={}",
         sessions.len()

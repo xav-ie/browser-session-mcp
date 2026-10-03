@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 use crate::chrome;
-use crate::state::{read_state_file, state_file};
+use crate::state::{read_session, sessions_dir};
 use crate::user_agent::{self, UaOverride};
 
 /// Run until the connection drops. `desktop` is the listener's default UA for
@@ -148,8 +148,7 @@ pub async fn run(browser_url: &str, desktop: Option<UaOverride>) -> Result<()> {
 
 /// The UA the MCP stored for this session (mobile sessions differ), if any.
 async fn session_ua(ctx: &str) -> Option<UaOverride> {
-    let sessions = read_state_file(&state_file()).await.ok()?;
-    let rec = sessions.get(ctx)?;
+    let rec = read_session(&sessions_dir(), ctx).await?;
     Some(UaOverride {
         user_agent: rec.user_agent.clone()?,
         metadata: rec.user_agent_metadata.clone()?,

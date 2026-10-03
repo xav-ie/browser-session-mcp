@@ -12,7 +12,7 @@ use crate::chrome_ctx::ChromeContext;
 use crate::logs::logs_dir;
 use crate::saved_states::{SavedStateStore, states_dir};
 use crate::server::BrowserSessionServer;
-use crate::state::{StateStore, state_file};
+use crate::state::{StateStore, sessions_dir};
 
 pub async fn run() -> Result<()> {
     crate::init_tracing("browser_session_mcp=info,rmcp=warn");
@@ -24,7 +24,7 @@ pub async fn run() -> Result<()> {
             std::process::exit(1);
         }
     };
-    let state = StateStore::load(state_file())
+    let state = StateStore::load(sessions_dir())
         .await
         .context("loading state store")?;
     let ctx = ChromeContext::new(browser_url, state.clone());

@@ -86,7 +86,7 @@ install steps (drop the binary in `/usr/local/bin`, the units in
 | var | default | notes |
 |---|---|---|
 | `BROWSER_URL` | — (**required**) | DevTools HTTP(S) endpoint |
-| `STATE_DIR` | — (**required**) | shared by every role: `state.json`, `logs/`, `states/` (saved cookies), `takeover/` (takeover IPC) |
+| `STATE_DIR` | — (**required**) | shared by every role: `sessions/`, `logs/`, `states/` (saved cookies), `takeover/` (takeover IPC) |
 | `TAKEOVER_BASE_URL` | — | public URL of the takeover daemon; without it `request_human_takeover` errors |
 
 > Every role must get the same `STATE_DIR`; they cooperate through files in it.

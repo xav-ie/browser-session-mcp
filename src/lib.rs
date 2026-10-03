@@ -27,7 +27,7 @@ static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
 const REPLACED_VARS: [&str; 4] = ["STATE_FILE", "LOGS_DIR", "STATES_DIR", "TAKEOVER_DIR"];
 
 /// Resolve the required `STATE_DIR`, which every role derives its paths from
-/// (`state.json`, `logs/`, `states/`, `takeover/`). One variable means the
+/// (`sessions/`, `logs/`, `states/`, `takeover/`). One variable means the
 /// cooperating processes can't disagree about where shared files live.
 pub fn init_state_dir() -> Result<()> {
     if let Some(old) = REPLACED_VARS.iter().find(|v| std::env::var_os(v).is_some()) {
