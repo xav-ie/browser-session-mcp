@@ -31,7 +31,17 @@ let
     # Drop navigator.webdriver + the automation blink features bot-detectors key
     # on.
     "--disable-blink-features=AutomationControlled"
-    "--window-size=1920,1080"
+    # Headless Chrome says "HeadlessChrome" in its UA, and a CDP override can't
+    # reach service workers, so set the reduced desktop UA browser-wide. The
+    # major version tracks the package so the UA matches the engine.
+    "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${lib.versions.major (lib.getVersion cfg.chrome.package)}.0.0.0 Safari/537.36"
+    # Browser-wide, so navigator.languages agrees in pages and workers.
+    "--accept-lang=en-US,en"
+    # A screen with a taskbar-sized work area and a window filling it, like a
+    # maximized desktop browser (a window the size of the screen is a headless
+    # tell).
+    "--screen-info={1920x1080 workAreaBottom=48}"
+    "--window-size=1920,1032"
   ]
   ++ cfg.chrome.extraArgs;
 
@@ -99,8 +109,12 @@ in
       };
       package = lib.mkOption {
         type = lib.types.package;
-        example = lib.literalExpression "pkgs.chrome-headless-shell";
-        description = "Chrome package to run (e.g. chrome-headless-shell or chromium).";
+        example = lib.literalExpression "pkgs.google-chrome";
+        description = ''
+          Chrome package to run. Branded Google Chrome (with `--headless` in
+          `extraArgs`) is the least detectable; chrome-headless-shell lacks
+          plugins and `window.chrome` and reports a `HeadlessChrome` brand.
+        '';
       };
       executable = lib.mkOption {
         type = lib.types.str;
@@ -255,7 +269,7 @@ in
             WorkingDirectory = cfg.chrome.dataDir;
             Restart = "on-failure";
             RestartSec = 5;
-            ExecStart = lib.concatStringsSep " " (
+            ExecStart = lib.escapeShellArgs (
               [ "${cfg.chrome.package}/bin/${cfg.chrome.executable}" ] ++ chromeArgs
             );
           };

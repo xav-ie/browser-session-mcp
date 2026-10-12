@@ -55,12 +55,14 @@ not manage it — point it at the same `stateDir` and `browserUrl`.)
 
   services.browser-session = {
     enable = true;
-    chrome.package = pkgs.chrome-headless-shell; # or chromium (+ chrome.executable)
+    chrome.package = pkgs.google-chrome; # unfree; or chrome-headless-shell
+    chrome.executable = "google-chrome-stable";
+    chrome.extraArgs = [ "--headless" ];
     # Required once takeover is enabled — the public CDP WebSocket base the
     # takeover page connects to directly:
     takeover.chromeWsBase = "wss://chrome.example.com";
     # Optional: real-GPU WebGL, idle policy, external Chrome, etc.
-    # chrome.extraArgs = [ "--use-gl=angle" "--use-angle=vulkan" ];
+    # chrome.extraArgs = [ "--headless" "--use-gl=angle" "--use-angle=vulkan" ];
     # reaper.maxIdleHours = 2;
   };
 }
