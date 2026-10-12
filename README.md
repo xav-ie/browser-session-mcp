@@ -202,7 +202,7 @@ Quick start setup above.
 - `get_stealth({ sessionId })` → `{ stealth }`
 
 **Human takeover** ⚙ (login/passkey without the agent seeing credentials; needs the `takeover` daemon + `TAKEOVER_BASE_URL`)
-- `request_human_takeover({ sessionId, ttl? })` → `{ url, token, expiresAtMs }` — non-blocking; mints a link
+- `request_human_takeover({ sessionId, ttlMinutes? })` → `{ url, token, expiresAtMs }` — non-blocking; mints a link
 - `await_human_takeover({ token, timeout? })` → `{ completed }` — blocks until the human clicks Done
 
 **Saved cookie states**

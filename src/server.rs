@@ -533,10 +533,14 @@ impl BrowserSessionServer {
     async fn request_human_takeover(&self, args: JsonObject) -> Result<CallToolResult> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
-        // How long the link stays valid. The URL is a bearer credential (it
-        // grants live input to the session), so keep the default tight.
-        // Default 5 min, capped at 30.
-        let ttl_ms = optional_u64(&args, "ttl").unwrap_or(300_000).min(1_800_000);
+        // How long the link stays valid, in minutes so no plausible number
+        // makes a link that dies before a human can open it. The URL is a
+        // bearer credential (it grants live input to the session), so it is
+        // capped at an hour.
+        if args.contains_key("ttl") {
+            return Err(anyhow!("`ttl` was replaced by `ttlMinutes` (1 to 60, default 30)"));
+        }
+        let ttl_ms = optional_u64(&args, "ttlMinutes").unwrap_or(30).clamp(1, 60) * 60_000;
         let base = takeover::base_url().ok_or_else(|| {
             anyhow!("TAKEOVER_BASE_URL is not configured — the takeover daemon/route isn't set up on this host")
         })?;
@@ -1378,9 +1382,9 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "request_human_takeover",
-            "Hand the session's active page to a human to log in themselves (passwords/passkeys the agent must not see). Returns a URL to show the user and a token. Does NOT block. STRONGLY ADVISED: after showing the URL, run await_human_takeover in a BACKGROUND task (subagent/job) — not your main loop — because the human may take many minutes and you should stay responsive. `ttl` (ms, default 300000, max 1800000) bounds how long the link (a bearer credential) is valid.",
+            "Hand the session's active page to a human to log in themselves (passwords/passkeys the agent must not see). Returns a URL to show the user and a token. Does NOT block. STRONGLY ADVISED: after showing the URL, run await_human_takeover in a BACKGROUND task (subagent/job) — not your main loop — because the human may take many minutes and you should stay responsive. `ttlMinutes` (default 30, 1 to 60) bounds how long the link (a bearer credential) is valid.",
             object_schema(
-                &[("sessionId", &str_t), ("ttl", &pos_int_t)],
+                &[("sessionId", &str_t), ("ttlMinutes", &pos_int_t)],
                 &["sessionId"],
             ),
         ),
