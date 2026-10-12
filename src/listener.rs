@@ -557,7 +557,7 @@ async fn write_network(
         let s = state.lock().await;
         (s.ctx_id.clone(), s.target_id.clone())
     };
-    let entry = NetworkEntry {
+    let mut entry = NetworkEntry {
         t: inf.t,
         method: inf.method,
         url: inf.url,
@@ -566,6 +566,7 @@ async fn write_network(
         post_data: inf.post_data,
         redirected_to: inf.redirected_to,
     };
+    crate::redact::network_entry(&mut entry, false);
     if let Err(err) = writer
         .append_network(&ctx_id, inf.seq, &target_id, entry)
         .await

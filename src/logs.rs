@@ -236,10 +236,13 @@ pub async fn read_session_logs(
                     }
                     out.push(SessionLogEntry::Console(c));
                 }
-                LogLine::Network(n) => {
+                LogLine::Network(mut n) => {
                     if matches!(opts.kind, Some(LogKind::Console)) {
                         continue;
                     }
+                    // Already redacted when written; again here so entries
+                    // logged before redaction existed never reach a caller.
+                    crate::redact::network_entry(&mut n, false);
                     out.push(SessionLogEntry::Network(n));
                 }
             }

@@ -6,6 +6,7 @@ pub mod logs;
 pub mod mcp;
 pub mod profiler;
 pub mod reaper;
+pub mod redact;
 pub mod saved_states;
 pub mod server;
 pub mod sessions;
