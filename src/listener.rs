@@ -566,7 +566,7 @@ async fn write_network(
         post_data: inf.post_data,
         redirected_to: inf.redirected_to,
     };
-    crate::redact::network_entry(&mut entry, false);
+    crate::redact::network_entry(&mut entry, takeover::active(&ctx_id).await);
     if let Err(err) = writer
         .append_network(&ctx_id, inf.seq, &target_id, entry)
         .await

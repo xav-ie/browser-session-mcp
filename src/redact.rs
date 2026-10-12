@@ -12,6 +12,8 @@
 //!   values of credential-like keys masked (and the username next to a
 //!   password); an unparsable body mentioning a credential key is dropped
 //!   whole.
+//! - While a human takeover is active for the session, no body is recorded at
+//!   all, and query values on auth URLs are masked as above.
 //!
 //! The log records no headers or response bodies, so there is nothing else to
 //! redact.

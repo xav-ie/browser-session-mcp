@@ -22,7 +22,7 @@
 //! claims, and signal done. The UI lives in ../frontend (built separately).
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -162,6 +162,41 @@ pub async fn set_stealth(session_id: &str, stealth: bool) -> Result<()> {
         let _ = tokio::fs::remove_file(&path).await;
     }
     Ok(())
+}
+
+/// Whether a human takeover is open for a session: an unexpired ticket for it
+/// whose Done sentinel hasn't been dropped. Counts from the moment the ticket
+/// is minted, before the human claims it, so nothing they type is ever logged.
+pub async fn active(session_id: &str) -> bool {
+    valid_ctx(session_id) && active_in(&tokens_dir(), &done_dir(), session_id, now_ms()).await
+}
+
+// ponytail: scans every ticket per call; fine for the handful that exist at once.
+async fn active_in(tokens: &Path, done: &Path, session_id: &str, now: u128) -> bool {
+    let Ok(mut entries) = tokio::fs::read_dir(tokens).await else {
+        return false;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let Some(token) = name.to_str().and_then(|n| n.strip_suffix(".json")) else {
+            continue;
+        };
+        let Ok(bytes) = tokio::fs::read(entry.path()).await else {
+            continue;
+        };
+        let Ok(ticket) = serde_json::from_slice::<Ticket>(&bytes) else {
+            continue;
+        };
+        if ticket.session_id == session_id
+            && ticket.expires_at_ms > now
+            && !tokio::fs::try_exists(done.join(token))
+                .await
+                .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether stealth is currently on for a session.
@@ -693,7 +728,8 @@ fn js_str(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup, cookie_secure, is_stealth, read_ticket, valid_ctx, valid_token, wait_for_done,
+        Ticket, active_in, cleanup, cookie_secure, is_stealth, read_ticket, valid_ctx, valid_token,
+        wait_for_done,
     };
     use std::time::Duration;
 
@@ -726,6 +762,38 @@ mod tests {
             assert!(!is_stealth(bad).await, "{bad}");
             cleanup(bad).await;
         }
+    }
+
+    #[tokio::test]
+    async fn takeover_active_until_done_or_expired() {
+        let root = std::env::temp_dir().join(format!("bs-takeover-{}", std::process::id()));
+        let (tokens, done) = (root.join("tokens"), root.join("done"));
+        std::fs::create_dir_all(&tokens).unwrap();
+        std::fs::create_dir_all(&done).unwrap();
+        let ticket = |session: &str, expires_at_ms| Ticket {
+            session_id: session.into(),
+            target_id: "T".into(),
+            expires_at_ms,
+        };
+        let write = |token: &str, t: &Ticket| {
+            std::fs::write(
+                tokens.join(format!("{token}.json")),
+                serde_json::to_vec(t).unwrap(),
+            )
+            .unwrap()
+        };
+        assert!(!active_in(&tokens, &done, "CTX1", 1000).await);
+        write("aa", &ticket("CTX1", 2000));
+        write("bb", &ticket("CTX2", 500));
+        assert!(active_in(&tokens, &done, "CTX1", 1000).await);
+        assert!(!active_in(&tokens, &done, "CTX2", 1000).await, "expired");
+        assert!(
+            !active_in(&tokens, &done, "CTX3", 1000).await,
+            "other session"
+        );
+        std::fs::write(done.join("aa"), b"").unwrap();
+        assert!(!active_in(&tokens, &done, "CTX1", 1000).await, "done");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
