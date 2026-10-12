@@ -1,13 +1,13 @@
 //! Mask new tabs before their first request.
 //!
-//! The listener's per-tab masking (UA override, stealth script) attaches to a
+//! The listener's per-tab masking (UA override) attaches to a
 //! tab only after Chrome has created it, and a tab a page opens itself
 //! (`window.open`, `target=_blank`) is already loading by then: its first
 //! request goes out as `HeadlessChrome` while its JS later reports Chrome.
 //!
 //! This guard holds a raw CDP connection with browser-wide auto-attach and
 //! `waitForDebuggerOnStart`, so every new page target is created paused. While
-//! paused it gets its session's UA override and the stealth script, then it is
+//! paused it gets its session's UA override, then it is
 //! resumed. chromiumoxide can't do this: it resumes paused targets itself with
 //! no hook in between. The guard stays attached for each tab's lifetime,
 //! because overrides end with the CDP session that set them.
@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 use crate::chrome;
 use crate::state::{read_session, sessions_dir};
-use crate::user_agent::{self, UaOverride};
+use crate::user_agent::UaOverride;
 
 /// Run until the connection drops. `desktop` is the listener's default UA for
 /// sessions without a stored one.
@@ -123,12 +123,6 @@ pub async fn run(browser_url: &str, desktop: Option<UaOverride>) -> Result<()> {
                     .await?;
                     first_request.insert(session.to_string(), ua);
                 }
-                ws.send(send(
-                    "Page.addScriptToEvaluateOnNewDocument",
-                    json!({ "source": user_agent::STEALTH_JS }),
-                    Some(session),
-                ))
-                .await?;
             }
         }
         // CDP handles a session's messages in order, so the overrides above are

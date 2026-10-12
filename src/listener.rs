@@ -19,10 +19,7 @@ use chromiumoxide::cdp::browser_protocol::{
         EventRequestWillBeSent, EventResponseReceived, ResourceType, SetBlockedUrLsParams,
         SetUserAgentOverrideParams,
     },
-    page::{
-        AddScriptToEvaluateOnNewDocumentParams, EnableParams as PageEnableParams,
-        EventFrameNavigated, NavigationType,
-    },
+    page::{EnableParams as PageEnableParams, EventFrameNavigated, NavigationType},
     target::{GetTargetsParams, TargetId},
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
@@ -265,9 +262,10 @@ async fn target_loop(page: Page, writer: LogWriter, ua: Option<UaOverride>) -> R
         .context("Page.enable")?;
 
     // Anti-detection, on EVERY target (incl. tabs opened in the takeover, which
-    // bypass the MCP): mask headless tells + block in-page loopback probes. The
-    // UA override is gated on a still-leaking-"Headless" check so it doesn't
-    // clobber an intentional per-session UA (e.g. mobile) the MCP already set.
+    // bypass the MCP): mask a leaking headless UA + block in-page loopback
+    // probes. The UA override is gated on a still-leaking-"Headless" check so it
+    // doesn't clobber an intentional per-session UA (e.g. mobile) the MCP
+    // already set.
     if let Some(ua) = ua.as_ref() {
         let leaks = page
             .evaluate(LEAKS_CHECK)
@@ -283,12 +281,6 @@ async fn target_loop(page: Page, writer: LogWriter, ua: Option<UaOverride>) -> R
                 let _ = page.execute(p).await;
             }
         }
-    }
-    if let Ok(s) = AddScriptToEvaluateOnNewDocumentParams::builder()
-        .source(user_agent::STEALTH_JS)
-        .build()
-    {
-        let _ = page.execute(s).await;
     }
     // Network is enabled above, so setBlockedURLs takes effect on this target.
     if let Ok(b) = serde_json::from_value::<SetBlockedUrLsParams>(

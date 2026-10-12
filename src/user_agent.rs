@@ -31,8 +31,8 @@ async fn chrome_version(browser: &Browser) -> Result<ChromeVersion> {
         .execute(GetVersionParams::default())
         .await
         .context("Browser.getVersion")?;
-    // `product` looks like "HeadlessChrome/154.0.8037.92"; the version is the
-    // tail after the slash.
+    // `product` looks like "Chrome/154.0.8037.97" (or "HeadlessChrome/…" for
+    // chrome-headless-shell); the version is the tail after the slash.
     let product = &result.result.product;
     let full = product
         .split_once('/')
@@ -118,51 +118,6 @@ pub async fn resolve(browser: &Browser, use_mobile: bool) -> Result<UaOverride> 
         })
     }
 }
-
-/// Init script run before any page script, on every target (the listener applies
-/// it to all tabs; the MCP also applies it to its own). Masks the JS-visible
-/// headless tells with a Linux/desktop profile coherent with the box's real
-/// platform: no `navigator.webdriver`, a real Chrome PDF-viewer plugin set,
-/// and `window.chrome.runtime`. WebGL is NOT spoofed —
-/// Chrome renders on the real NVIDIA GPU (chrome.nix), so the genuine renderer
-/// passes consistency checks a software-GL spoof fails. Every patch is
-/// try/caught so a double-apply or failure can't break the page.
-pub const STEALTH_JS: &str = r#"(() => {
-  try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch (e) {}
-  // NOTE: navigator.languages is deliberately NOT overridden. This script runs
-  // only in the main world; Web Workers get a fresh context with the browser's
-  // real navigator.languages (["en-US"]). Faking ["en-US","en"] here made the
-  // main thread disagree with workers — deviceandbrowserinfo's
-  // hasInconsistentWorkerValues. Reading the real value keeps them consistent.
-  // (To present ["en-US","en"] everywhere instead, set Chrome --accept-lang at
-  // launch in chrome.nix so it applies browser-wide, main AND workers.)
-  try { Object.defineProperty(navigator, 'pdfViewerEnabled', { get: () => true }); } catch (e) {}
-  try {
-    const mk = (name) => {
-      const p = Object.create(Plugin.prototype);
-      Object.defineProperties(p, {
-        name: { value: name, enumerable: true },
-        description: { value: 'Portable Document Format', enumerable: true },
-        filename: { value: 'internal-pdf-viewer', enumerable: true },
-        length: { value: 1 },
-      });
-      return p;
-    };
-    const arr = ['PDF Viewer', 'Chrome PDF Viewer', 'Chromium PDF Viewer', 'Microsoft Edge PDF Viewer', 'WebKit built-in PDF'].map(mk);
-    Object.defineProperty(navigator, 'plugins', { get: () => arr });
-  } catch (e) {}
-  try { window.chrome = window.chrome || {}; window.chrome.runtime = window.chrome.runtime || {}; } catch (e) {}
-  try {
-    const q = navigator.permissions && navigator.permissions.query;
-    if (q) navigator.permissions.query = (p) =>
-      p && p.name === 'notifications'
-        ? Promise.resolve({ state: Notification.permission })
-        : q(p);
-  } catch (e) {}
-  // NOTE: no WebGL renderer spoof — Chrome renders on the real NVIDIA GPU
-  // (see chrome.nix), so the genuine renderer string passes the consistency
-  // checks that a software-GL spoof fails (iphey flagged the spoof).
-})();"#;
 
 /// Loopback URL patterns blocked per-target via `Network.setBlockedURLs` — so an
 /// in-page port scan can't probe the DevTools port (9222), the takeover daemon

@@ -91,11 +91,13 @@ removes the common headless/automation tells:
   request's `Sec-CH-UA*` headers are rewritten via `Fetch` interception.) If the
   listener dies, Chrome releases held tabs; only a listener that hangs while
   alive would stall new tabs.
-- **JS tell masking.** An init script (run before page scripts, on every tab)
-  hides `navigator.webdriver`, installs a realistic PDF plugin set and
-  `window.chrome.runtime`, etc. WebGL is deliberately *not* spoofed — Chrome
-  renders on a real GPU, so the genuine renderer passes consistency checks a
-  software-GL spoof would fail.
+- **No JS patching.** Nothing is injected into pages: redefined `navigator`
+  getters and fake plugin arrays are themselves what bot managers (e.g.
+  Akamai) flag. The JS-visible surface comes from the browser itself, so run
+  branded Google Chrome in `--headless` mode: it has the real PDF plugins,
+  `window.chrome`, consistent notification permissions, and (with
+  `--disable-blink-features=AutomationControlled`) no `navigator.webdriver`.
+  WebGL is deliberately *not* spoofed either; Chrome renders on a real GPU.
 - **Loopback firewall.** `Network.setBlockedURLs` blocks in-page requests to
   `localhost`/`127.0.0.1`/`::1`/`0.0.0.0` on every target, so a page can't
   port-scan the DevTools port, the takeover daemon, or any other local service.

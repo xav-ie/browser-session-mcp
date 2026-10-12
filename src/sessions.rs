@@ -13,7 +13,6 @@ use chromiumoxide::cdp::browser_protocol::{
     browser::BrowserContextId,
     emulation::SetDeviceMetricsOverrideParams,
     network::SetUserAgentOverrideParams,
-    page::AddScriptToEvaluateOnNewDocumentParams,
     page::GetLayoutMetricsParams,
     target::{
         CloseTargetParams, CreateBrowserContextParams, CreateTargetParams, GetTargetsParams,
@@ -192,11 +191,6 @@ impl SessionManager {
         };
 
         if let Err(err) = self.apply_user_agent(&page, &override_).await {
-            self.cleanup_failed_open(&session_id, ctx_id).await;
-            return Err(err);
-        }
-
-        if let Err(err) = self.apply_stealth(&page).await {
             self.cleanup_failed_open(&session_id, ctx_id).await;
             return Err(err);
         }
@@ -380,10 +374,10 @@ impl SessionManager {
 
     pub async fn new_page(&self, session_id: &str, url: Option<&str>) -> Result<Page> {
         let ctx_id = self.context_id_for(session_id).await?;
-        // Open blank, apply the UA override and stealth script, and only then
-        // navigate. Creating the target with the real URL starts that request
-        // before the overrides land, so it goes out as `HeadlessChrome` while
-        // the page's JS later reports Chrome: a mismatch detectors look for.
+        // Open blank, apply the UA override, and only then navigate. Creating
+        // the target with the real URL starts that request before the override
+        // lands, so it goes out with the browser's own UA while the page's JS
+        // later reports the override: a mismatch detectors look for.
         let page = self
             .browser
             .new_page(
@@ -398,7 +392,6 @@ impl SessionManager {
         if let Some(override_) = self.state.user_agent_override(session_id).await {
             self.apply_user_agent(&page, &override_).await?;
         }
-        self.apply_stealth(&page).await?;
         self.ensure_viewport(session_id, &page).await?;
         if let Some(url) = url {
             page.goto(url).await.context("Page.navigate")?;
@@ -457,21 +450,6 @@ impl SessionManager {
         page.execute(params)
             .await
             .context("Network.setUserAgentOverride")?;
-        Ok(())
-    }
-
-    /// Patch the JS-visible signals bot-detectors (e.g. Cloudflare) use to spot
-    /// automated/headless Chrome, before any page script runs. Pairs with the
-    /// `--disable-blink-features=AutomationControlled` launch flag. Best-effort
-    /// and an arms race — covers the common tells, not a guarantee.
-    async fn apply_stealth(&self, page: &Page) -> Result<()> {
-        let params = AddScriptToEvaluateOnNewDocumentParams::builder()
-            .source(user_agent::STEALTH_JS)
-            .build()
-            .map_err(|e| anyhow!("AddScriptToEvaluateOnNewDocumentParams: {e}"))?;
-        page.execute(params)
-            .await
-            .context("Page.addScriptToEvaluateOnNewDocument")?;
         Ok(())
     }
 
