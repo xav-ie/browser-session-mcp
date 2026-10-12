@@ -452,9 +452,6 @@ impl SessionManager {
         let params: SetUserAgentOverrideParams = serde_json::from_value(serde_json::json!({
             "userAgent": override_.user_agent,
             "userAgentMetadata": override_.metadata,
-            // Real browsers send Accept-Language + navigator.languages; an empty
-            // value is a headless tell.
-            "acceptLanguage": "en-US,en;q=0.9",
         }))
         .context("constructing SetUserAgentOverrideParams from UA override")?;
         page.execute(params)

@@ -111,7 +111,6 @@ pub async fn run(browser_url: &str, desktop: Option<UaOverride>) -> Result<()> {
                         json!({
                             "userAgent": ua.user_agent,
                             "userAgentMetadata": ua.metadata,
-                            "acceptLanguage": "en-US,en;q=0.9",
                         }),
                         Some(session),
                     ))

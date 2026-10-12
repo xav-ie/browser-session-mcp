@@ -279,7 +279,6 @@ async fn target_loop(page: Page, writer: LogWriter, ua: Option<UaOverride>) -> R
             if let Ok(p) = serde_json::from_value::<SetUserAgentOverrideParams>(json!({
                 "userAgent": ua.user_agent,
                 "userAgentMetadata": ua.metadata,
-                "acceptLanguage": "en-US,en;q=0.9",
             })) {
                 let _ = page.execute(p).await;
             }
