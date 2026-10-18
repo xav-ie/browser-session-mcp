@@ -11,9 +11,11 @@
   --muted: #9d8fb5;
   --accent: #fff17b;
   --green: #51d136;
+  --red: #ff6b8a;
+  --bar-h: 44px;
 }
 
-/* The page is exactly one screen tall: the bars take what they need and the
+/* The page is exactly one screen tall: the bar takes what it needs and the
    screencast (#wrap) gets the rest, so the canvas can be fit to it. */
 body {
   margin: 0;
@@ -28,58 +30,181 @@ body {
     sans-serif;
 }
 
-header {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  padding: 8px 12px;
-  background: var(--bar);
-  border-bottom: 1px solid var(--border);
-  position: sticky;
-  top: 0;
-}
-header b {
-  color: var(--accent);
-}
-#status {
-  color: var(--muted);
+button svg {
+  display: block;
 }
 
-#capture {
-  padding: 5px 10px;
+/* --- the bar --------------------------------------------------------------- */
+
+#bar {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  height: var(--bar-h);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  background: var(--bar);
+  border-bottom: 1px solid var(--border);
+}
+#bar > button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  min-width: 30px;
+  padding: 0 7px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel);
-  color: var(--muted);
+  color: var(--fg);
   cursor: pointer;
-  font-size: 12px;
 }
-/* off = stealth = good → green */
-#capture[data-on="0"] {
+#bar > button:hover:not(:disabled) {
+  background: rgba(255, 241, 123, 0.1);
+  color: var(--accent);
+}
+#bar > button:disabled {
+  color: #4d4360;
+  cursor: default;
+}
+#url {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  box-sizing: border-box;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 10px;
+  font: inherit;
+}
+#url:focus {
+  outline: none;
   border-color: var(--green);
-  color: var(--green);
 }
 
-#done {
-  margin-left: auto;
-  padding: 6px 14px;
+#bar > #done {
+  padding: 0 14px;
   border: 0;
-  border-radius: 6px;
   background: var(--green);
   color: #0b1206;
   font-weight: 700;
-  cursor: pointer;
 }
-#done:hover {
+#bar > #done:hover:not(:disabled) {
+  background: var(--green);
+  color: #0b1206;
   filter: brightness(1.08);
 }
-#done:disabled {
+#bar > #done:disabled {
   background: #2a2336;
   color: #6f6685;
-  cursor: default;
-  filter: none;
 }
+
+/* --- credential relay popover ---------------------------------- */
+
+[popover] {
+  position: fixed;
+  inset: auto;
+  top: calc(var(--bar-h) + 6px);
+  right: 8px;
+  margin: 0;
+  padding: 10px;
+  background: var(--bar);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+#vault {
+  width: min(320px, calc(100vw - 16px));
+  box-sizing: border-box;
+}
+#vault p {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+#vault .row {
+  display: flex;
+  gap: 6px;
+}
+#vault .row + .row {
+  margin-top: 6px;
+}
+#vault input {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 8px;
+}
+#vault button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--green);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--green);
+  cursor: pointer;
+}
+#vault button:hover {
+  background: rgba(81, 209, 54, 0.14);
+}
+
+/* --- tab strip (only when the session has more than one tab) ---------------- */
+
+#tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px 0;
+  background: var(--bar);
+  overflow-x: auto;
+}
+#tabs[hidden] {
+  display: none;
+}
+#tabs .tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 240px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: var(--panel);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 13px;
+}
+#tabs .tab.active {
+  color: var(--accent);
+  border-color: var(--green);
+}
+#tabs .tablabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#tabs .tabclose {
+  flex: 0 0 auto;
+  color: var(--muted);
+  display: inline-flex;
+}
+#tabs .tabclose:hover {
+  color: var(--red);
+}
+
+/* --- screencast ------------------------------------------------------------- */
 
 #wrap {
   position: relative; /* offsetParent for the canvas (local zoom math) */
@@ -103,123 +228,25 @@ canvas {
   transform-origin: 0 0;
 }
 
-#vaultbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 12px;
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 32px);
+  padding: 8px 14px;
+  border-radius: 8px;
   background: var(--bar);
-  border-bottom: 1px solid var(--border);
-}
-#vaultbar input {
-  background: var(--panel);
-  color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 5px 8px;
-  min-width: 150px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  z-index: 900;
 }
-#vaultbar button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
-  border: 1px solid var(--green);
-  border-radius: 5px;
-  background: transparent;
-  color: var(--green);
-  cursor: pointer;
+#toast[data-kind="err"] {
+  border-color: var(--red);
+  color: var(--red);
 }
-#vaultbar button:hover {
-  background: rgba(81, 209, 54, 0.14);
-}
-
-#tabs {
-  display: flex;
-  gap: 4px;
-  padding: 6px 12px 0;
-  background: var(--bar);
-  overflow-x: auto;
-}
-#tabs .tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 240px;
-  padding: 6px 12px;
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-radius: 6px 6px 0 0;
-  background: var(--panel);
-  color: var(--fg);
-  cursor: pointer;
-  font-size: 13px;
-}
-#tabs .tab.active {
-  background: var(--bar);
-  color: var(--accent);
-  border-color: var(--green);
-}
-#tabs .tab.newtab {
-  color: var(--green);
-  flex: 0 0 auto;
-}
-#tabs .tablabel {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-#tabs .tabclose {
-  flex: 0 0 auto;
-  color: var(--muted);
-  display: inline-flex;
-}
-#tabs .tabclose:hover {
-  color: #ff6b8a;
-}
-
-#nav {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  background: var(--bar);
-  border-bottom: 1px solid var(--border);
-}
-#nav button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 5px 9px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--panel);
-  color: var(--fg);
-  cursor: pointer;
-}
-#nav button:hover {
-  background: rgba(255, 241, 123, 0.1);
-  color: var(--accent);
-}
-#nav #url {
-  flex: 1;
-  min-width: 0;
-  background: var(--panel);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 5px 10px;
-  font: inherit;
-}
-#nav #url:focus {
-  outline: none;
-  border-color: var(--green);
-}
-
-button svg,
-.tabclose svg {
-  display: block;
+#toast[hidden] {
+  display: none;
 }
 
 #overlay {
@@ -243,5 +270,85 @@ button svg,
 @media (pointer: coarse) {
   input {
     font-size: 16px;
+  }
+}
+
+/* --- narrow screens: navigation on top, actions in a bottom bar -------------
+   The bar's children join a page-level grid (display: contents), so the same
+   markup splits into a top row ([<] [>] [url] [+]) and a thumb-reachable bottom
+   row ([key] ... [Done]). Every item gets an explicit cell: the two
+   pseudo-elements painting the rows' backgrounds occupy those rows, and
+   auto-placement would route around them into extra columns. */
+@media (max-width: 640px) {
+  body {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    grid-template-rows: auto var(--bar-h) minmax(0, 1fr) var(--bar-h);
+    column-gap: 6px;
+    padding: 0 8px env(safe-area-inset-bottom);
+    box-sizing: border-box;
+  }
+  body::before,
+  body::after {
+    content: "";
+    grid-column: 1 / -1;
+    background: var(--bar);
+    z-index: -1;
+    margin: 0 -8px;
+  }
+  body::before {
+    grid-row: 2;
+    border-bottom: 1px solid var(--border);
+  }
+  body::after {
+    grid-row: 4;
+    border-top: 1px solid var(--border);
+  }
+
+  #bar {
+    display: contents;
+  }
+  #tabs {
+    grid-row: 1;
+    grid-column: 1 / -1;
+    margin: 0 -8px;
+  }
+  #bar > button,
+  #url {
+    align-self: center;
+    height: 34px;
+  }
+  #back {
+    grid-area: 2 / 1;
+  }
+  #fwd {
+    grid-area: 2 / 2;
+  }
+  #url {
+    grid-area: 2 / 3;
+  }
+  #newtab {
+    grid-area: 2 / 4;
+  }
+  #wrap {
+    grid-row: 3;
+    grid-column: 1 / -1;
+    margin: 0 -8px;
+  }
+  #keys {
+    grid-area: 4 / 1;
+  }
+  #bar > #done {
+    grid-area: 4 / 3 / 5 / 5;
+    justify-self: end;
+  }
+
+  /* Popover and toast come up from the bottom bar instead of down from the top. */
+  #vault {
+    top: auto;
+    bottom: calc(var(--bar-h) + 6px + env(safe-area-inset-bottom));
+  }
+  #toast {
+    bottom: calc(var(--bar-h) + 12px + env(safe-area-inset-bottom));
   }
 }

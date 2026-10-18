@@ -109,8 +109,8 @@ fn claim_path(token: &str) -> PathBuf {
 /// ticket sessionId). When present, the listener disables the CDP `Runtime`
 /// domain on that session's tabs — which stops console-log capture AND removes
 /// the console-serialization side-channel that bot-detectors use to spot CDP.
-/// The takeover UI toggles it via POST .../capture/{on,off}; the listener polls
-/// it. Path uses the default takeover dir so the listener (separate process)
+/// The agent toggles it with the `set_stealth` tool; the listener polls it.
+/// Path uses the default takeover dir so the listener (separate process)
 /// finds it without extra config.
 pub fn stealth_dir() -> PathBuf {
     takeover_dir().join("stealth")
@@ -124,35 +124,7 @@ fn valid_ctx(ctx: &str) -> bool {
     !ctx.is_empty() && ctx.len() <= 64 && ctx.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
-/// Set console capture on/off for a token's session (writes/removes the stealth
-/// flag the listener polls). `on` = capture enabled (no flag).
-async fn set_capture(token: &str, on: bool) -> Result<()> {
-    let ticket = read_ticket(token).await?;
-    if !valid_ctx(&ticket.session_id) {
-        return Err(anyhow!("invalid ctx"));
-    }
-    tokio::fs::create_dir_all(stealth_dir()).await.ok();
-    let path = stealth_path(&ticket.session_id);
-    if on {
-        let _ = tokio::fs::remove_file(&path).await;
-    } else {
-        tokio::fs::write(&path, b"1")
-            .await
-            .context("writing stealth flag")?;
-    }
-    Ok(())
-}
-
-/// Whether console capture is currently ON for a token's session.
-async fn capture_on(token: &str) -> Result<bool> {
-    let ticket = read_ticket(token).await?;
-    Ok(!tokio::fs::try_exists(stealth_path(&ticket.session_id))
-        .await
-        .unwrap_or(false))
-}
-
-/// Set stealth for a session directly — the trusted MCP path (no token/claim,
-/// unlike the web-UI `set_capture`). `stealth = true` writes the flag (listener
+/// Set stealth for a session — the trusted MCP path. `stealth = true` writes the flag (listener
 /// disables Runtime → passes CDP-based bot detection, at the cost of console
 /// capture and main-world evaluate); `false` removes it.
 pub async fn set_stealth(session_id: &str, stealth: bool) -> Result<()> {
@@ -576,36 +548,6 @@ async fn route(method: &str, path: &str, chrome_ws_base: &str, cookie: Option<&s
                     return Resp::new("500 Internal Server Error", "text/plain", "error");
                 }
                 return Resp::new("200 OK", "text/plain", "done");
-            }
-            // POST /takeover/<token>/capture/{on,off} — toggle console capture
-            // (CDP Runtime) for this session. Claimant only.
-            for (suffix, on) in [("/capture/on", true), ("/capture/off", false)] {
-                if let Some(token) = rest.strip_suffix(suffix) {
-                    if !valid_token(token) {
-                        return Resp::new("400 Bad Request", "text/plain", "bad token");
-                    }
-                    if !claim_matches(token, cookie).await {
-                        return Resp::new("403 Forbidden", "text/plain", "not the claimant");
-                    }
-                    if set_capture(token, on).await.is_err() {
-                        return Resp::new("500 Internal Server Error", "text/plain", "error");
-                    }
-                    return Resp::new("200 OK", "text/plain", if on { "on" } else { "off" });
-                }
-            }
-        }
-    }
-
-    // GET /takeover/<token>/capture — current capture state (for the UI button).
-    if method == "GET" {
-        if let Some(rest) = path.strip_prefix("/takeover/") {
-            if let Some(token) = rest.strip_suffix("/capture") {
-                let on = capture_on(token).await.unwrap_or(true);
-                return Resp::new(
-                    "200 OK",
-                    "application/json",
-                    format!("{{\"captureOn\":{on}}}"),
-                );
             }
         }
     }

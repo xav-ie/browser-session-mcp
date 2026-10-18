@@ -8,12 +8,12 @@ const TOKEN =
 
 const canvas = document.getElementById("screen") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d") as CanvasRenderingContext2D;
-const statusEl = document.getElementById("status") as HTMLElement;
 const doneBtn = document.getElementById("done") as HTMLButtonElement;
 const tabsEl = document.getElementById("tabs") as HTMLElement;
 const wrapEl = document.getElementById("wrap") as HTMLElement;
 const overlayEl = document.getElementById("overlay") as HTMLElement;
 const urlEl = document.getElementById("url") as HTMLInputElement;
+const toastEl = document.getElementById("toast") as HTMLElement;
 
 let nextId = 1;
 let lastMeta: any = null; // most recent screencastFrame metadata (for coord mapping)
@@ -26,7 +26,6 @@ let createTargetId: number | null = null;
 let urlQueryId: number | null = null;
 let navHistoryId: number | null = null; // pending Page.getNavigationHistory id
 let refreshTimer: any = null;
-let resizeTimer: any = null;
 let lastTabs: any[] = [];
 const tabOrder: string[] = []; // stable display order (Target.getTargets is not ordered)
 
@@ -46,16 +45,17 @@ const svg = (size: number, body: string) =>
 const ICONS = {
   back: svg(16, '<path d="M15 18l-6-6 6-6"/>'),
   fwd: svg(16, '<path d="M9 18l6-6-6-6"/>'),
-  reload: svg(
-    16,
-    '<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>',
-  ),
   plus: svg(14, '<path d="M12 5v14M5 12h14"/>'),
   close: svg(13, '<path d="M18 6 6 18M6 6l12 12"/>'),
   enter: svg(
     14,
     '<path d="M9 10l-4 4 4 4"/><path d="M5 14h11a4 4 0 0 0 4-4V6"/>',
   ),
+  key: svg(
+    16,
+    '<circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2M16 7l3 3M19 4l2 2"/>',
+  ),
+  plus16: svg(16, '<path d="M12 5v14M5 12h14"/>'),
 };
 
 function send(method: string, params?: any): number | null {
@@ -64,8 +64,20 @@ function send(method: string, params?: any): number | null {
   ws.send(JSON.stringify({ id, method, params: params || {} }));
   return id;
 }
-function setStatus(s: string) {
-  statusEl.textContent = s;
+// Status goes to a toast at the bottom: progress ("claiming session…") and
+// errors stay until the next status, info (relay results) fades after a few
+// seconds, and reaching "connected" clears it.
+type StatusKind = "pending" | "ok" | "err" | "info";
+let toastTimer: any = null;
+function setStatus(s: string, kind: StatusKind = "info") {
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = null;
+  toastEl.hidden = kind === "ok";
+  if (kind === "ok") return;
+  toastEl.textContent = s;
+  toastEl.dataset.kind = kind;
+  if (kind === "info")
+    toastTimer = setTimeout(() => (toastEl.hidden = true), 3000);
 }
 
 // Every tab renders at the session viewport the agent chose (from the claim),
@@ -114,7 +126,9 @@ function fitCanvas() {
     parseFloat(cs.paddingTop) -
     parseFloat(cs.paddingBottom);
   if (w <= 0 || h <= 0) return;
-  const fit = Math.min(1, w / canvas.width, h / canvas.height);
+  // Scale up as well as down: a big window should get a big view, not a
+  // 1280x800 island in the middle.
+  const fit = Math.min(w / canvas.width, h / canvas.height);
   canvas.style.width = canvas.width * fit + "px";
   canvas.style.height = canvas.height * fit + "px";
   setView(view.zoom, view.x, view.y);
@@ -142,11 +156,11 @@ function relay(id: string) {
   const el = document.getElementById(id) as HTMLInputElement | null;
   const text = (el && el.value) || "";
   if (!text) {
-    setStatus("nothing to relay — autofill the box first, then click again");
+    setStatus("nothing to send: autofill the box first, then try again");
     return;
   }
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    setStatus("not connected");
+    setStatus("not connected", "err");
     return;
   }
   const a = {
@@ -159,7 +173,9 @@ function relay(id: string) {
   send("Input.dispatchKeyEvent", { type: "keyDown", ...a });
   send("Input.dispatchKeyEvent", { type: "keyUp", ...a });
   send("Input.insertText", { text });
-  setStatus("relayed " + id.slice(1) + " into the focused field");
+  setStatus(
+    (id === "vp" ? "password" : "username") + " sent to the focused field",
+  );
 }
 
 // --- tabs -----------------------------------------------------------------
@@ -245,17 +261,16 @@ function renderTabs(infos?: any[]) {
     });
     tabsEl.appendChild(b);
   }
-  const plus = document.createElement("button");
-  plus.className = "tab newtab";
-  plus.innerHTML = ICONS.plus;
-  plus.title = "Open a new tab";
-  plus.addEventListener("click", () => {
-    createTargetId = send("Target.createTarget", {
-      url: "about:blank",
-      browserContextId: ctxId,
-    });
-  });
-  tabsEl.appendChild(plus);
+  // A single tab needs no strip; the bar's + button opens more.
+  tabsEl.hidden = !multi;
+}
+
+// Replies awaited by call() (one-off requests that need their result).
+const pending = new Map<number, (result: any) => void>();
+function call(method: string, params?: any): Promise<any> {
+  const id = send(method, params);
+  if (id === null) return Promise.reject(new Error("not connected"));
+  return new Promise((resolve) => pending.set(id, resolve));
 }
 
 function onMessage(ev: MessageEvent) {
@@ -263,6 +278,13 @@ function onMessage(ev: MessageEvent) {
   try {
     msg = JSON.parse(ev.data);
   } catch {
+    return;
+  }
+
+  if (msg.id && pending.has(msg.id)) {
+    const resolve = pending.get(msg.id)!;
+    pending.delete(msg.id);
+    resolve(msg.result);
     return;
   }
 
@@ -336,7 +358,7 @@ function onMessage(ev: MessageEvent) {
 function connect(wsUrl: string) {
   ws = new WebSocket(wsUrl);
   ws.onopen = () => {
-    setStatus("connected");
+    setStatus("connected", "ok");
     send("Page.enable");
     // NOTE: deliberately NOT Runtime.enable — it turns on console-event
     // reporting, which is the CDP tell bot-detectors catch. Runtime.evaluate
@@ -358,9 +380,14 @@ function connect(wsUrl: string) {
     canvas.focus();
     refreshTabs();
   };
-  ws.onclose = () => {};
+  const sock = ws;
+  // Switching tabs or pressing Done drops `ws` first, so only an unexpected
+  // close (Chrome restarted, network gone) still finds this socket current.
+  ws.onclose = () => {
+    if (ws === sock) setStatus("connection lost, reload to reconnect", "err");
+  };
   ws.onerror = () =>
-    setStatus("connection error — is chrome.<base> reachable?");
+    setStatus("connection error: is chrome.<base> reachable?", "err");
   ws.onmessage = onMessage;
 }
 
@@ -570,23 +597,102 @@ function keyEvent(type: string, ev: KeyboardEvent) {
     modifiers: modBits(ev),
   });
 }
+// ⌘V / Ctrl+V pastes THIS machine's clipboard: forwarded as keys it would
+// paste the remote browser's (empty) clipboard, or type a stray "v" since Linux
+// Chrome ignores Cmd. So the shortcut stays local, the browser fires `paste`,
+// and the text is typed into the remote page's focused field.
+const isPasteKey = (e: KeyboardEvent) =>
+  (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "v";
+let pasteFallback: any = null;
+function pasteText(text: string) {
+  if (!text) return;
+  send("Input.insertText", { text });
+  setStatus("pasted " + text.length + " characters");
+}
+// ⌘C / Ctrl+C copies the remote page's selection to THIS machine's clipboard
+// (text selected in an input/textarea too; never a password field's).
+const isCopyKey = (e: KeyboardEvent) =>
+  (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "c";
+const SELECTION_JS = `(() => {
+  const a = document.activeElement;
+  if (a && (a.tagName === "TEXTAREA" || (a.tagName === "INPUT" && a.type !== "password"))
+      && typeof a.selectionStart === "number")
+    return a.value.slice(a.selectionStart, a.selectionEnd);
+  return String(getSelection());
+})()`;
+function copySelection() {
+  const text = call("Runtime.evaluate", {
+    expression: SELECTION_JS,
+    returnByValue: true,
+  }).then((r) => String((r && r.result && r.result.value) || ""));
+  // A promise-valued ClipboardItem is written inside this key press, which
+  // Safari requires; the remote answer arrives a moment later.
+  const write =
+    typeof ClipboardItem !== "undefined"
+      ? navigator.clipboard.write([
+          new ClipboardItem({
+            "text/plain": text.then((t) => {
+              if (!t) throw new Error("empty");
+              return new Blob([t], { type: "text/plain" });
+            }),
+          }),
+        ])
+      : text.then((t) => {
+          if (!t) throw new Error("empty");
+          return navigator.clipboard.writeText(t);
+        });
+  Promise.all([text, write])
+    .then(([t]) => setStatus("copied " + t.length + " characters"))
+    .catch(() =>
+      text.then(
+        (t) =>
+          setStatus(
+            t ? "couldn't write the clipboard" : "nothing selected",
+            t ? "err" : "info",
+          ),
+        () => setStatus("not connected", "err"),
+      ),
+    );
+}
+
 canvas.addEventListener("keydown", (e) => {
+  if (isCopyKey(e)) {
+    e.preventDefault();
+    copySelection();
+    return;
+  }
+  if (isPasteKey(e)) {
+    // Safari fires no `paste` on a non-editable element; read the clipboard
+    // directly there (it shows its own Paste prompt).
+    pasteFallback = setTimeout(() => {
+      navigator.clipboard
+        ?.readText()
+        .then(pasteText)
+        .catch(() => setStatus("clipboard not readable here", "err"));
+    }, 50);
+    return;
+  }
   e.preventDefault();
   keyEvent("keyDown", e);
 });
 canvas.addEventListener("keyup", (e) => {
+  if (isPasteKey(e) || isCopyKey(e)) return;
   e.preventDefault();
   keyEvent("keyUp", e);
 });
-
-// Re-fit the local canvas when the takeover window resizes (debounced). The
-// remote viewport stays at the session size.
-window.addEventListener("resize", () => {
-  if (resizeTimer) clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(fitCanvas, 100);
+document.addEventListener("paste", (e) => {
+  if (document.activeElement !== canvas) return; // URL bar, vault: normal paste
+  e.preventDefault();
+  clearTimeout(pasteFallback);
+  pasteText(e.clipboardData?.getData("text/plain") || "");
 });
 
-// --- address bar + back/forward/reload ------------------------------------
+// Re-fit the local canvas whenever the screencast area changes size: window
+// resizes, and the tab strip appearing or disappearing. The remote viewport
+// stays at the session size.
+new ResizeObserver(fitCanvas).observe(wrapEl);
+
+// --- address bar + back/forward ------------------------------------------
 function navTo() {
   let u = urlEl.value.trim();
   if (!u) return;
@@ -596,10 +702,17 @@ function navTo() {
 }
 const backBtn = document.getElementById("back") as HTMLButtonElement;
 const fwdBtn = document.getElementById("fwd") as HTMLButtonElement;
-const reloadBtn = document.getElementById("reload") as HTMLButtonElement;
 backBtn.innerHTML = ICONS.back;
 fwdBtn.innerHTML = ICONS.fwd;
-reloadBtn.innerHTML = ICONS.reload;
+(document.getElementById("keys") as HTMLElement).innerHTML = ICONS.key;
+const newTabBtn = document.getElementById("newtab") as HTMLElement;
+newTabBtn.innerHTML = ICONS.plus16;
+newTabBtn.addEventListener("click", () => {
+  createTargetId = send("Target.createTarget", {
+    url: "about:blank",
+    browserContextId: ctxId,
+  });
+});
 // Ask Chrome for the navigation history so we can enable/disable back & forward.
 // Re-run after every navigation (frameNavigated) and after clicking the buttons,
 // since same-document history moves (e.g. hash changes) don't fire frameNavigated.
@@ -616,40 +729,7 @@ fwdBtn.addEventListener("click", () => {
   send("Runtime.evaluate", { expression: "history.forward()" });
   setTimeout(refreshNav, 150);
 });
-reloadBtn.addEventListener("click", () => send("Page.reload"));
 
-// --- console-capture (CDP) toggle -----------------------------------------
-// Tells the listener (via the daemon) to enable/disable the Runtime domain for
-// this session. OFF = stealthier (removes the CDP console side-channel); ON =
-// console logging works. The label/colour reflects state.
-const captureBtn = document.getElementById("capture") as HTMLButtonElement;
-function setCaptureLabel(on: boolean) {
-  captureBtn.dataset.on = on ? "1" : "0";
-  captureBtn.textContent = on ? "console capture: on" : "console capture: off";
-}
-async function refreshCapture() {
-  try {
-    const r = await fetch("/takeover/" + TOKEN + "/capture");
-    if (r.ok) setCaptureLabel((await r.json()).captureOn);
-  } catch {
-    /* leave default */
-  }
-}
-captureBtn.addEventListener("click", async () => {
-  const next = captureBtn.dataset.on !== "1";
-  try {
-    const r = await fetch(
-      "/takeover/" + TOKEN + "/capture/" + (next ? "on" : "off"),
-      {
-        method: "POST",
-      },
-    );
-    if (r.ok) setCaptureLabel(next);
-  } catch {
-    /* ignore */
-  }
-});
-refreshCapture();
 urlEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
@@ -660,21 +740,28 @@ urlEl.addEventListener("keydown", (e) => {
 // --- done -----------------------------------------------------------------
 doneBtn.addEventListener("click", async () => {
   doneBtn.disabled = true;
-  setStatus("handing back to agent…");
+  setStatus("handing back to agent…", "pending");
   try {
     await fetch("/takeover/" + TOKEN + "/done", { method: "POST" });
     if (ws) {
       try {
         send("Page.stopScreencast");
       } catch {}
-      ws.close();
+      const sock = ws;
+      ws = null; // an intentional close, not "connection lost"
+      sock.close();
     }
-    setStatus("done — you can close this tab");
+    setStatus("done, you can close this tab", "ok");
+    document.querySelectorAll<HTMLElement>("[popover]").forEach((p) => {
+      try {
+        p.hidePopover();
+      } catch {}
+    });
     overlayEl.textContent =
       "Handed back to the agent — this session is no longer interactive. You can close this tab.";
     overlayEl.style.display = "flex";
   } catch {
-    setStatus("failed to signal done — try again");
+    setStatus("failed to signal done, try again", "err");
     doneBtn.disabled = false;
   }
 });
@@ -690,31 +777,31 @@ document.querySelectorAll("#vault button[data-for]").forEach((b) => {
 // Claim the session on load (POST, so passive unfurl/prefetch GETs never claim
 // it). Only on success do we receive the WS base + target and start.
 async function start() {
-  setStatus("claiming session…");
+  setStatus("claiming session…", "pending");
   let r: Response;
   try {
     r = await fetch("/takeover/" + TOKEN + "/claim", { method: "POST" });
   } catch {
-    setStatus("network error reaching the takeover server");
+    setStatus("network error reaching the takeover server", "err");
     return;
   }
   if (r.status === 409) {
-    setStatus("This takeover link is already in use by someone else.");
+    setStatus("This takeover link is already in use by someone else.", "err");
     return;
   }
   if (!r.ok) {
-    setStatus("could not claim this link (HTTP " + r.status + ")");
+    setStatus("could not claim this link (HTTP " + r.status + ")", "err");
     return;
   }
   let info: any;
   try {
     info = await r.json();
   } catch {
-    setStatus("bad claim response");
+    setStatus("bad claim response", "err");
     return;
   }
   if (!info.wsBase || !info.targetId) {
-    setStatus("no session URL returned");
+    setStatus("no session URL returned", "err");
     return;
   }
   wsBase = info.wsBase;

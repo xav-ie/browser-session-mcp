@@ -3,52 +3,15 @@ import Base from "../layouts/base.astro";
 ---
 
 <Base>
-  <header>
-    <b>Human takeover</b>
-    <span id="status">connecting…</span>
-    <button
-      id="capture"
-      title="Toggle CDP console capture. OFF is stealthier (removes the CDP signal bot-detectors catch); ON re-enables console logging."
-      >console capture</button
-    >
-    <button id="done" disabled>I'm done — hand back to agent</button>
-  </header>
+  {
+    /* One bar: navigation, new tab, and the credential relay as a
+      popover, so the screencast gets the rest of the screen. */
+  }
+  <nav id="tabs" hidden></nav>
 
-  <section id="vaultbar">
-    {
-      /* A real login form so your local extension recognizes it and autofills.
-        Values are read same-origin and typed into the remote page over CDP. */
-    }
-    <form id="vault" autocomplete="on" action="#" onsubmit="return false">
-      <input
-        id="vu"
-        type="text"
-        name="username"
-        autocomplete="username"
-        placeholder="username"
-      />
-      <button type="button" data-for="vu"
-        ><span class="bl">into focused field</span></button
-      >
-      <input
-        id="vp"
-        type="password"
-        name="password"
-        autocomplete="current-password"
-        placeholder="password"
-      />
-      <button type="button" data-for="vp"
-        ><span class="bl">into focused field</span></button
-      >
-    </form>
-  </section>
-
-  <nav id="tabs"></nav>
-
-  <div id="nav">
+  <header id="bar">
     <button id="back" title="Back"></button>
     <button id="fwd" title="Forward"></button>
-    <button id="reload" title="Reload"></button>
     <input
       id="url"
       type="text"
@@ -56,11 +19,50 @@ import Base from "../layouts/base.astro";
       autocomplete="off"
       placeholder="Enter a URL and press Enter"
     />
-  </div>
+    <button id="newtab" title="Open a new tab"></button>
+    <button id="keys" popovertarget="vault" title="Fill username or password"
+    ></button>
+    <button
+      id="done"
+      disabled
+      title="Hand control back to the agent. It resumes and normal network logging turns back on."
+      >Done</button
+    >
+  </header>
+
+  <form id="vault" popover autocomplete="on" action="#" onsubmit="return false">
+    {
+      /* A real login form so your local password manager recognizes it and
+        autofills. Values are read same-origin and typed into the remote page's
+        focused field over CDP. */
+    }
+    <p>Autofill here, then send each into the field focused on the page.</p>
+    <div class="row">
+      <input
+        id="vu"
+        type="text"
+        name="username"
+        autocomplete="username"
+        placeholder="username"
+      />
+      <button type="button" data-for="vu"><span>send</span></button>
+    </div>
+    <div class="row">
+      <input
+        id="vp"
+        type="password"
+        name="password"
+        autocomplete="current-password"
+        placeholder="password"
+      />
+      <button type="button" data-for="vp"><span>send</span></button>
+    </div>
+  </form>
 
   <div id="wrap">
     <canvas id="screen" width="1280" height="800" tabindex="0"></canvas>
   </div>
+  <div id="toast" role="alert" hidden></div>
   <div id="overlay"></div>
 
   <script>
