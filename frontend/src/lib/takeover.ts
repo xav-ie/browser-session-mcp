@@ -68,23 +68,18 @@ function setStatus(s: string) {
   statusEl.textContent = s;
 }
 
-// One consistent viewport for EVERY tab, sized to fit this browser window, so
-// tabs render identically and the remote page isn't tiny or oversized.
-function viewSize() {
-  const w = Math.max(
-    900,
-    Math.min(1680, Math.round(document.documentElement.clientWidth)),
-  );
-  const top = wrapEl ? wrapEl.getBoundingClientRect().top : 120;
-  const h = Math.max(600, Math.round(window.innerHeight - top));
-  return { w, h };
-}
+// Every tab renders at the session viewport the agent chose (from the claim),
+// never at this window's size: resizing would reflow the page out from under
+// the agent and break its coordinates. Re-applying the same size is a no-op for
+// tabs already at it and pulls fresh tabs/popups in line. The canvas is scaled
+// locally to fit this window instead (fitCanvas).
+let sessionVp = { width: 1280, height: 800 };
 function applyViewport() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const { w, h } = viewSize();
+  const { width, height } = sessionVp;
   send("Emulation.setDeviceMetricsOverride", {
-    width: w,
-    height: h,
+    width,
+    height,
     deviceScaleFactor: 1,
     mobile: false,
   });
@@ -95,9 +90,41 @@ function applyViewport() {
     format: "jpeg",
     quality: 70,
     everyNthFrame: 1,
-    maxWidth: w,
-    maxHeight: h,
+    maxWidth: width,
+    maxHeight: height,
   });
+}
+
+// --- local view: fit + pinch zoom ------------------------------------------
+// The canvas is fit ("contain") into #wrap, then a local transform zooms/pans
+// it (two-finger pinch). Purely client-side — the remote page never sees it,
+// and toPage() maps through getBoundingClientRect, which includes the transform.
+const view = { zoom: 1, x: 0, y: 0 };
+const MAX_ZOOM = 5;
+function fitCanvas() {
+  const r = wrapEl.getBoundingClientRect();
+  if (!r.width || !r.height) return;
+  const fit = Math.min(1, r.width / canvas.width, r.height / canvas.height);
+  canvas.style.width = canvas.width * fit + "px";
+  canvas.style.height = canvas.height * fit + "px";
+  setView(view.zoom, view.x, view.y);
+}
+// Keep the zoomed canvas covering #wrap (or centered on an axis where it's
+// smaller), so you can't pan the page off into the void.
+function clampAxis(t: number, off: number, scaled: number, wrapSize: number) {
+  if (scaled <= wrapSize) return (wrapSize - scaled) / 2 - off;
+  return Math.min(-off, Math.max(wrapSize - scaled - off, t));
+}
+function setView(zoom: number, x: number, y: number) {
+  view.zoom = Math.min(MAX_ZOOM, Math.max(1, zoom));
+  const w = canvas.offsetWidth * view.zoom;
+  const h = canvas.offsetHeight * view.zoom;
+  view.x = clampAxis(x, canvas.offsetLeft, w, wrapEl.clientWidth);
+  view.y = clampAxis(y, canvas.offsetTop, h, wrapEl.clientHeight);
+  canvas.style.transform =
+    view.zoom === 1
+      ? ""
+      : `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`;
 }
 
 // --- vault relay ----------------------------------------------------------
@@ -237,6 +264,7 @@ function onMessage(ev: MessageEvent) {
       if (canvas.width !== img.width || canvas.height !== img.height) {
         canvas.width = img.width;
         canvas.height = img.height;
+        fitCanvas();
       }
       ctx.drawImage(img, 0, 0);
     };
@@ -327,15 +355,24 @@ function connect(wsUrl: string) {
 }
 
 // --- input forwarding -----------------------------------------------------
+// Displayed canvas (fit + local zoom) → the page's viewport in CSS pixels. The
+// frame shows the whole device screen, so map by the frame's device size, like
+// DevTools' own screencast does; pageScaleFactor is already baked into the
+// image, so dividing by it again misaims every click once it isn't 1.
 function toPage(ev: { clientX: number; clientY: number }) {
   const rect = canvas.getBoundingClientRect();
-  const sx = canvas.width / rect.width;
-  const sy = canvas.height / rect.height;
-  const px = (ev.clientX - rect.left) * sx;
-  const py = (ev.clientY - rect.top) * sy;
-  const scale = (lastMeta && lastMeta.pageScaleFactor) || 1;
+  const w = (lastMeta && lastMeta.deviceWidth) || canvas.width;
+  const h = (lastMeta && lastMeta.deviceHeight) || canvas.height;
   const offTop = (lastMeta && lastMeta.offsetTop) || 0;
-  return { x: px / scale, y: (py - offTop) / scale };
+  return {
+    x: ((ev.clientX - rect.left) * w) / rect.width,
+    y: ((ev.clientY - rect.top) * h) / rect.height - offTop,
+  };
+}
+// Remote CSS pixels per displayed CSS pixel (for turning drags into scrolls).
+function pageUnitsPerPx() {
+  const w = (lastMeta && lastMeta.deviceWidth) || canvas.width;
+  return w / canvas.getBoundingClientRect().width;
 }
 const BUTTONS: Record<number, string> = { 0: "left", 1: "middle", 2: "right" };
 function mouse(type: string, ev: MouseEvent) {
@@ -385,6 +422,132 @@ canvas.addEventListener(
   { passive: false },
 );
 
+// --- touch ----------------------------------------------------------------
+// Phones send no real mouse: one finger taps (→ click) or drags (→ scrolls the
+// remote page); two fingers pinch-zoom/pan the local view so the full-size
+// viewport is readable on a small screen. `touch-action: none` on the canvas
+// keeps the browser from zooming the takeover page itself, and cancelling
+// pointerdown suppresses the compatibility mouse events (no double input).
+const TAP_SLOP = 10;
+const touches = new Map<number, { x: number; y: number }>();
+let gesture:
+  | { kind: "tap" | "scroll"; sx: number; sy: number; lx: number; ly: number }
+  | {
+      kind: "pinch";
+      dist: number;
+      cx: number;
+      cy: number;
+      zoom: number;
+      x: number;
+      y: number;
+    }
+  | { kind: "none" }
+  | null = null;
+function pinchState() {
+  const [a, b] = [...touches.values()];
+  return {
+    dist: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+    cx: (a.x + b.x) / 2,
+    cy: (a.y + b.y) / 2,
+  };
+}
+function tap(ev: PointerEvent) {
+  const { x, y } = toPage(ev);
+  const base = { x, y, button: "left", modifiers: 0 };
+  send("Input.dispatchMouseEvent", {
+    ...base,
+    type: "mouseMoved",
+    button: "none",
+  });
+  send("Input.dispatchMouseEvent", {
+    ...base,
+    type: "mousePressed",
+    buttons: 1,
+    clickCount: 1,
+  });
+  send("Input.dispatchMouseEvent", {
+    ...base,
+    type: "mouseReleased",
+    buttons: 0,
+    clickCount: 1,
+  });
+}
+canvas.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse") return;
+  e.preventDefault();
+  canvas.focus();
+  canvas.setPointerCapture(e.pointerId);
+  touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (touches.size === 1) {
+    gesture = {
+      kind: "tap",
+      sx: e.clientX,
+      sy: e.clientY,
+      lx: e.clientX,
+      ly: e.clientY,
+    };
+  } else if (touches.size === 2) {
+    gesture = {
+      kind: "pinch",
+      ...pinchState(),
+      zoom: view.zoom,
+      x: view.x,
+      y: view.y,
+    };
+  } else {
+    gesture = { kind: "none" };
+  }
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (e.pointerType === "mouse" || !touches.has(e.pointerId) || !gesture)
+    return;
+  touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (gesture.kind === "tap" || gesture.kind === "scroll") {
+    if (
+      gesture.kind === "tap" &&
+      Math.hypot(e.clientX - gesture.sx, e.clientY - gesture.sy) > TAP_SLOP
+    ) {
+      gesture.kind = "scroll";
+    }
+    if (gesture.kind === "scroll") {
+      const k = pageUnitsPerPx();
+      const { x, y } = toPage(e);
+      send("Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x,
+        y,
+        deltaX: (gesture.lx - e.clientX) * k,
+        deltaY: (gesture.ly - e.clientY) * k,
+      });
+    }
+    gesture.lx = e.clientX;
+    gesture.ly = e.clientY;
+  } else if (gesture.kind === "pinch") {
+    // Zoom about the fingers' midpoint: the content point that was under the
+    // starting midpoint stays under the current one.
+    const p = pinchState();
+    const zoom = Math.min(
+      MAX_ZOOM,
+      Math.max(1, (gesture.zoom * p.dist) / gesture.dist),
+    );
+    const r = wrapEl.getBoundingClientRect();
+    const ox = r.left + canvas.offsetLeft;
+    const oy = r.top + canvas.offsetTop;
+    const ux = (gesture.cx - ox - gesture.x) / gesture.zoom;
+    const uy = (gesture.cy - oy - gesture.y) / gesture.zoom;
+    setView(zoom, p.cx - ox - ux * zoom, p.cy - oy - uy * zoom);
+  }
+});
+function touchEnd(e: PointerEvent) {
+  if (e.pointerType === "mouse" || !touches.has(e.pointerId)) return;
+  touches.delete(e.pointerId);
+  if (e.type === "pointerup" && gesture && gesture.kind === "tap") tap(e);
+  // Lifting one finger of a pinch must not turn into a stray tap or scroll.
+  gesture = touches.size ? { kind: "none" } : null;
+}
+canvas.addEventListener("pointerup", touchEnd);
+canvas.addEventListener("pointercancel", touchEnd);
+
 function keyEvent(type: string, ev: KeyboardEvent) {
   const isChar = type === "keyDown" && ev.key.length === 1;
   send("Input.dispatchKeyEvent", {
@@ -406,10 +569,11 @@ canvas.addEventListener("keyup", (e) => {
   keyEvent("keyUp", e);
 });
 
-// Re-fit the remote viewport when the takeover window resizes (debounced).
+// Re-fit the local canvas when the takeover window resizes (debounced). The
+// remote viewport stays at the session size.
 window.addEventListener("resize", () => {
   if (resizeTimer) clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(applyViewport, 250);
+  resizeTimer = setTimeout(fitCanvas, 100);
 });
 
 // --- address bar + back/forward/reload ------------------------------------
@@ -545,6 +709,11 @@ async function start() {
   }
   wsBase = info.wsBase;
   ctxId = info.ctxId;
+  if (info.viewport && info.viewport.width > 0 && info.viewport.height > 0)
+    sessionVp = info.viewport;
+  canvas.width = sessionVp.width;
+  canvas.height = sessionVp.height;
+  fitCanvas();
   openTab(info.targetId);
 }
 start();

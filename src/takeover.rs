@@ -27,6 +27,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::sessions::Viewport;
+
 /// What the human is being asked to drive. Written by the MCP tool, read by the
 /// daemon when it serves the page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +42,11 @@ pub struct Ticket {
     /// Unix-millis after which the daemon refuses to serve the page.
     #[serde(rename = "expiresAtMs")]
     pub expires_at_ms: u128,
+    /// The session's viewport, so the takeover UI renders every tab at the
+    /// size the agent chose instead of resizing it to the human's window.
+    /// Tickets minted before this field existed get the `open` default.
+    #[serde(default)]
+    pub viewport: Viewport,
 }
 
 /// Shared takeover dir under `STATE_DIR`. Both the container MCP and the host
@@ -676,12 +683,15 @@ async fn claim_response(token: &str, chrome_ws_base: &str, cookie: Option<&str>)
             Ok(maybe_secret) => {
                 // Hand back the WS base + this session's context id so the page
                 // can enumerate the session's tabs (Target.getTargets filtered by
-                // browserContextId) and switch between them.
+                // browserContextId) and switch between them, plus the session
+                // viewport every tab is rendered at.
                 let body = format!(
-                    "{{\"wsBase\":{},\"targetId\":{},\"ctxId\":{}}}",
+                    "{{\"wsBase\":{},\"targetId\":{},\"ctxId\":{},\"viewport\":{{\"width\":{},\"height\":{}}}}}",
                     js_str(chrome_ws_base),
                     js_str(&t.target_id),
                     js_str(&t.session_id),
+                    t.viewport.width,
+                    t.viewport.height,
                 );
                 let resp = Resp::new("200 OK", "application/json", body);
                 // New claimant → hand them the claim cookie (scoped to this
@@ -728,8 +738,8 @@ fn js_str(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Ticket, active_in, cleanup, cookie_secure, is_stealth, read_ticket, valid_ctx, valid_token,
-        wait_for_done,
+        Ticket, Viewport, active_in, cleanup, cookie_secure, is_stealth, read_ticket, valid_ctx,
+        valid_token, wait_for_done,
     };
     use std::time::Duration;
 
@@ -774,6 +784,7 @@ mod tests {
             session_id: session.into(),
             target_id: "T".into(),
             expires_at_ms,
+            viewport: Viewport::default(),
         };
         let write = |token: &str, t: &Ticket| {
             std::fs::write(

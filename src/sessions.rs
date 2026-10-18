@@ -355,6 +355,11 @@ impl SessionManager {
         Ok(())
     }
 
+    /// The viewport chosen at `open` (or its default for older sessions).
+    pub async fn viewport(&self, session_id: &str) -> Viewport {
+        self.state.viewport(session_id).await.unwrap_or_default()
+    }
+
     /// The CDP targetId of the session's active page, creating a page if the
     /// context has none yet. Used to build the `/devtools/page/<id>` WebSocket
     /// path that the human-takeover page connects to directly. Mirrors

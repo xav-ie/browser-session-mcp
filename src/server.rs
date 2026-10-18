@@ -554,6 +554,7 @@ impl BrowserSessionServer {
                 session_id: session_id.clone(),
                 target_id,
                 expires_at_ms,
+                viewport: sessions.viewport(&session_id).await,
             },
         )
         .await?;

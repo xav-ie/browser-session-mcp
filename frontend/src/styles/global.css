@@ -13,8 +13,14 @@
   --green: #51d136;
 }
 
+/* The page is exactly one screen tall: the bars take what they need and the
+   screencast (#wrap) gets the rest, so the canvas can be fit to it. */
 body {
   margin: 0;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--bg);
   color: var(--fg);
   font:
@@ -25,7 +31,8 @@ body {
 header {
   display: flex;
   align-items: center;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   padding: 8px 12px;
   background: var(--bar);
   border-bottom: 1px solid var(--border);
@@ -75,16 +82,25 @@ header b {
 }
 
 #wrap {
+  position: relative; /* offsetParent for the canvas (local zoom math) */
+  flex: 1;
+  min-height: 0;
   display: flex;
+  align-items: center;
   justify-content: center;
+  overflow: hidden;
   padding: 0;
 }
+/* Sized by fitCanvas() and zoomed by a transform from takeover.ts.
+   touch-action: none hands every gesture to the takeover script instead of
+   letting the browser pinch-zoom or scroll the takeover page itself. */
 canvas {
+  flex: 0 0 auto;
   background: #000;
-  max-width: 100%;
-  height: auto;
   outline: 2px solid var(--green);
   cursor: default;
+  touch-action: none;
+  transform-origin: 0 0;
 }
 
 #vaultbar {
@@ -220,4 +236,12 @@ button svg,
   padding: 24px;
   font-size: 32px;
   z-index: 1000;
+}
+
+/* iOS Safari zooms the whole page when an input under 16px gets focus, and
+   that zoom never resets. */
+@media (pointer: coarse) {
+  input {
+    font-size: 16px;
+  }
 }
