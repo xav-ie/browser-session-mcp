@@ -110,7 +110,7 @@ You locate elements by **CSS selector**, not by scanning uids. The loop:
 When a flow needs credentials you must not handle (passwords, passkeys, 2FA),
 **do not type them and do not ask the user for them.** Hand the live page over:
 
-1. `request_human_takeover({ sessionId, ttl? })` → `{ url, token, expiresAtMs }`
+1. `request_human_takeover({ sessionId, ttlMinutes? })` → `{ url, token, expiresAtMs }`
    — returns immediately. **Show the `url` to the user** and ask them to open it
    and log in (they see a live view of the page; credentials go page→Chrome
    directly and never pass through you).
@@ -122,11 +122,19 @@ When a flow needs credentials you must not handle (passwords, passkeys, 2FA),
      done = (await await_human_takeover({ token, timeout: 4000 })).completed
    }
    ```
+   **`completed: true` is the only signal that the human is finished.** It
+   fires when they press **Done** in the takeover page. Don't infer it from
+   the page (a URL change, a logged-in header, a 2FA screen clearing): the
+   human may still be typing, and a takeover left open keeps request bodies
+   out of the network log. If you were told to return instead of waiting,
+   say so, and when you're resumed confirm with one short
+   `await_human_takeover` before acting. If it isn't completed, ask the user
+   to press Done rather than proceeding.
 3. Once done, the session is authenticated — continue in the same `sessionId`.
    Consider `save_browser_state({ sessionId, name })` so future sessions can
    `load_browser_state` and skip the login entirely.
 
-The link is a bearer credential (default TTL 5 min): mint it only when needed
+The link is a bearer credential (default TTL 30 min): mint it only when needed
 and hand it straight to the user.
 
 ## Operating discipline
