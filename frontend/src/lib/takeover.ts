@@ -102,9 +102,19 @@ function applyViewport() {
 const view = { zoom: 1, x: 0, y: 0 };
 const MAX_ZOOM = 5;
 function fitCanvas() {
-  const r = wrapEl.getBoundingClientRect();
-  if (!r.width || !r.height) return;
-  const fit = Math.min(1, r.width / canvas.width, r.height / canvas.height);
+  // Fit inside #wrap's padding, which leaves room for the canvas outline
+  // (drawn outside the box, so #wrap's overflow clip would cut it off).
+  const cs = getComputedStyle(wrapEl);
+  const w =
+    wrapEl.clientWidth -
+    parseFloat(cs.paddingLeft) -
+    parseFloat(cs.paddingRight);
+  const h =
+    wrapEl.clientHeight -
+    parseFloat(cs.paddingTop) -
+    parseFloat(cs.paddingBottom);
+  if (w <= 0 || h <= 0) return;
+  const fit = Math.min(1, w / canvas.width, h / canvas.height);
   canvas.style.width = canvas.width * fit + "px";
   canvas.style.height = canvas.height * fit + "px";
   setView(view.zoom, view.x, view.y);

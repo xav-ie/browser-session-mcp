@@ -89,7 +89,7 @@ header b {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  padding: 0;
+  padding: 4px; /* room for the canvas outline; see fitCanvas() */
 }
 /* Sized by fitCanvas() and zoomed by a transform from takeover.ts.
    touch-action: none hands every gesture to the takeover script instead of
