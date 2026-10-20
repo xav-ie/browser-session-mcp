@@ -16,9 +16,9 @@ use chromiumoxide::keys::USKEYBOARD_LAYOUT;
 use chromiumoxide::layout::Point;
 use chromiumoxide::page::ScreenshotParams;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ErrorData as McpError, Implementation,
-    JsonObject, ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities,
-    ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData as McpError,
+    Implementation, JsonObject, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
+    ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler};
@@ -54,8 +54,8 @@ impl BrowserSessionServer {
 }
 
 impl ServerHandler for BrowserSessionServer {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.protocol_version = ProtocolVersion::V_2025_06_18;
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("browser-session-mcp", env!("CARGO_PKG_VERSION"));
@@ -80,20 +80,18 @@ impl ServerHandler for BrowserSessionServer {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         let args = request.arguments.unwrap_or_default();
         let name = request.name.as_ref();
         match self.dispatch(name, args).await {
-            Ok(result) => Ok(result),
+            Ok(result) => Ok(result.into()),
             Err(err) => {
                 // Connection-died errors mean the next call should rebuild
                 // the chromiumoxide handle from scratch.
                 if looks_like_disconnect(&err) {
                     self.ctx.invalidate().await;
                 }
-                Ok(CallToolResult::error(vec![Content::text(format!(
-                    "{err:#}"
-                ))]))
+                Ok(CallToolResult::error(vec![ContentBlock::text(format!("{err:#}"))]).into())
             }
         }
     }
@@ -300,8 +298,8 @@ impl BrowserSessionServer {
         let len = bytes.len();
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(CallToolResult::success(vec![
-            Content::text(format!("Captured {len} bytes PNG.")),
-            Content::image(b64, "image/png".to_string()),
+            ContentBlock::text(format!("Captured {len} bytes PNG.")),
+            ContentBlock::image(b64, "image/png".to_string()),
         ]))
     }
 
@@ -868,11 +866,11 @@ struct PageSummary {
 }
 
 fn ok_text(text: impl Into<String>) -> CallToolResult {
-    CallToolResult::success(vec![Content::text(text.into())])
+    CallToolResult::success(vec![ContentBlock::text(text.into())])
 }
 
 fn ok_text_struct(text: impl Into<String>, structured: Value) -> CallToolResult {
-    let mut r = CallToolResult::success(vec![Content::text(text.into())]);
+    let mut r = CallToolResult::success(vec![ContentBlock::text(text.into())]);
     r.structured_content = Some(structured);
     r
 }
