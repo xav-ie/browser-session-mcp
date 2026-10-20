@@ -25,7 +25,7 @@ runs:
     # Push only on trusted pushes to main or a release tag — never on PRs or
     # manual dispatch — so the token is absent from every untrusted path.
     - if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
-      uses: ryanccn/attic-action@5635a15ef0c5462194ffbd05d1daeddc74625c3a # v0.5.0
+      uses: ryanccn/attic-action@dc99f5eb1d5c0495aa26f7b56337b30011fa153e # v0.5.2
       with:
         endpoint: https://cache.lalala.casa
         cache: browser-session-mcp
