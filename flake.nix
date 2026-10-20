@@ -58,14 +58,34 @@
               default = config.packages.browser-session-mcp;
 
               # Unwrapped binary for the release tarball. On Darwin this is an
-              # ordinary Nix build — macOS cannot be statically linked (libSystem
-              # is always dynamic), so the darwin tarball's binary needs /nix/store
-              # present, i.e. Nix installed. On Linux this attr is replaced below
-              # by a fully static musl build that runs on any host.
-              release = pkgs.callPackage ./package.nix {
-                craneLib = inputs.crane.mkLib pkgs;
-                wrapUi = false;
-              };
+              # ordinary Nix build (macOS can't be statically linked; libSystem is
+              # always dynamic) whose only /nix/store library is libiconv. Pointing
+              # that at macOS's own copy lets it run without Nix; the change voids
+              # the ad-hoc signature arm64 requires, so it's signed again. On Linux
+              # this attr is replaced below by a fully static musl build.
+              release =
+                (pkgs.callPackage ./package.nix {
+                  craneLib = inputs.crane.mkLib pkgs;
+                  wrapUi = false;
+                }).overrideAttrs
+                  (
+                    o:
+                    lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+                      nativeBuildInputs = o.nativeBuildInputs ++ [ pkgs.darwin.sigtool ];
+                      postFixup = (o.postFixup or "") + ''
+                        bin=$out/bin/browser-session
+                        for lib in $(otool -L "$bin" | awk '/\/nix\/store\/.*libiconv/ { print $1 }'); do
+                          install_name_tool -change "$lib" /usr/lib/libiconv.2.dylib "$bin"
+                        done
+                        # The first line is the binary itself.
+                        if otool -L "$bin" | tail -n +2 | grep /nix/store; then
+                          echo "the release binary still links the libraries above from /nix/store" >&2
+                          exit 1
+                        fi
+                        codesign -f -s - "$bin"
+                      '';
+                    }
+                  );
             }
             # Portable systemd units for the release tarball, generated from
             # nixos-module.nix so they can't drift from what NixOS users run.

@@ -58,15 +58,28 @@ claude mcp add browser-session -e BROWSER_URL=http://localhost:9222 \
 ```
 
 <details>
+<summary><b>With Homebrew</b> (macOS on Apple silicon, or Linux)</summary>
+
+```sh
+brew install xav-ie/tap/browser-session-mcp
+
+claude mcp add browser-session -e BROWSER_URL=http://localhost:9222 \
+  -e STATE_DIR="$HOME/.local/state/browser-session-mcp" \
+  -- browser-session mcp
+```
+
+</details>
+
+<details>
 <summary><b>Without Nix:</b> download a prebuilt binary</summary>
 
 Each [release](https://github.com/xav-ie/browser-session-mcp/releases) has a
 tarball per platform with the `browser-session` binary, the takeover page and
 systemd units. The Linux binaries are static and run on any distribution; the
-macOS one is built with Nix and needs Nix installed.
+macOS one runs on Apple silicon with macOS 14 or newer.
 
 ```sh
-ver=v0.1.0
+ver=$(curl -fsSL https://api.github.com/repos/xav-ie/browser-session-mcp/releases/latest | sed -n 's/.*"tag_name": "\(.*\)".*/\1/p')
 case "$(uname -sm)" in
   "Linux x86_64")  target=x86_64-unknown-linux-musl ;;
   "Linux aarch64") target=aarch64-unknown-linux-musl ;;
