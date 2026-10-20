@@ -538,7 +538,9 @@ impl BrowserSessionServer {
         // bearer credential (it grants live input to the session), so it is
         // capped at an hour.
         if args.contains_key("ttl") {
-            return Err(anyhow!("`ttl` was replaced by `ttlMinutes` (1 to 60, default 30)"));
+            return Err(anyhow!(
+                "`ttl` was replaced by `ttlMinutes` (1 to 60, default 30)"
+            ));
         }
         let ttl_ms = optional_u64(&args, "ttlMinutes").unwrap_or(30).clamp(1, 60) * 60_000;
         let base = takeover::base_url().ok_or_else(|| {
