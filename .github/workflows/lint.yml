@@ -1,0 +1,87 @@
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  # actionlint and shellcheck come from the flake's pinned nixpkgs, so flake.lock versions them.
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - run: nix run --inputs-from . nixpkgs#actionlint
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - run: git ls-files '*.sh' | xargs -r nix run --inputs-from . nixpkgs#shellcheck --
+
+  # Audits the workflows themselves: injection, credentials, unpinned actions.
+  zizmor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - run: nix run --inputs-from . nixpkgs#zizmor -- --offline .github
+
+  # The SVGs under docs/diagrams/ are build output; fail if they don't match their generator.
+  diagrams:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Regenerate the diagrams and compare
+        run: |
+          node scripts/diagrams.mjs
+          drift=$(git status --porcelain -- docs README.md)
+          [ -z "$drift" ] || { echo "$drift"; echo "::error::diagrams are out of date: run node scripts/diagrams.mjs and commit the result"; exit 1; }
+
+  commit-messages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history so the base of the range resolves.
+          fetch-depth: 0
+      - name: Check the new commits' messages
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # A new branch has no "before" commit, and a force-push's is gone; check just the pushed one.
+          if git cat-file -e "$BASE^{commit}" 2>/dev/null; then RANGE="$BASE..$HEAD"; else RANGE="$HEAD^!"; fi
+          python3 .github/scripts/check-commit-messages.py "$RANGE"
