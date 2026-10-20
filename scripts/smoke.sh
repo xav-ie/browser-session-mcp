@@ -46,6 +46,8 @@ TMP=$(mktemp -d /tmp/browser-session-mcp-smoke.XXXXXX)
 export STATE_DIR="$TMP"
 export BROWSER_URL="http://127.0.0.1:$PORT"
 
+# Runs from the EXIT trap below.
+# shellcheck disable=SC2329
 cleanup() {
   rc=$?
   [[ -n ${SERVER_PID:-} ]] && kill "$SERVER_PID" 2>/dev/null || true
@@ -61,7 +63,7 @@ cleanup() {
     tail -n 40 "$TMP/mcp.log" 2>/dev/null || true
   fi
   rm -rf "$TMP" 2>/dev/null || true
-  exit $rc
+  exit "$rc"
 }
 trap cleanup EXIT
 
@@ -91,8 +93,7 @@ fi
 
 # ---- start MCP server ----------------------------------------------------
 
-coproc SERVER (exec "$MCP_BIN" mcp 2>"$TMP/mcp.log")
-SERVER_PID=$SERVER_PID
+coproc SERVER { exec "$MCP_BIN" mcp 2>"$TMP/mcp.log"; }
 
 req() {
   printf '%s\n' "$1" >&"${SERVER[1]}"
