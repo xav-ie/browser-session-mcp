@@ -48,10 +48,12 @@ chrome-headless-shell --remote-debugging-port=9222 &
 curl -s http://localhost:9222/json/version   # prints JSON when it's ready
 ```
 
-**2. Add the server to your MCP client.** With Nix, there's nothing to install:
+**2. Add the server to your MCP client.** `STATE_DIR` is where it keeps
+sessions, logs and saved logins. With Nix, there's nothing to install:
 
 ```sh
 claude mcp add browser-session -e BROWSER_URL=http://localhost:9222 \
+  -e STATE_DIR="$HOME/.local/state/browser-session-mcp" \
   -- nix run github:xav-ie/browser-session-mcp -- mcp
 ```
 
@@ -77,6 +79,7 @@ curl -fsSL "$base/SHA256SUMS" | grep "browser-session-$ver-$target.tar.gz" | sha
 tar -xzf "browser-session-$ver-$target.tar.gz"
 
 claude mcp add browser-session -e BROWSER_URL=http://localhost:9222 \
+  -e STATE_DIR="$HOME/.local/state/browser-session-mcp" \
   -- "$PWD/browser-session-$ver-$target/browser-session" mcp
 ```
 

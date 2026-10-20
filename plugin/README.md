@@ -33,6 +33,7 @@ For example, with Claude Code and a Chrome exposing CDP at
 
 ```sh
 claude mcp add browser-session -e BROWSER_URL=http://localhost:9222 \
+  -e STATE_DIR="$HOME/.local/state/browser-session-mcp" \
   -- nix run github:xav-ie/browser-session-mcp -- mcp
 ```
 
