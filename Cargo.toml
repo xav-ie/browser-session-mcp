@@ -47,7 +47,7 @@ reqwest = { version = "0.13", default-features = false, features = [
   "json",
   "rustls",
 ] }
-async-tungstenite = { version = "0.32", default-features = false, features = [
+async-tungstenite = { version = "0.35", default-features = false, features = [
   "tokio-runtime",
   "tokio-rustls-webpki-roots",
 ] }
