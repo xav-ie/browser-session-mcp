@@ -4,7 +4,7 @@ _[← Back to README](../README.md) · [Docs index](README.md)_
 
 - [Setup](#setup)
 - [Checks](#checks)
-- [Diagrams](#diagrams)
+- [Diagrams and screenshots](#diagrams-and-screenshots)
 - [Releases](#releases)
 
 ## Setup
@@ -36,7 +36,7 @@ Every push and pull request runs these; run them locally before you push:
 
 A push that only touches docs skips the build jobs.
 
-## Diagrams
+## Diagrams and screenshots
 
 The diagrams in these docs are generated SVGs, light and dark, from
 [`scripts/diagrams.mjs`](../scripts/diagrams.mjs) (boxes, arrows and labels as
@@ -48,6 +48,21 @@ it, and commit the SVGs and docs with them:
 ```sh
 node scripts/diagrams.mjs
 ```
+
+The README's screenshot of the takeover page is real:
+[`scripts/screenshot.mjs`](../scripts/screenshot.mjs) starts a Chrome for the
+agent's session, the takeover daemon and the MCP server, opens a session on
+GitHub's sign-in page, and screenshots the takeover link from a second Chrome.
+Everything runs on ports the OS picks, so it never touches a stack you already
+have running. After changing the takeover UI, rebuild and retake it:
+
+```sh
+nix build
+node scripts/screenshot.mjs              # or pass another URL to show
+```
+
+It needs Chrome (`CHROME` picks the binary, `google-chrome` by default) and the
+network, so CI doesn't run it.
 
 ## Releases
 
