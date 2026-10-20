@@ -36,6 +36,14 @@ Every push and pull request runs these; run them locally before you push:
 
 A push that only touches docs skips the build jobs.
 
+Main has a ruleset: changes land through pull requests whose **CI passed** and
+**Lint passed** checks succeed. Those two jobs stand for every other job in
+their workflow, and count a job skipped by the docs-only filter as passing. It
+also blocks force pushes and deleting main. Repository admins can bypass it,
+which pushing straight to main and merging the release PR both need: the
+release PR is opened with the workflow's own token, and GitHub doesn't run
+workflows for pull requests opened that way.
+
 ## Diagrams and screenshots
 
 The diagrams in these docs are generated SVGs, light and dark, from
@@ -75,7 +83,7 @@ for the kind of change (`major` breaks something, `minor` adds something,
 Every push to main then updates a "chore: prepare release" pull request, which
 bumps the version in `Cargo.toml`, `Cargo.lock` and `package.nix` and moves the
 notes into [`CHANGELOG.md`](../CHANGELOG.md). Merging it builds a tarball per
-platform (static Linux binaries for x86_64 and aarch64, and an Apple silicon
-build that needs Nix) and publishes them with a `SHA256SUMS` file as a GitHub
+platform (static Linux binaries for x86_64 and aarch64, and one for Apple
+silicon) and publishes them with a `SHA256SUMS` file as a GitHub
 release. To choose the version yourself (such as 1.0.0), run the Prepare release
 workflow by hand with a version.

@@ -85,3 +85,19 @@ jobs:
           # A new branch has no "before" commit, and a force-push's is gone; check just the pushed one.
           if git cat-file -e "$BASE^{commit}" 2>/dev/null; then RANGE="$BASE..$HEAD"; else RANGE="$HEAD^!"; fi
           python3 .github/scripts/check-commit-messages.py "$RANGE"
+
+  # The check main's ruleset requires, standing for every job above.
+  lint-passed:
+    name: Lint passed
+    if: always()
+    needs: [actionlint, shellcheck, zizmor, diagrams, commit-messages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do
+            case "$r" in success | skipped) ;; *) echo "::error::a Lint job ended with $r"; exit 1 ;; esac
+          done
