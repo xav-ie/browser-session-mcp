@@ -82,7 +82,7 @@ pub fn expiry_ms(ttl_ms: u64) -> u128 {
 /// it must be unguessable when exposed beyond loopback.
 pub fn mint_token() -> Result<String> {
     let mut buf = [0u8; 16];
-    getrandom::getrandom(&mut buf).map_err(|e| anyhow!("getrandom: {e}"))?;
+    getrandom::fill(&mut buf).map_err(|e| anyhow!("getrandom: {e}"))?;
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
