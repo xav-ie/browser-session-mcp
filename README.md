@@ -114,6 +114,8 @@ When a page needs credentials the agent must not see, it asks for a takeover
 link and shows it to you. The page opens a live view of the agent's tab; you
 log in there, click Done, and the agent picks up where it left off.
 
+![The takeover page: a bar with back, forward, the page's URL, new tab, a button to fill a username or password, and Done, above a live view of the agent's tab showing GitHub's sign-in form](docs/images/takeover.png)
+
 <!-- diagram:takeover -->
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/takeover-dark.svg">
