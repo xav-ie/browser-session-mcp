@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1062 160" width="1062" height="160" role="img"><style>
+  text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #1f1430; }
+  .bg { fill: #f7f3fb; }
+  .box { fill: #ffffff; stroke: #d9cde8; stroke-width: 2; }
+  .key { fill: #7c4dbb; fill-opacity: .12; stroke: #7c4dbb; stroke-width: 2.5; }
+  .end { fill: #5b3a86; fill-opacity: .14; stroke: #5b3a86; stroke-width: 2; }
+  .note { fill: #fdf6c3; stroke: #c9b440; stroke-width: 1.5; }
+  .frame { fill: #ffffff; stroke: #d9cde8; stroke-width: 1.5; }
+  .group { fill: none; stroke: #5f5375; stroke-width: 1.5; stroke-dasharray: 6 5; }
+  .title { font-size: 16px; font-weight: 650; }
+  .sub { font-size: 13.5px; fill: #5f5375; }
+  .label { font-size: 13px; font-weight: 550; fill: #5b3a86; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  .edge { fill: none; stroke: #5b3a86; stroke-width: 2; marker-end: url(#arrow); }
+  .both { marker-start: url(#arrow); }
+  .ret { stroke-dasharray: 7 5; }
+  .life { stroke: #d9cde8; stroke-width: 2; stroke-dasharray: 4 5; }
+  .tag { fill: #f7f3fb; }
+  .head { fill: #5b3a86; }
+</style><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head" d="M0 0L10 5L0 10z"/></marker></defs><rect class="bg" width="1062" height="160"/><rect class="box" x="24" y="24" width="167.6" height="112" rx="14"/><text class="title" x="107.8" y="67" text-anchor="middle">Session one</text><text class="sub" x="107.8" y="86.1" text-anchor="middle">log in yourself, or</text><text class="sub" x="107.8" y="104.3" text-anchor="middle">hand it to a person</text><rect class="key" x="235.6" y="24" width="167.6" height="112" rx="14"/><text class="title" x="319.4" y="76.1" text-anchor="middle">save_browser_state</text><text class="sub" x="319.4" y="95.2" text-anchor="middle">name: "github"</text><rect class="end" x="447.2" y="24" width="167.6" height="112" rx="14"/><text class="title" x="531" y="57.9" text-anchor="middle">states/github.json</text><text class="sub" x="531" y="77" text-anchor="middle">the session's</text><text class="sub" x="531" y="95.2" text-anchor="middle">cookies, readable</text><text class="sub" x="531" y="113.4" text-anchor="middle">only by you</text><rect class="key" x="658.8" y="24" width="167.6" height="112" rx="14"/><text class="title" x="742.6" y="67" text-anchor="middle">load_browser_state</text><text class="sub" x="742.6" y="86.1" text-anchor="middle">into any new</text><text class="sub" x="742.6" y="104.3" text-anchor="middle">session</text><rect class="box" x="870.4" y="24" width="167.6" height="112" rx="14"/><text class="title" x="954.2" y="76.1" text-anchor="middle">Session two</text><text class="sub" x="954.2" y="95.2" text-anchor="middle">already logged in</text><path class="edge" d="M191.6 80L235.6 80"/><path class="edge" d="M403.2 80L447.2 80"/><path class="edge" d="M614.8 80L658.8 80"/><path class="edge" d="M826.4 80L870.4 80"/></svg>

@@ -23,6 +23,13 @@ transport or restart the MCP subprocess and the context is still there, found
 again by id. (It does not survive a *Chrome* restart — see
 [Operational notes](deployment.md#operational-notes).)
 
+<!-- diagram:sessions -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/sessions-dark.svg">
+  <img src="diagrams/sessions.svg" alt="Sequence: the agent calls open_browser_session, the mcp server creates an isolated context in Chrome and returns sessionId a1b2. The agent navigates and logs in. Then the MCP connection drops and the server process restarts, but the context lives on in Chrome. The agent calls take_snapshot with a1b2, the restarted server finds the context again, and the agent gets the same tabs, still logged in">
+</picture>
+<!-- /diagram:sessions -->
+
 Contexts are cheap; one Chrome holds many. Two agents in parallel → two
 sessions → two contexts → zero shared state.
 
@@ -31,25 +38,12 @@ sessions → two contexts → zero shared state.
 Four processes cooperate around one Chrome. Three are long-running daemons; the
 MCP server itself is a stdio subprocess that can be killed and respawned freely.
 
-```mermaid
-flowchart TB
-    chrome["<b>Chrome</b> (CDP :9222)<br/>one BrowserContext per session"]
-
-    mcp["<b>browser-session-mcp</b> (stdio)<br/>the MCP tool surface<br/>list_*_messages read the NDJSON"]
-    listener["<b>browser-session-listener</b><br/>captures console + network<br/>→ NDJSON on disk"]
-    reaper["<b>browser-session-reaper</b> (timer)<br/>closes idle contexts + orphan tabs"]
-    takeover["<b>browser-session-takeover</b> (HTTP)<br/>serves the human-takeover page<br/>browser ↔ Chrome, no agent"]
-
-    mcp -->|"CDP, per tool call"| chrome
-    listener -->|"CDP attach, always-on"| chrome
-    reaper -->|"CDP, on timer"| chrome
-    chrome <-.->|"screencast WebSocket"| takeover
-
-    disk[("shared state dir<br/>(NDJSON, cookies, tickets)")]
-    listener --> disk
-    mcp --> disk
-    takeover --> disk
-```
+<!-- diagram:architecture -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/architecture-dark.svg">
+  <img src="diagrams/architecture.svg" alt="Your AI agent sends MCP tool calls with a sessionId to the mcp role. The browser-session binary runs as four roles that share one state dir: mcp drives pages, listener watches every tab and records console messages and requests per visit, reaper closes idle sessions on a timer, and takeover serves the page a person opens to log in, with a live view and input to Chrome. All four talk to one Chrome over the DevTools Protocol on port 9222, which holds every session as its own isolated context with its own cookies, storage and tabs">
+</picture>
+<!-- /diagram:architecture -->
 
 All four roles are the one `browser-session` binary invoked with a different
 first argument:

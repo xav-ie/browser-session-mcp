@@ -2,7 +2,7 @@
 
 Ships the `browser-session-navigator` agent that knows how to drive the
 **browser-session** MCP — so the agent's playbook always moves in lockstep with
-the [30-tool surface](../README.md#tool-surface-30-tools) it targets.
+the [30-tool surface](../README.md#all-30-tools) it targets.
 
 The plugin deliberately does **not** bundle an `.mcp.json`. How you run the MCP
 server is your call — connect the `browser-session` MCP to your client yourself

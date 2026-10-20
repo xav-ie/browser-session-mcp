@@ -20,3 +20,5 @@ people want them:
    [systemd without Nix](deployment.md#running-the-daemons-without-nix-systemd),
    the full [env-var reference](deployment.md#environment), and
    [operational notes](deployment.md#operational-notes).
+4. **[Development](development.md)**: read before sending a change: the
+   checks CI runs, regenerating the diagrams, and how releases are cut.

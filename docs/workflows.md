@@ -13,6 +13,13 @@ and reusing cookies across sessions.
 When a flow needs credentials the agent must not handle (passwords, passkeys),
 hand the live page to a human instead of automating the login:
 
+<!-- diagram:takeover -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/takeover-dark.svg">
+  <img src="diagrams/takeover.svg" alt="Sequence: the agent calls request_human_takeover and gets a one-time link back, which it shows to a person. The person opens the link; the takeover page streams the live Chrome tab and forwards their input. They log in with their password, passkey or 2FA straight into Chrome, and the agent never sees it. They click Done, and the agent's await_human_takeover call returns completed: true">
+</picture>
+<!-- /diagram:takeover -->
+
 ```ts
 const sid = (await tools.browser_session_mcp.open_browser_session({}))
   .structuredContent.sessionId;
@@ -58,13 +65,20 @@ How it works:
 4. Clicking "Done" POSTs back and drops `${STATE_DIR}/takeover/done/<token>`, which
    unblocks `await_human_takeover`.
 
-Security: the URL is a bearer credential (default TTL 5 min, max 30). The first
+Security: the URL is a bearer credential (valid 30 minutes by default, `ttlMinutes` 1 to 60). The first
 browser to open it *claims* it via an `HttpOnly` cookie — a leaked URL is
 useless once the real user has it, and only the claimant can click Done.
 
 ## Saved cookie state
 
 For sites where you don't want to log in every session:
+
+<!-- diagram:saved-state -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/saved-state-dark.svg">
+  <img src="diagrams/saved-state.svg" alt="Session one logs in, by you or by a person through a takeover. save_browser_state with the name github writes the session's cookies to states/github.json, readable only by you. load_browser_state copies them into any new session, so session two starts already logged in">
+</picture>
+<!-- /diagram:saved-state -->
 
 ```ts
 // Once: log in (interactively or via takeover), then save the cookies

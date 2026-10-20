@@ -1,211 +1,193 @@
 # browser-session-mcp
 
-An MCP server that gives each AI agent its own **isolated, long-lived Chrome
-browser session** — with full console + network capture, built-in anti-bot
-stealth, and a "hand it to a human" flow for logins the agent must not see.
+[![CI](https://github.com/xav-ie/browser-session-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/xav-ie/browser-session-mcp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/xav-ie/browser-session-mcp?color=7c4dbb)](https://github.com/xav-ie/browser-session-mcp/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-7c4dbb)](LICENSE)
 
-Sessions are addressed by an id you pass into every tool call, so a session
-keeps its cookies and tabs even when the MCP connection drops and reconnects, or
-the MCP subprocess is restarted. Written in Rust, driving the Chrome DevTools
-Protocol (CDP) via a lightly-forked
-[`chromiumoxide`](https://github.com/xav-ie/chromiumoxide).
+**Give every AI agent its own real Chrome, one that keeps its logins, records
+what the page did, and gets past bot checks.** browser-session-mcp is an MCP
+server that hands each agent an isolated, long-lived browser session. When a
+site needs a password or passkey, the agent sends you a link, you log in on a
+live view of the page, and the agent carries on without ever seeing your
+credentials.
 
-> **New here?** Jump to [Quick start](#quick-start) — start a Chrome, grab a
-> binary, make your first tool call. Then browse the [tool surface](#tool-surface-30-tools).
-> Everything deeper lives in [`docs/`](#learn-more).
+<!-- diagram:architecture -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/architecture-dark.svg">
+  <img src="docs/diagrams/architecture.svg" alt="Your AI agent sends MCP tool calls with a sessionId to the mcp role. The browser-session binary runs as four roles that share one state dir: mcp drives pages, listener watches every tab and records console messages and requests per visit, reaper closes idle sessions on a timer, and takeover serves the page a person opens to log in, with a live view and input to Chrome. All four talk to one Chrome over the DevTools Protocol on port 9222, which holds every session as its own isolated context with its own cookies, storage and tabs">
+</picture>
+<!-- /diagram:architecture -->
 
-## Why you'd want it
-
-- **Isolated sessions** — each agent gets its own cookies/storage/tabs; run many
-  in parallel against one shared Chrome with zero cross-talk.
-- **Survives restarts** — because a session is a tool argument (not a transport
-  concept), it outlives transport reconnects and MCP-subprocess restarts (though
-  *not* a Chrome restart — see [Operational notes](docs/deployment.md#operational-notes)).
-- **Full capture** — every console message and network request is logged to disk
-  losslessly, queryable per page-visit.
-- **Anti-detection** — drives real sites without tripping bot gates like
-  Cloudflare, hiding the usual headless/automation giveaways (no `Runtime.enable`
-  signal, coherent User-Agent + Client Hints, `navigator.webdriver` masked, real
-  CDP input). Toggle stealth per session.
-- **Human takeover** — hand a live page to a person for password/passkey/2FA
-  login without the agent ever seeing the credentials.
-- **Saved cookie states** — log in once, reuse across future sessions.
-- **[30 tools](#tool-surface-30-tools)** covering tabs, navigation, trusted
-  input, screenshots, accessibility snapshots, and logs.
-
-## Prerequisites
-
-- **A Chrome exposing the DevTools Protocol (CDP).** This server does not launch
-  or bundle Chrome — you point it at a running one. Any Chrome or Chromium works;
-  just launch it with `--remote-debugging-port=9222`. Don't have one handy? Grab
-  a minimal headless build with
-  `npx @puppeteer/browsers install chrome-headless-shell`. (A remote Chrome
-  behind a TLS proxy works too.) Without it the server has nothing to drive.
-- **Linux or macOS (x86_64 or aarch64)** for the prebuilt binaries. On other
-  platforms, [build from source with Nix](docs/deployment.md#building-from-source-nix) (Linux only).
-- **An MCP client** (Claude Code, or any MCP-capable agent host).
+- **A browser per agent.** Each session has its own cookies, storage and tabs.
+  Run many agents side by side on one Chrome without them seeing each other.
+- **Sessions that stick around.** A session is just an id the agent passes to
+  each tool, so it survives dropped connections and server restarts.
+- **Hand logins to a human.** For passwords, passkeys and 2FA, the agent sends
+  you a link to a live view of the page. You log in, click Done, and the agent
+  continues. Your credentials never reach it.
+- **Log in once.** Save a session's cookies under a name and load them into any
+  future session.
+- **Everything recorded.** Every console message and network request is kept on
+  disk, grouped by page visit, for the agent to read back while debugging.
+- **Gets past bot checks.** No `Runtime.enable` tell, a consistent User-Agent
+  and Client Hints, no injected scripts, and real mouse and keyboard input.
+  Stealth can be switched on and off per session.
+- **[30 tools](#all-30-tools)** for tabs, navigation, clicks and typing,
+  screenshots, accessibility snapshots, logs and CPU profiles.
 
 ## Quick start
 
-**1. Start a Chrome exposing CDP:**
+You need **a Chrome with its DevTools port open** (this server drives one, it
+doesn't bundle one) and **an MCP client** such as Claude Code.
+
+**1. Start Chrome.** Any Chrome or Chromium works. No Chrome around? Get a
+small headless one with `npx @puppeteer/browsers install chrome-headless-shell`.
 
 ```sh
 chrome-headless-shell --remote-debugging-port=9222 &
-# any Chrome/Chromium works too: google-chrome --remote-debugging-port=9222 &
-
-# sanity check — this should print JSON, not "connection refused":
-curl -s http://localhost:9222/json/version
+curl -s http://localhost:9222/json/version   # prints JSON when it's ready
 ```
 
-**2. Get the `browser-session` binary** — pick one:
-
-<details open>
-<summary><b>Nix users</b> — no download, run straight from the flake</summary>
+**2. Add the server to your MCP client.** With Nix, there's nothing to install:
 
 ```sh
-# Run straight from the flake (the `mcp` role is the MCP server):
-BROWSER_URL=http://localhost:9222 nix run github:xav-ie/browser-session-mcp -- mcp
-```
-
-The first `nix run` builds/fetches from the binary cache (can take a few
-minutes); later runs are instant. Skip to step 3 — for Nix you wire in the
-`nix run …` command directly, no absolute path needed. For a dev shell and the
-from-source path, see
-[Deployment › Building from source](docs/deployment.md#building-from-source-nix).
-
-</details>
-
-<details>
-<summary><b>Prebuilt binary</b> — download a release tarball</summary>
-
-Each tagged [release](https://github.com/xav-ie/browser-session-mcp/releases)
-ships a tarball per platform containing the single `browser-session` binary plus
-the built takeover UI. Download, verify, extract:
-
-```sh
-ver=v0.1.0                                   # pick a release tag
-arch=x86_64-unknown-linux-gnu                # find yours with `uname -sm`:
-                                             #   Linux x86_64  → x86_64-unknown-linux-gnu
-                                             #   Linux aarch64 → aarch64-unknown-linux-gnu
-                                             #   Darwin arm64  → aarch64-apple-darwin
-                                             #   Darwin x86_64 → x86_64-apple-darwin
-base=https://github.com/xav-ie/browser-session-mcp/releases/download/$ver
-curl -fsSLO "$base/browser-session-$ver-$arch.tar.gz"
-# verify (macOS: swap `sha256sum -c` for `shasum -a 256 -c`)
-curl -fsSL "$base/SHA256SUMS" | grep "browser-session-$ver-$arch.tar.gz" | sha256sum -c -
-tar -xzf "browser-session-$ver-$arch.tar.gz"
-cd "browser-session-$ver-$arch"              # → the browser-session binary + webroot/
-```
-
-</details>
-
-`browser-session` is a single binary that behaves as four different programs
-depending on its first argument — `mcp`, `listener`, `reaper`, or `takeover`
-(these are its **roles**). You only need `mcp` to get started; the other three
-are optional background helpers (see [Deployment](docs/deployment.md)).
-
-**3. Wire it into your MCP client** — e.g. Claude Code:
-
-```sh
-# Nix (runs from the flake, no path to manage):
 claude mcp add browser-session -e BROWSER_URL=http://localhost:9222 \
   -- nix run github:xav-ie/browser-session-mcp -- mcp
-
-# Prebuilt binary (by absolute path):
-claude mcp add browser-session -e BROWSER_URL=http://localhost:9222 \
-  -- /abs/path/to/browser-session mcp
 ```
 
-(To run it directly instead: `BROWSER_URL=http://localhost:9222 ./browser-session mcp`,
-or the `nix run …` line from step 2.)
+<details>
+<summary><b>Without Nix:</b> download a prebuilt binary</summary>
 
-**4. Drive the browser.** Once it's wired in, you just ask your agent — it calls
-these MCP tools for you. Try a prompt like:
+Each [release](https://github.com/xav-ie/browser-session-mcp/releases) has a
+tarball per platform with the `browser-session` binary, the takeover page and
+systemd units. The Linux binaries are static and run on any distribution; the
+macOS one is built with Nix and needs Nix installed.
+
+```sh
+ver=v0.1.0
+case "$(uname -sm)" in
+  "Linux x86_64")  target=x86_64-unknown-linux-musl ;;
+  "Linux aarch64") target=aarch64-unknown-linux-musl ;;
+  "Darwin arm64")  target=aarch64-apple-darwin ;;
+esac
+base=https://github.com/xav-ie/browser-session-mcp/releases/download/$ver
+curl -fsSLO "$base/browser-session-$ver-$target.tar.gz"
+# check it (on macOS, use shasum -a 256 -c instead of sha256sum -c)
+curl -fsSL "$base/SHA256SUMS" | grep "browser-session-$ver-$target.tar.gz" | sha256sum -c -
+tar -xzf "browser-session-$ver-$target.tar.gz"
+
+claude mcp add browser-session -e BROWSER_URL=http://localhost:9222 \
+  -- "$PWD/browser-session-$ver-$target/browser-session" mcp
+```
+
+</details>
+
+**3. Ask your agent to use it.**
 
 > Open a browser session, go to example.com, and take a screenshot.
 
-Under the hood that's a `sessionId` from `open_browser_session`, threaded through
-each call. In pseudo-code (tool name + args — `browser_session_mcp` is the MCP
-namespace your client assigns this server), the loop is:
+The agent calls `open_browser_session`, gets back a `sessionId`, and passes it
+to every tool after that:
 
 ```ts
-const { sessionId } = (
-  await tools.browser_session_mcp.open_browser_session({})
-).structuredContent;
-
+const { sessionId } = (await tools.browser_session_mcp.open_browser_session({})).structuredContent;
 await tools.browser_session_mcp.navigate({ sessionId, url: "https://example.com" });
 await tools.browser_session_mcp.take_screenshot({ sessionId });
 ```
 
-That's the whole loop. For login flows and cookie reuse, see
-[Workflows](docs/workflows.md). For the full stealth/capture story, see
-[How it works](docs/how-it-works.md).
+That's all you need to start. The `mcp` role works on its own. Run the
+`listener` too if you want console and network logs, the `reaper` to clean up
+idle sessions, and `takeover` for human logins; [Deployment](docs/deployment.md)
+shows how.
 
-> For lossless console/network capture and idle cleanup, also run the
-> `listener` and `reaper` as background daemons — see [Deployment](docs/deployment.md).
-> The `mcp` role works standalone without them; you just won't get the
-> `list_console_messages` / `list_network_requests` logs.
+> [!TIP]
+> On Claude Code, install the
+> [browser-session plugin](plugin/README.md) for a `browser-session-navigator`
+> agent that already knows how to drive these tools.
 
-## Tool surface (30 tools)
+## Handing a login to a person
 
-Grouped by what they do: **session lifecycle**, **tabs**, **navigation**,
-**capture** (screenshot/snapshot), **interaction** (click/type/scroll/eval),
-**per-visit logs**, **stealth**, **human takeover**, and **saved cookie states**.
+When a page needs credentials the agent must not see, it asks for a takeover
+link and shows it to you. The page opens a live view of the agent's tab; you
+log in there, click Done, and the agent picks up where it left off.
 
-Most tools take `sessionId` as their first argument. The exceptions are the
-session lifecycle/listing calls (which create or enumerate sessions) and
-`await_human_takeover` (which keys off a `token` instead). Tools marked ⚙ need an
-optional daemon from [Deployment](docs/deployment.md); the rest work from the
-Quick start setup above.
+<!-- diagram:takeover -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/takeover-dark.svg">
+  <img src="docs/diagrams/takeover.svg" alt="Sequence: the agent calls request_human_takeover and gets a one-time link back, which it shows to a person. The person opens the link; the takeover page streams the live Chrome tab and forwards their input. They log in with their password, passkey or 2FA straight into Chrome, and the agent never sees it. They click Done, and the agent's await_human_takeover call returns completed: true">
+</picture>
+<!-- /diagram:takeover -->
+
+The link works for one browser only: the first to open it claims it, and it
+expires after 30 minutes by default. [Workflows](docs/workflows.md#human-takeover)
+has the details and the code.
+
+## All 30 tools
+
+Most tools take a `sessionId` first. Tools marked ⚙ need one of the optional
+background roles from [Deployment](docs/deployment.md).
+
+| Group | Tools |
+|---|---|
+| Sessions | `open_browser_session`, `close_browser_session`, `list_browser_sessions` |
+| Tabs | `new_page`, `list_pages`, `switch_tab`, `close_tab` |
+| Navigation | `navigate` |
+| Seeing the page | `take_screenshot`, `take_snapshot` (the accessibility tree as text) |
+| Acting on it | `click`, `type`, `press_key`, `scroll`, `move_mouse`, `wait_for`, `evaluate` |
+| Logs ⚙ | `list_visits`, `list_console_messages`, `list_network_requests` |
+| Profiling | `start_profiling`, `stop_profiling` |
+| Stealth | `set_stealth`, `get_stealth` |
+| Human takeover ⚙ | `request_human_takeover`, `await_human_takeover` |
+| Saved logins | `save_browser_state`, `load_browser_state`, `list_browser_states`, `delete_browser_state` |
 
 <details>
-<summary><b>Full tool list</b> (click to expand)</summary>
+<summary><b>Every tool with its arguments</b></summary>
 
-**Session lifecycle**
+**Sessions**
 - `open_browser_session({ viewport?, useMobileUA? })` → `{ sessionId, pageCount, activeUrl }`
-- `close_browser_session({ sessionId })` — idempotent
+- `close_browser_session({ sessionId })`: safe to call twice
 - `list_browser_sessions()`
 
 **Tabs**
-- `new_page({ sessionId, url? })` — opens a tab; subsequent calls target it
-- `list_pages({ sessionId })` — stable order, active tab marked `*`
-- `switch_tab({ sessionId, tabIndex })` — make a tab active + bring to front
+- `new_page({ sessionId, url? })`: opens a tab; later calls act on it
+- `list_pages({ sessionId })`: in a stable order, the active tab marked `*`
+- `switch_tab({ sessionId, tabIndex })`: makes a tab active and brings it to the front
 - `close_tab({ sessionId, tabIndex })`
 
 **Navigation**
-- `navigate({ sessionId, url, timeout? })` — resolves after the load event
+- `navigate({ sessionId, url, timeout? })`: returns after the load event
 
-**Capture**
-- `take_screenshot({ sessionId, fullPage? })` — PNG as base64
-- `take_snapshot({ sessionId })` — accessibility tree as indented text
+**Seeing the page**
+- `take_screenshot({ sessionId, fullPage? })`: a PNG
+- `take_snapshot({ sessionId })`: the accessibility tree as indented text
 
-**Interaction** (all via trusted CDP input)
+**Acting on it** (real CDP input, not synthetic JavaScript events)
 - `click({ sessionId, selector | x,y, timeout? })`
 - `type({ sessionId, selector, text, delay?, clear? })`
-- `press_key({ sessionId, key, selector?, timeout? })` — `key` is a name (Enter, Tab, ArrowDown…) or a char
+- `press_key({ sessionId, key, selector?, timeout? })`: `key` is a name (Enter, Tab, ArrowDown…) or a character
 - `scroll({ sessionId, deltaY?, deltaX?, x?, y? })`
 - `move_mouse({ sessionId, x, y })`
 - `wait_for({ sessionId, selector? | text?, timeout? })`
-- `evaluate({ sessionId, expression, tabIndex? })` — runs JS, returns the value
+- `evaluate({ sessionId, expression, tabIndex? })`: runs JavaScript and returns the value
 
-**Per-visit logs** ⚙ (read the `listener` daemon's newline-delimited JSON)
-- `list_visits({ sessionId })` — visit headers, oldest first
-- `list_console_messages({ sessionId, visit?, limit? })` — `limit` default 500
-- `list_network_requests({ sessionId, visit?, limit? })` — `limit` default 500
+**Logs** ⚙ (written by the `listener` role)
+- `list_visits({ sessionId })`: one entry per page visit, oldest first
+- `list_console_messages({ sessionId, visit?, limit? })`: `limit` defaults to 500
+- `list_network_requests({ sessionId, visit?, limit? })`: `limit` defaults to 500
 
-**Profiling** (find the JS behind a slow or hung page)
-- `start_profiling({ sessionId, tabIndex?, samplingIntervalUs? })` — arms the V8 CPU profiler
-- `stop_profiling({ sessionId, tabIndex?, top?, terminateAfterMs?, timeout? })` — saves a `.cpuprofile` (flame graph in DevTools or speedscope.app) under `$STATE_DIR/logs/<sessionId>/profiles/` and returns long tasks, hottest functions, and time per script. If the page is hung, the running script is terminated after `terminateAfterMs` (default 5000) so the profile can be collected
+**Profiling** (find the JavaScript behind a slow or hung page)
+- `start_profiling({ sessionId, tabIndex?, samplingIntervalUs? })`: starts the V8 CPU profiler
+- `stop_profiling({ sessionId, tabIndex?, top?, terminateAfterMs?, timeout? })`: saves a `.cpuprofile` (open it in DevTools or speedscope.app) under `$STATE_DIR/logs/<sessionId>/profiles/` and returns long tasks, the hottest functions and time per script. If the page is hung, its script is stopped after `terminateAfterMs` (default 5000) so the profile can be collected
 
 **Stealth**
 - `set_stealth({ sessionId, enabled })`
 - `get_stealth({ sessionId })` → `{ stealth }`
 
-**Human takeover** ⚙ (login/passkey without the agent seeing credentials; needs the `takeover` daemon + `TAKEOVER_BASE_URL`)
-- `request_human_takeover({ sessionId, ttlMinutes? })` → `{ url, token, expiresAtMs }` — non-blocking; mints a link
-- `await_human_takeover({ token, timeout? })` → `{ completed }` — blocks until the human clicks Done
+**Human takeover** ⚙ (needs the `takeover` role and `TAKEOVER_BASE_URL`)
+- `request_human_takeover({ sessionId, ttlMinutes? })` → `{ url, token, expiresAtMs }`: returns right away with a link
+- `await_human_takeover({ token, timeout? })` → `{ completed }`: waits until the person clicks Done
 
-**Saved cookie states**
+**Saved logins**
 - `save_browser_state({ sessionId, name })`
 - `load_browser_state({ sessionId, name })`
 - `list_browser_states()`
@@ -215,19 +197,14 @@ Quick start setup above.
 
 ## Learn more
 
-Full docs live in [`docs/`](docs/README.md) (indexed in reading order):
+- **[Workflows](docs/workflows.md):** handing a login to a person, and saving
+  cookies to reuse.
+- **[How it works](docs/how-it-works.md):** why a session outlives its
+  connection, the four roles, how stealth works, and what's on disk.
+- **[Deployment](docs/deployment.md):** building from source, the NixOS module,
+  systemd without Nix, and every environment variable.
+- **[Development](docs/development.md):** checks, diagrams and releases.
 
-- **[Workflows](docs/workflows.md)** — the two multi-call flows: [human
-  takeover](docs/workflows.md#human-takeover) (hand a login to a person) and
-  [saved cookie state](docs/workflows.md#saved-cookie-state) (log in once, reuse).
-- **[How it works](docs/how-it-works.md)** — why [sessions are a tool
-  argument](docs/how-it-works.md#sessions-are-a-tool-argument), the
-  [four-process architecture](docs/how-it-works.md#architecture), the
-  [anti-detection/stealth](docs/how-it-works.md#anti-detection-stealth) story, and
-  the on-disk [storage layout](docs/how-it-works.md#storage-layout).
-- **[Deployment](docs/deployment.md)** — [building from
-  source](docs/deployment.md#building-from-source-nix), the
-  [NixOS module](docs/deployment.md#nixos-module),
-  [systemd without Nix](docs/deployment.md#running-the-daemons-without-nix-systemd),
-  the full [env-var reference](docs/deployment.md#environment), and
-  [operational notes](docs/deployment.md#operational-notes).
+## License
+
+[MIT](LICENSE)
