@@ -3,10 +3,8 @@ import Base from "../layouts/base.astro";
 ---
 
 <Base>
-  {
-    /* One bar: navigation, new tab, and the credential relay as a
-      popover, so the screencast gets the rest of the screen. */
-  }
+  {/* One bar: navigation, new tab, and the credential relay as a
+      popover, so the screencast gets the rest of the screen. */}
   <nav id="tabs" hidden></nav>
 
   <header id="bar">
@@ -20,22 +18,24 @@ import Base from "../layouts/base.astro";
       placeholder="Enter a URL and press Enter"
     />
     <button id="newtab" title="Open a new tab"></button>
-    <button id="keys" popovertarget="vault" title="Fill username or password"
+    <button
+      id="keys"
+      popovertarget="vault"
+      title="Fill username or password"
     ></button>
     <button
       id="done"
       disabled
       title="Hand control back to the agent. It resumes and normal network logging turns back on."
-      >Done</button
     >
+      Done
+    </button>
   </header>
 
   <form id="vault" popover autocomplete="on" action="#" onsubmit="return false">
-    {
-      /* A real login form so your local password manager recognizes it and
+    {/* A real login form so your local password manager recognizes it and
         autofills. Values are read same-origin and typed into the remote page's
-        focused field over CDP. */
-    }
+        focused field over CDP. */}
     <p>Autofill here, then send each into the field focused on the page.</p>
     <div class="row">
       <input
@@ -45,7 +45,9 @@ import Base from "../layouts/base.astro";
         autocomplete="username"
         placeholder="username"
       />
-      <button type="button" data-for="vu"><span>send</span></button>
+      <button type="button" data-for="vu">
+        <span>send</span>
+      </button>
     </div>
     <div class="row">
       <input
@@ -55,7 +57,9 @@ import Base from "../layouts/base.astro";
         autocomplete="current-password"
         placeholder="password"
       />
-      <button type="button" data-for="vp"><span>send</span></button>
+      <button type="button" data-for="vp">
+        <span>send</span>
+      </button>
     </div>
   </form>
 
