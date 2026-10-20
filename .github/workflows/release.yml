@@ -1,42 +1,68 @@
 name: Release
 
-# Build prebuilt binary tarballs (binaries + the static takeover UI) and attach
-# them to a GitHub Release, so the stack runs without Nix. Push a semver tag to
-# cut a release; run manually (workflow_dispatch) to build artifacts without
-# publishing (the release step is skipped when not on a tag).
+# Runs when the release PR from prepare-release.yml merges, publishing the version in Cargo.toml:
+# a tarball per platform (the browser-session binary, the takeover UI and the systemd units) on a
+# v<version> GitHub release with CHANGELOG.md's notes and a SHA256SUMS file.
+# To retry one that failed part-way, re-run its failed jobs from the run's page.
 on:
-  push:
-    tags: ["v*"]
+  pull_request:
+    types: [closed]
+    branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: read
-
+# One release at a time; never cancel one half-way through publishing.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
 
 jobs:
-  # Build the static Astro takeover UI once and share it with every target —
-  # the browser-session-takeover daemon serves it from TAKEOVER_WEBROOT.
+  version:
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged && github.head_ref == 'release')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.version.outputs.sha }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+      - id: version
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+
+  # Build the static Astro takeover UI once and share it with every target; the
+  # browser-session-takeover daemon serves it from TAKEOVER_WEBROOT.
   frontend:
+    needs: [version]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: frontend
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.version.outputs.sha }}
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           package_json_file: frontend/package.json
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      # No dependency cache here: a release builds from a clean install.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-        working-directory: frontend
       - run: pnpm build
-        working-directory: frontend
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: webroot
           path: frontend/dist
@@ -47,15 +73,17 @@ jobs:
   # README. Generating rather than committing keeps them from drifting from the
   # module NixOS users run.
   systemd:
+    needs: [version]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: ./.github/actions/nix-cache
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          push-token: ${{ secrets.ATTIC_TOKEN }}
+          persist-credentials: false
+          ref: ${{ needs.version.outputs.sha }}
+      - uses: ./.github/actions/nix-cache
       - name: Assemble systemd dir
         run: |
           set -euo pipefail
@@ -64,19 +92,19 @@ jobs:
           cp result/*.service result/*.timer systemd/
           cp packaging/systemd/browser-session.env packaging/systemd/README.md systemd/
           chmod -R u+w systemd
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: systemd
           path: systemd
           if-no-files-found: error
 
   # Build every target's release binary with Nix (`.#release` resolves to the
-  # runner's own system). Linux → fully static musl, portable to any Linux, Nix
-  # or not. macOS → an ordinary Nix build: macOS can't be statically linked, so
+  # runner's own system). Linux: fully static musl, portable to any Linux, Nix
+  # or not. macOS: an ordinary Nix build. macOS can't be statically linked, so
   # those binaries resolve libraries through /nix/store and only run where Nix is
   # installed (a NOTE-macos.txt in the tarball says so).
   build:
-    needs: [frontend, systemd]
+    needs: [version, frontend, systemd]
     strategy:
       fail-fast: false
       matrix:
@@ -92,33 +120,32 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: ./.github/actions/nix-cache
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          push-token: ${{ secrets.ATTIC_TOKEN }}
+          persist-credentials: false
+          ref: ${{ needs.version.outputs.sha }}
+      - uses: ./.github/actions/nix-cache
 
       - run: nix build -L .#release
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: webroot
           path: webroot
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: systemd
           path: systemd
 
       - name: Package tarball
         id: package
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            version="$GITHUB_REF_NAME"
-          else
-            version="${GITHUB_SHA::7}"
-          fi
-          name="browser-session-${version}-${{ matrix.target }}"
+          name="browser-session-v${VERSION}-${TARGET}"
           stage="staging/${name}"
           mkdir -p "${stage}"
           install -m755 "$(readlink -f result)/bin/browser-session" "${stage}/browser-session"
@@ -127,8 +154,8 @@ jobs:
           # running the daemons without Nix.
           cp -r systemd "${stage}/systemd"
           cp README.md LICENSE "${stage}/"
-          # macOS binaries are Nix-built, not static — flag that they need Nix.
-          case "${{ matrix.target }}" in
+          # macOS binaries are Nix-built, not static; flag that they need Nix.
+          case "${TARGET}" in
             *-apple-darwin)
               printf '%s\n' \
                 'This macOS binary is built by Nix and is NOT statically linked' \
@@ -148,7 +175,7 @@ jobs:
           fi
           echo "tarball=${name}.tar.gz" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.target }}
           path: |
@@ -156,27 +183,31 @@ jobs:
             ${{ steps.package.outputs.tarball }}.sha256
           if-no-files-found: error
 
-  # Publish only for tag pushes; a workflow_dispatch run stops after building.
+  # Tags v<version> and creates the GitHub release with CHANGELOG.md's notes and knope.toml's assets.
   release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [version, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
-      contents: write
+      contents: write # tag and create the GitHub release
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.version.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: dist-*
-          path: dist
+          path: artifacts
           merge-multiple: true
       - name: Combine checksums
-        working-directory: dist
+        working-directory: artifacts
         run: cat ./*.sha256 > SHA256SUMS && rm -f ./*.sha256
-      - name: Create release
+      - uses: knope-dev/action@19617851f9f13ab2f27a05989c55efb18aca3675 # v2.1.2
+        with:
+          version: 0.23.0
+      - name: Create GitHub release
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+          GITHUB_TOKEN: ${{ github.token }}
+        run: knope release --verbose

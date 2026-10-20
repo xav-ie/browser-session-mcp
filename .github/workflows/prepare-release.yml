@@ -1,0 +1,56 @@
+name: Prepare release
+
+# Keeps one "chore: prepare release" PR open with the next version and its changelog, built from
+# the change files added to .changeset/ since the last release. Each run rebuilds the release
+# branch from main and force-pushes it, so the PR is always rebased and never duplicated.
+# Merging it runs release.yml.
+on:
+  push:
+    branches: [main]
+  # Run by hand to pick the version yourself, such as 1.0.0.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version for the release PR (empty = from the change files)
+        required: false
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  prepare-release:
+    # The release PR's own merge has nothing left to prepare.
+    if: "github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, 'chore: prepare release')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # push the release branch
+      pull-requests: write # open or update the release PR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1  # zizmor: ignore[artipacked] knope pushes the release branch with it
+        with:
+          fetch-depth: 0
+      - name: Check for change files
+        id: changes
+        run: |
+          if compgen -G ".changeset/*.md" >/dev/null; then echo "any=true" >> "$GITHUB_OUTPUT"; else echo "Nothing to release"; fi
+      - uses: knope-dev/action@19617851f9f13ab2f27a05989c55efb18aca3675 # v2.1.2
+        if: steps.changes.outputs.any
+        with:
+          version: 0.23.0
+      - name: Open or update the release PR
+        if: steps.changes.outputs.any
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          # The first release is 0.1.0, the version Cargo.toml already carries. knope would
+          # compute 0.1.1 from a minor change on 0.1.0, since pre-1.0 versions bump one place
+          # lower; once a tag exists, the change files decide.
+          if [ -z "$VERSION" ] && [ -z "$(git tag --list 'v*')" ]; then VERSION=0.1.0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          knope prepare-release --verbose ${VERSION:+--override-version "$VERSION"}

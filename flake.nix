@@ -226,6 +226,8 @@
                 # Frontend toolchain (matches the pinned pnpm).
                 pkgs.nodejs_22
                 pkgs.pnpm_10
+                # Release notes: knope document-change.
+                pkgs.knope
                 config.treefmt.build.wrapper
               ];
             };

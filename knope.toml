@@ -1,0 +1,59 @@
+# Releases: each change adds a note with `knope document-change` (in nix develop); every push to
+# main keeps one release PR up to date (.github/workflows/prepare-release.yml), and merging it
+# builds the binaries and publishes them as a GitHub release (release.yml).
+
+[package]
+versioned_files = [
+  "Cargo.toml",
+  { path = "Cargo.lock", dependency = "browser-session-mcp" },
+  { path = "package.nix", regex = "version = \"(?<version>[^\"]+)\";" },
+]
+changelog = "CHANGELOG.md"
+assets = "artifacts/*"
+
+[changes]
+ignore_conventional_commits = true
+
+[[workflows]]
+name = "document-change"
+
+[[workflows.steps]]
+type = "CreateChangeFile"
+
+[[workflows]]
+name = "prepare-release"
+
+[[workflows.steps]]
+type = "Command"
+command = "git switch -c release"
+
+[[workflows.steps]]
+type = "PrepareRelease"
+
+[[workflows.steps]]
+type = "Command"
+command = "git commit -m \"chore: prepare release $version\""
+
+[[workflows.steps]]
+type = "Command"
+command = "git push --force --set-upstream origin release"
+
+[[workflows.steps]]
+type = "CreatePullRequest"
+base = "main"
+
+[workflows.steps.title]
+template = "chore: prepare release $version"
+
+[workflows.steps.body]
+template = "Merging this builds the binaries and publishes $version as a GitHub release.\n\n$changelog"
+
+[[workflows]]
+name = "release"
+
+[[workflows.steps]]
+type = "Release"
+
+[github]
+owner = "xav-ie"
+repo = "browser-session-mcp"
