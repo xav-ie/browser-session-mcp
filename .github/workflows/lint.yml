@@ -50,7 +50,7 @@ jobs:
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       - run: nix run --inputs-from . nixpkgs#zizmor -- --offline .github
 
-  # The SVGs under docs/diagrams/ are build output; fail if they don't match their generator.
+  # The diagrams and logo under docs/ are build output; fail if they don't match their generators.
   diagrams:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -60,11 +60,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Regenerate the diagrams and compare
+      - name: Regenerate the diagrams and logo and compare
         run: |
           node scripts/diagrams.mjs
+          node scripts/logo.mjs
           drift=$(git status --porcelain -- docs README.md)
-          [ -z "$drift" ] || { echo "$drift"; echo "::error::diagrams are out of date: run node scripts/diagrams.mjs and commit the result"; exit 1; }
+          [ -z "$drift" ] || { echo "$drift"; echo "::error::diagrams or logo are out of date: run node scripts/diagrams.mjs and node scripts/logo.mjs and commit the result"; exit 1; }
 
   commit-messages:
     runs-on: ubuntu-latest

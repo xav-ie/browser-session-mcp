@@ -4,7 +4,7 @@ _[← Back to README](../README.md) · [Docs index](README.md)_
 
 - [Setup](#setup)
 - [Checks](#checks)
-- [Diagrams and screenshots](#diagrams-and-screenshots)
+- [Diagrams, logo and screenshots](#diagrams-logo-and-screenshots)
 - [Releases](#releases)
 
 ## Setup
@@ -30,7 +30,7 @@ Every push and pull request runs these; run them locally before you push:
 | Takeover UI types, lint, formatting | `pnpm check:astro`, `pnpm check:lint`, `pnpm check:format` in `frontend/` | CI |
 | Workflows | `actionlint`, `zizmor .github` | Lint |
 | Shell scripts | `shellcheck scripts/*.sh` | Lint |
-| Diagrams up to date | `node scripts/diagrams.mjs`, then `git status` | Lint |
+| Diagrams and logo up to date | `node scripts/diagrams.mjs` and `node scripts/logo.mjs`, then `git status` | Lint |
 | Commit messages | summary up to 72 characters, body up to 6 lines | Lint |
 | CodeQL (Rust, TypeScript, workflows) | | Security |
 
@@ -44,7 +44,7 @@ which pushing straight to main and merging the release PR both need: the
 release PR is opened with the workflow's own token, and GitHub doesn't run
 workflows for pull requests opened that way.
 
-## Diagrams and screenshots
+## Diagrams, logo and screenshots
 
 The diagrams in these docs are generated SVGs, light and dark, from
 [`scripts/diagrams.mjs`](../scripts/diagrams.mjs) (boxes, arrows and labels as
@@ -55,6 +55,18 @@ it, and commit the SVGs and docs with them:
 
 ```sh
 node scripts/diagrams.mjs
+```
+
+The logo, a turtle whose shell is a browser tab, comes from
+[`scripts/logo.mjs`](../scripts/logo.mjs) in the same palette. It writes
+[`docs/logo/logo.svg`](logo/logo.svg) and the repo's social preview,
+`docs/logo/social-preview.svg`. GitHub takes the social preview as a PNG, uploaded
+under Settings → General → Social preview; after changing the logo, render the
+PNG again and upload it:
+
+```sh
+node scripts/logo.mjs
+nix run nixpkgs#librsvg -- -o docs/logo/social-preview.png docs/logo/social-preview.svg
 ```
 
 The README's screenshot of the takeover page is real:

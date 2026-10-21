@@ -1,3 +1,5 @@
+<img align="right" src="docs/logo/logo.svg" width="120" alt="browser-session-mcp logo: a turtle whose shell is a browser tab">
+
 # browser-session-mcp
 
 [![CI](https://github.com/xav-ie/browser-session-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/xav-ie/browser-session-mcp/actions/workflows/ci.yml)
