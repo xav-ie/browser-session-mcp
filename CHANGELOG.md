@@ -1,4 +1,12 @@
 # Changelog
+## 0.1.2 (2026-10-21)
+
+### Fixes
+
+#### The takeover page has a favicon
+
+The takeover page's browser tab shows the project's turtle logo instead of a blank icon.
+
 ## 0.1.1 (2026-10-20)
 
 ### Features
