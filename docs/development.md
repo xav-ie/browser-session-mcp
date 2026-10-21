@@ -59,7 +59,7 @@ node scripts/diagrams.mjs
 
 The logo, a turtle whose shell is a browser tab, comes from
 [`scripts/logo.mjs`](../scripts/logo.mjs) in the same palette. It writes
-[`docs/logo/logo.svg`](logo/logo.svg) and the repo's social preview,
+[`docs/logo/logo.svg`](logo/logo.svg), the takeover page's favicon and the repo's social preview,
 `docs/logo/social-preview.svg`. GitHub takes the social preview as a PNG, uploaded
 under Settings → General → Social preview; after changing the logo, render the
 PNG again and upload it:

@@ -3,6 +3,7 @@
 // Colors come from the takeover UI (docs/diagrams/palette.json). Writes:
 //   docs/logo/logo.svg            the turtle on its circle
 //   docs/logo/social-preview.svg  1280x640, for the repo's social preview image
+//   frontend/public/favicon.svg   the takeover page's favicon, the same logo
 // Run from anywhere: node scripts/logo.mjs
 // CI runs it and fails if anything it writes differs from what's committed.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -94,6 +95,8 @@ const onCircle = (size) =>
 mkdirSync(path.join(root, DIR), { recursive: true });
 const logo = onCircle(512).replace("<svg ", `<svg role="img" aria-label="browser-session-mcp logo: a turtle whose shell is a browser tab" `);
 writeFileSync(path.join(root, DIR, "logo.svg"), logo + "\n");
+mkdirSync(path.join(root, "frontend/public"), { recursive: true });
+writeFileSync(path.join(root, "frontend/public/favicon.svg"), logo + "\n");
 
 // The social preview: the logo and the project's name and pitch, on the takeover UI's background.
 const FONT = `-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif`;
@@ -106,4 +109,4 @@ const social = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" w
 </svg>
 `;
 writeFileSync(path.join(root, DIR, "social-preview.svg"), social);
-console.log(`Wrote ${DIR}/logo.svg and ${DIR}/social-preview.svg`);
+console.log(`Wrote ${DIR}/logo.svg, ${DIR}/social-preview.svg and frontend/public/favicon.svg`);

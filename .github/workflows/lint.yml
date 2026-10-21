@@ -64,7 +64,7 @@ jobs:
         run: |
           node scripts/diagrams.mjs
           node scripts/logo.mjs
-          drift=$(git status --porcelain -- docs README.md)
+          drift=$(git status --porcelain -- docs README.md frontend/public)
           [ -z "$drift" ] || { echo "$drift"; echo "::error::diagrams or logo are out of date: run node scripts/diagrams.mjs and node scripts/logo.mjs and commit the result"; exit 1; }
 
   commit-messages:
