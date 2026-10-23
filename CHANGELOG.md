@@ -1,4 +1,12 @@
 # Changelog
+## 0.1.4 (2026-10-23)
+
+### Fixes
+
+#### get_stealth rejects an unknown session
+
+`get_stealth` errors on a `sessionId` with no open session, as `set_stealth` does, instead of reporting `false`. `close_browser_session`'s schema says an unknown id succeeds, matching what it does.
+
 ## 0.1.3 (2026-10-23)
 
 ### Fixes
