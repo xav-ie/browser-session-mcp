@@ -18,7 +18,7 @@ use chromiumoxide::page::ScreenshotParams;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData as McpError,
     Implementation, JsonObject, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
-    ServerCapabilities, ServerConfig, Tool,
+    ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler};
@@ -397,8 +397,10 @@ impl BrowserSessionServer {
         let selector = required_str(&args, "selector")?.to_string();
         let text = required_str(&args, "text")?.to_string();
         let clear = optional_bool(&args, "clear").unwrap_or(false);
+        let delay = optional_u64(&args, "delay").unwrap_or(0);
+        let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
         let page = sessions.active_page(&session_id).await?;
-        wait_for_selector(&page, &selector, 5_000).await?;
+        wait_for_selector(&page, &selector, timeout).await?;
         let element = page
             .find_element(selector.clone())
             .await
@@ -412,10 +414,21 @@ impl BrowserSessionServer {
                 .await;
         }
         element.click().await.ok();
-        element
-            .type_str(text.as_str())
-            .await
-            .with_context(|| format!("typing into {selector}"))?;
+        if delay == 0 {
+            element
+                .type_str(text.as_str())
+                .await
+                .with_context(|| format!("typing into {selector}"))?;
+        } else {
+            let mut buf = [0u8; 4];
+            for ch in text.chars() {
+                element
+                    .type_str(ch.encode_utf8(&mut buf))
+                    .await
+                    .with_context(|| format!("typing into {selector}"))?;
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+        }
         Ok(ok_text(format!(
             "Typed {} chars into {selector}",
             text.chars().count()
@@ -1158,273 +1171,559 @@ fn tool_defs() -> Vec<Tool> {
         ("required", json!(["width", "height"])),
         ("additionalProperties", Value::Bool(false)),
     ]);
+    let session_id = (
+        "sessionId",
+        &str_t,
+        "The id returned by open_browser_session. Errors if no open session has it.",
+    );
+    let tab_index = (
+        "tabIndex",
+        &nonneg_int_t,
+        "A tab's 0-based index from list_pages. Errors if the session has no tab at that index.",
+    );
+    let state_name = (
+        "name",
+        &str_t,
+        "Name of the saved state: letters, digits, '.', '_' and '-' only.",
+    );
     vec![
         tool(
             "open_browser_session",
-            "Open a new isolated browser session and return its sessionId. Pass this id to every subsequent tool call. Sessions are full BrowserContexts — each has its own cookies, storage, and tabs.",
-            object_schema(&[("viewport", &viewport_t), ("useMobileUA", &bool_t)], &[]),
+            "Open a new isolated browser session and return its sessionId; call this first, then pass the id to every other tool. Each session is its own Chrome BrowserContext with separate cookies, storage and tabs, so sessions never see each other. To reuse a login from an earlier session, follow with load_browser_state. Returns { sessionId, pageCount, activeUrl }. Fails if Chrome is unreachable at BROWSER_URL.",
+            object_schema(
+                &[
+                    (
+                        "viewport",
+                        &viewport_t,
+                        "Window size in CSS pixels, { width, height }. Default 1280x800.",
+                    ),
+                    (
+                        "useMobileUA",
+                        &bool_t,
+                        "Send a mobile User-Agent and client hints instead of desktop ones. Default false.",
+                    ),
+                ],
+                &[],
+            ),
+            writes(false, false),
         ),
         tool(
             "close_browser_session",
-            "Close a browser session. Releases its tabs, cookies, and storage. Idempotent.",
-            object_schema(&[("sessionId", &str_t)], &["sessionId"]),
+            "Close a browser session for good: closes all its tabs and discards its cookies and storage. Use close_tab to close one tab and keep the session; use save_browser_state first if the login should outlive the session. Idempotent: closing an unknown or already-closed session succeeds.",
+            object_schema(&[session_id], &["sessionId"]),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(true)
+                .open_world(false),
         ),
         tool(
             "list_browser_sessions",
-            "List active browser sessions on the underlying Chrome.",
+            "List every open browser session on the shared Chrome, including ones opened by other agents. Returns { sessions: [{ sessionId, pageCount, activeUrl }] }. Use it to recover a lost sessionId; use list_pages for the tabs inside one session, and list_browser_states for saved logins.",
             empty_obj_schema(),
+            read_only(),
         ),
         tool(
             "new_page",
-            "Open a new tab in the session. Subsequent tool calls target this new tab.",
-            object_schema(&[("sessionId", &str_t), ("url", &url_t)], &["sessionId"]),
+            "Open a new tab in the session and make it the active tab, so later navigate/click/type/screenshot calls act on it. Use navigate instead to load a URL in the current tab. Returns { index, url }, where index is the new tab's list_pages index.",
+            object_schema(
+                &[
+                    session_id,
+                    (
+                        "url",
+                        &url_t,
+                        "Absolute URL to load in the new tab. Omit for about:blank.",
+                    ),
+                ],
+                &["sessionId"],
+            ),
+            writes(false, true),
         ),
         tool(
             "list_pages",
-            "List all tabs open in the session, in stable order. The active tab (the one navigate/evaluate/screenshot/click target by default) is marked with `*` in the text and `active: true` in the structured output. Tab indices are stable across calls.",
-            object_schema(&[("sessionId", &str_t)], &["sessionId"]),
+            "List the session's tabs in a stable order. The active tab (the one navigate/evaluate/screenshot/click target by default) is marked with `*` in the text and `active: true` in the structured output. Returns { pages: [{ index, url, title, active }] }; pass an index as `tabIndex` to switch_tab, close_tab, evaluate or the profiling tools. Indices stay stable until a tab is closed.",
+            object_schema(&[session_id], &["sessionId"]),
+            read_only(),
         ),
         tool(
             "switch_tab",
-            "Make the tab at `tabIndex` (a list_pages index) the active tab — subsequent navigate/evaluate/screenshot/click/type target it — and bring it to the front in Chrome (also updates the human-takeover screencast).",
-            object_schema(
-                &[("sessionId", &str_t), ("tabIndex", &nonneg_int_t)],
-                &["sessionId", "tabIndex"],
-            ),
+            "Make the tab at `tabIndex` the active tab, so later navigate/evaluate/screenshot/click/type calls target it, and bring it to the front in Chrome (the human-takeover live view follows it too). Use new_page to open a tab instead. Returns { index, url }.",
+            object_schema(&[session_id, tab_index], &["sessionId", "tabIndex"]),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(false),
         ),
         tool(
             "close_tab",
-            "Close the tab at `tabIndex` (a list_pages index). The session and other tabs stay open; the active tab falls back to the last remaining tab.",
-            object_schema(
-                &[("sessionId", &str_t), ("tabIndex", &nonneg_int_t)],
-                &["sessionId", "tabIndex"],
-            ),
+            "Close the tab at `tabIndex`. The session and its other tabs stay open; if the closed tab was active, the last remaining tab becomes active. Tabs after it shift down one index, so call list_pages again before using another index. To end the whole session, use close_browser_session.",
+            object_schema(&[session_id, tab_index], &["sessionId", "tabIndex"]),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(false)
+                .open_world(false),
         ),
         tool(
             "navigate",
-            "Navigate the session's active page to a URL. Resolves after the load event.",
+            "Load a URL in the session's active tab and return once the page's load event fires. Returns { url } with the final URL after any redirects. Use new_page to keep the current page and load the URL in a new tab. Fails if the URL can't be loaded or `timeout` passes first; the page may still be loading after a timeout.",
             object_schema(
                 &[
-                    ("sessionId", &str_t),
-                    ("url", &url_t),
-                    ("timeout", &pos_int_t),
+                    session_id,
+                    ("url", &url_t, "Absolute URL to load, including the scheme."),
+                    (
+                        "timeout",
+                        &pos_int_t,
+                        "Milliseconds to wait for the load event before failing. Default: no limit.",
+                    ),
                 ],
                 &["sessionId", "url"],
             ),
+            writes(false, true),
         ),
         tool(
             "take_screenshot",
-            "Capture a PNG screenshot of the session's active page. Returns the image as base64 embedded in the response.",
+            "Capture a PNG of the session's active tab and return it as an image. Use it to see layout and visual state; use take_snapshot for a cheaper text view of the page's structure, and evaluate to read specific values.",
             object_schema(
-                &[("sessionId", &str_t), ("fullPage", &bool_t)],
+                &[
+                    session_id,
+                    (
+                        "fullPage",
+                        &bool_t,
+                        "Capture the whole scrollable page instead of only the visible viewport. Default false.",
+                    ),
+                ],
                 &["sessionId"],
             ),
+            read_only(),
         ),
         tool(
             "take_snapshot",
-            "Capture the accessibility tree of the session's active page as indented text.",
-            object_schema(&[("sessionId", &str_t)], &["sessionId"]),
+            "Return the accessibility tree of the session's active tab as indented text: each node's role and name (links, buttons, headings, form fields and their labels). Use it to find what's on the page and what to click or type into, far more cheaply than take_screenshot; use take_screenshot when visual layout matters.",
+            object_schema(&[session_id], &["sessionId"]),
+            read_only(),
         ),
         tool(
             "click",
-            "Click via real CDP mouse input (trusted events — fires handlers reliably and grants user activation, so it can open popups/new tabs that a JS click can't). Provide a CSS `selector` (clicks its center, scrolled into view) OR explicit `x`/`y` viewport coordinates.",
+            "Click in the session's active tab with real CDP mouse input (trusted events — fires handlers reliably and grants user activation, so it can open popups/new tabs that a JS click can't). Provide a CSS `selector` (clicks its center after scrolling it into view) OR explicit `x`/`y` viewport coordinates. Fails if the selector matches nothing within `timeout`, or if neither a selector nor both coordinates are given.",
             object_schema(
                 &[
-                    ("sessionId", &str_t),
-                    ("selector", &str_t),
-                    ("x", &num_t),
-                    ("y", &num_t),
-                    ("timeout", &pos_int_t),
+                    session_id,
+                    (
+                        "selector",
+                        &str_t,
+                        "CSS selector of the element to click; the first match is used.",
+                    ),
+                    (
+                        "x",
+                        &num_t,
+                        "Horizontal viewport coordinate in CSS pixels, used with `y` when no selector is given.",
+                    ),
+                    (
+                        "y",
+                        &num_t,
+                        "Vertical viewport coordinate in CSS pixels, used with `x` when no selector is given.",
+                    ),
+                    (
+                        "timeout",
+                        &pos_int_t,
+                        "Milliseconds to wait for `selector` to appear. Default 5000.",
+                    ),
                 ],
                 &["sessionId"],
             ),
+            writes(true, true),
         ),
         tool(
             "type",
-            "Type text into the first element matching the CSS selector.",
+            "Type text into the first element matching a CSS selector in the session's active tab: waits for it, clicks it to focus, then sends real key events for each character. Use press_key afterwards for Enter or Tab. Fails if the selector matches nothing within `timeout`.",
             object_schema(
                 &[
-                    ("sessionId", &str_t),
-                    ("selector", &str_t),
-                    ("text", &str_t),
-                    ("delay", &nonneg_int_t),
-                    ("clear", &bool_t),
+                    session_id,
+                    (
+                        "selector",
+                        &str_t,
+                        "CSS selector of the input, textarea or editable element.",
+                    ),
+                    ("text", &str_t, "The text to type."),
+                    (
+                        "delay",
+                        &nonneg_int_t,
+                        "Milliseconds to pause after each character, for pages that react to typing speed. Default 0.",
+                    ),
+                    (
+                        "clear",
+                        &bool_t,
+                        "Empty the field's current value before typing. Default false, which appends.",
+                    ),
+                    (
+                        "timeout",
+                        &pos_int_t,
+                        "Milliseconds to wait for `selector` to appear. Default 5000.",
+                    ),
                 ],
                 &["sessionId", "selector", "text"],
             ),
+            writes(true, true),
         ),
         tool(
             "press_key",
-            "Press a key via CDP keyboard input. `key` is a name (Enter, Tab, Escape, Backspace, ArrowDown, …) or a single character. With a `selector`, focuses that element first (e.g. type into a field then press Enter); without, presses on whatever is focused.",
+            "Press a key via CDP keyboard input in the session's active tab. `key` is a name (Enter, Tab, Escape, Backspace, ArrowDown, …) or a single character. With a `selector`, focuses that element first (e.g. type into a field then press Enter); without, presses on whatever is focused. Use type for whole strings. Fails on an unknown key name, or if the selector matches nothing within `timeout`.",
             object_schema(
                 &[
-                    ("sessionId", &str_t),
-                    ("key", &str_t),
-                    ("selector", &str_t),
-                    ("timeout", &pos_int_t),
+                    session_id,
+                    (
+                        "key",
+                        &str_t,
+                        "Key name in the US layout (Enter, Tab, Escape, Backspace, ArrowDown…) or one character.",
+                    ),
+                    (
+                        "selector",
+                        &str_t,
+                        "CSS selector of an element to focus before pressing. Omit to press on the focused element.",
+                    ),
+                    (
+                        "timeout",
+                        &pos_int_t,
+                        "Milliseconds to wait for `selector` to appear. Default 5000.",
+                    ),
                 ],
                 &["sessionId", "key"],
             ),
+            writes(true, true),
         ),
         tool(
             "scroll",
-            "Scroll via a real mouse-wheel event. `deltaY` (default 600; negative scrolls up) and `deltaX` (default 0) are pixels; `x`/`y` are the wheel position (default 50,50). Useful to trigger lazy-loaded content and to generate human-like behavioral signals.",
+            "Scroll the session's active tab with a real mouse-wheel event at a viewport position; whatever scrollable element is under that point scrolls. Useful to reveal lazy-loaded content and to generate human-like behavioral signals. Returns immediately without waiting for content to load; follow with wait_for if needed.",
             object_schema(
                 &[
-                    ("sessionId", &str_t),
-                    ("deltaY", &num_t),
-                    ("deltaX", &num_t),
-                    ("x", &num_t),
-                    ("y", &num_t),
+                    session_id,
+                    (
+                        "deltaY",
+                        &num_t,
+                        "Vertical pixels to scroll; negative scrolls up. Default 600.",
+                    ),
+                    (
+                        "deltaX",
+                        &num_t,
+                        "Horizontal pixels to scroll; negative scrolls left. Default 0.",
+                    ),
+                    (
+                        "x",
+                        &num_t,
+                        "Wheel position from the viewport's left edge in CSS pixels. Default 50.",
+                    ),
+                    (
+                        "y",
+                        &num_t,
+                        "Wheel position from the viewport's top edge in CSS pixels. Default 50.",
+                    ),
                 ],
                 &["sessionId"],
             ),
+            writes(false, true),
         ),
         tool(
             "move_mouse",
-            "Move the mouse to viewport coordinates `x`,`y` via CDP input (trusted move event) — triggers hover handlers and contributes human-like behavioral telemetry.",
+            "Move the mouse to viewport coordinates `x`,`y` in the session's active tab via CDP input (trusted move event). Use it to trigger hover menus and tooltips, and to add human-like behavioral telemetry; use click to click.",
             object_schema(
-                &[("sessionId", &str_t), ("x", &num_t), ("y", &num_t)],
+                &[
+                    session_id,
+                    (
+                        "x",
+                        &num_t,
+                        "Horizontal position from the viewport's left edge in CSS pixels.",
+                    ),
+                    (
+                        "y",
+                        &num_t,
+                        "Vertical position from the viewport's top edge in CSS pixels.",
+                    ),
+                ],
                 &["sessionId", "x", "y"],
             ),
+            writes(false, true),
         ),
         tool(
             "wait_for",
-            "Wait for a CSS selector to appear, or for a text string to be present in the page body.",
+            "Wait until a CSS selector matches an element, or a text string appears in the page's visible text, in the session's active tab. Use it after navigate, click or scroll when content loads asynchronously. Pass `selector` or `text`; if both are given, only `selector` is checked. Fails with a timeout error if nothing matches within `timeout`.",
             object_schema(
                 &[
-                    ("sessionId", &str_t),
-                    ("selector", &str_t),
-                    ("text", &str_t),
-                    ("timeout", &pos_int_t),
+                    session_id,
+                    ("selector", &str_t, "CSS selector to wait for."),
+                    (
+                        "text",
+                        &str_t,
+                        "Text to wait for in document.body.innerText; case-sensitive substring match.",
+                    ),
+                    (
+                        "timeout",
+                        &pos_int_t,
+                        "Milliseconds to wait before failing. Default 10000.",
+                    ),
                 ],
                 &["sessionId"],
             ),
+            read_only(),
         ),
         tool(
             "evaluate",
-            "Run a JavaScript expression in the page and return its value. Wrap with `return ...` for multi-statement bodies. Runs in the page's main world (can read page globals like window.dataLayer); on stealth sessions (console-capture off) it runs in an isolated world instead, which can't see page-defined globals. By default targets the active tab; pass `tabIndex` (a list_pages index) to evaluate in a specific tab.",
+            "Run JavaScript in a tab and return its value as JSON in { result }. A bare expression returns its value; for several statements use `return ...`. It runs in the page's main world (can read page globals like window.dataLayer); on stealth sessions (see set_stealth) it runs in an isolated world instead, which sees the DOM but not page-defined globals. The code can change the page like any script, so prefer take_snapshot or wait_for when they suffice. Fails with the JS exception's message if the code throws.",
             object_schema(
                 &[
-                    ("sessionId", &str_t),
-                    ("expression", &str_t),
-                    ("tabIndex", &nonneg_int_t),
+                    session_id,
+                    (
+                        "expression",
+                        &str_t,
+                        "JavaScript to run. Promises are awaited; the value must be JSON-serializable.",
+                    ),
+                    (
+                        "tabIndex",
+                        &nonneg_int_t,
+                        "Tab to run in, by its 0-based list_pages index. Default: the active tab.",
+                    ),
                 ],
                 &["sessionId", "expression"],
             ),
+            writes(true, true),
         ),
         tool(
             "start_profiling",
-            "Start the V8 CPU profiler on a tab (active tab by default, or `tabIndex`). Use to find which JavaScript makes a page slow or unresponsive: start, reproduce the problem (navigate/click/wait), then call stop_profiling on the same tab. `samplingIntervalUs` defaults to 1000.",
+            "Start the V8 CPU profiler on a tab (active tab by default, or `tabIndex`). Use to find which JavaScript makes a page slow or unresponsive: start, reproduce the problem (navigate/click/wait), then call stop_profiling on the same tab.",
             object_schema(
                 &[
-                    ("sessionId", &str_t),
-                    ("tabIndex", &nonneg_int_t),
-                    ("samplingIntervalUs", &pos_int_t),
+                    session_id,
+                    (
+                        "tabIndex",
+                        &nonneg_int_t,
+                        "Tab to profile, by its 0-based list_pages index. Default: the active tab.",
+                    ),
+                    (
+                        "samplingIntervalUs",
+                        &pos_int_t,
+                        "Microseconds between stack samples; smaller is more detailed but heavier. Default 1000.",
+                    ),
                 ],
                 &["sessionId"],
             ),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
         ),
         tool(
             "stop_profiling",
-            "Stop the CPU profiler started by start_profiling, save a .cpuprofile (flame graph in DevTools Performance panel or speedscope.app) and return the culprits: long tasks (>=50ms) split into JS vs browser-native (parse/style/layout) vs GC time with their top scripts, top JS functions and heaviest JS stack, top functions by self and total time (with url:line:col), and self time per script. If page JS is hung, the renderer can't answer until it yields, so after `terminateAfterMs` (default 5000; 0 disables) the running script is terminated to get the profile out. `top` (default 15) caps each list; `timeout` (ms, default 30000) bounds the stop call.",
+            "Stop the CPU profiler started by start_profiling, save a .cpuprofile (flame graph in DevTools Performance panel or speedscope.app) and return the culprits: long tasks (>=50ms) split into JS vs browser-native (parse/style/layout) vs GC time with their top scripts, top JS functions and heaviest JS stack, top functions by self and total time (with url:line:col), and self time per script. If page JS is hung, the renderer can't answer until it yields, so after `terminateAfterMs` the running script is terminated to get the profile out.",
             object_schema(
                 &[
-                    ("sessionId", &str_t),
-                    ("tabIndex", &nonneg_int_t),
-                    ("top", &pos_int_t),
-                    ("terminateAfterMs", &nonneg_int_t),
-                    ("timeout", &pos_int_t),
+                    session_id,
+                    (
+                        "tabIndex",
+                        &nonneg_int_t,
+                        "The tab passed to start_profiling, by its 0-based list_pages index. Default: the active tab.",
+                    ),
+                    (
+                        "top",
+                        &pos_int_t,
+                        "How many entries to return in each ranked list. Default 15.",
+                    ),
+                    (
+                        "terminateAfterMs",
+                        &nonneg_int_t,
+                        "Milliseconds to wait for hung page JS before terminating it; 0 never terminates. Default 5000.",
+                    ),
+                    (
+                        "timeout",
+                        &pos_int_t,
+                        "Milliseconds the whole stop call may take before failing. Default 30000.",
+                    ),
                 ],
                 &["sessionId"],
             ),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(false)
+                .open_world(false),
         ),
         tool(
             "list_visits",
-            "List page visits in this session, oldest first. Each visit is one top-level navigation in one tab.",
-            object_schema(&[("sessionId", &str_t)], &["sessionId"]),
+            "List the session's page visits, oldest first. Each visit is one top-level navigation in one tab, numbered by `seq`; pass that number as `visit` to list_console_messages or list_network_requests to see only that page load's logs. Returns { visits: [{ seq, targetId, url, openedAt }] }. Empty unless the listener role is running.",
+            object_schema(&[session_id], &["sessionId"]),
+            read_only(),
         ),
         tool(
             "list_console_messages",
-            "List console messages emitted by the session. Returns up to `limit` most-recent entries (default 500).",
+            "List console messages (console.log, warnings, errors, uncaught exceptions) the session's pages emitted, oldest first, from the most recent `limit`. Use it to debug page errors; use list_network_requests for failed requests. Returns { messages }. Empty unless the listener role is running, and nothing is captured while stealth is on.",
             object_schema(
                 &[
-                    ("sessionId", &str_t),
-                    ("visit", &pos_int_t),
-                    ("limit", &pos_int_t),
+                    session_id,
+                    (
+                        "visit",
+                        &pos_int_t,
+                        "Only messages from this visit, by its `seq` from list_visits. Default: all visits.",
+                    ),
+                    (
+                        "limit",
+                        &pos_int_t,
+                        "Return at most this many of the newest messages. Default 500.",
+                    ),
                 ],
                 &["sessionId"],
             ),
+            read_only(),
         ),
         tool(
             "list_network_requests",
-            "List network requests made by the session. Returns up to `limit` most-recent entries (default 500).",
+            "List the network requests the session's pages made, oldest first, from the most recent `limit`: method, URL, status (or failure reason), redirects and request body. Use it to check API calls, tracking pixels and failed loads. Returns { requests }. Empty unless the listener role is running.",
             object_schema(
                 &[
-                    ("sessionId", &str_t),
-                    ("visit", &pos_int_t),
-                    ("limit", &pos_int_t),
+                    session_id,
+                    (
+                        "visit",
+                        &pos_int_t,
+                        "Only requests from this visit, by its `seq` from list_visits. Default: all visits.",
+                    ),
+                    (
+                        "limit",
+                        &pos_int_t,
+                        "Return at most this many of the newest requests. Default 500.",
+                    ),
                 ],
                 &["sessionId"],
             ),
+            read_only(),
         ),
         tool(
             "set_stealth",
-            "Toggle stealth for a session. `enabled: true` disables the CDP Runtime domain (removes the Runtime.enable automation tell that anti-bot systems like Cloudflare detect) — load/navigate pages in this mode to pass CDP-based bot gates; the cost is no console capture and `evaluate` runs in an isolated world (can't read page globals like window.dataLayer). `enabled: false` re-enables Runtime: console capture + main-world `evaluate` (reads page globals) return, but the CDP tell is present. Typical flow: set_stealth(true) → navigate → set_stealth(false) → evaluate. Replaces the old console-capture toggle that required a takeover token.",
+            "Toggle stealth for a session. `enabled: true` disables the CDP Runtime domain (removes the Runtime.enable automation tell that anti-bot systems like Cloudflare detect) — load/navigate pages in this mode to pass CDP-based bot gates; the cost is no console capture and `evaluate` runs in an isolated world (can't read page globals like window.dataLayer). `enabled: false` re-enables Runtime: console capture + main-world `evaluate` (reads page globals) return, but the CDP tell is present. Typical flow: set_stealth(true) → navigate → set_stealth(false) → evaluate. Returns { stealth }.",
             object_schema(
-                &[("sessionId", &str_t), ("enabled", &bool_t)],
+                &[
+                    session_id,
+                    (
+                        "enabled",
+                        &bool_t,
+                        "true turns stealth on, false turns it off.",
+                    ),
+                ],
                 &["sessionId", "enabled"],
             ),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(false),
         ),
         tool(
             "get_stealth",
-            "Return whether stealth is currently enabled for a session ({ stealth: bool }).",
-            object_schema(&[("sessionId", &str_t)], &["sessionId"]),
+            "Return whether stealth is on for a session, as { stealth: bool }. Check it before evaluate or list_console_messages, whose behavior it changes; use set_stealth to change it.",
+            object_schema(&[session_id], &["sessionId"]),
+            read_only(),
         ),
         tool(
             "request_human_takeover",
-            "Hand the session's active page to a human to log in themselves (passwords/passkeys the agent must not see). Returns a URL to show the user and a token. Does NOT block. STRONGLY ADVISED: after showing the URL, run await_human_takeover in a BACKGROUND task (subagent/job) — not your main loop — because the human may take many minutes and you should stay responsive. `ttlMinutes` (default 30, 1 to 60) bounds how long the link (a bearer credential) is valid.",
+            "Hand the session's active page to a human to log in themselves (passwords/passkeys the agent must not see). Returns { url, token, expiresAtMs }: show the URL to the user and keep the token. Does NOT block. STRONGLY ADVISED: after showing the URL, run await_human_takeover in a BACKGROUND task (subagent/job) — not your main loop — because the human may take many minutes and you should stay responsive. Fails if TAKEOVER_BASE_URL isn't configured on the server.",
             object_schema(
-                &[("sessionId", &str_t), ("ttlMinutes", &pos_int_t)],
+                &[
+                    session_id,
+                    (
+                        "ttlMinutes",
+                        &pos_int_t,
+                        "Minutes the link stays valid, 1 to 60 (larger values are capped). The link is a bearer credential, so keep it short. Default 30.",
+                    ),
+                ],
                 &["sessionId"],
             ),
+            writes(false, true),
         ),
         tool(
             "await_human_takeover",
-            "Wait for the human to click Done in the takeover page. Returns { completed } — true if they finished, false on timeout. STRONGLY ADVISED: run this in a BACKGROUND task and POLL — call it in a loop with a SHORT `timeout` (e.g. 4000ms) until completed:true — rather than one long blocking call, which can exceed your MCP client's request timeout and make you miss the Done signal. The human may take several minutes; a background poller lets you be notified and resume. `timeout` ms: default 300000, max 1800000. Pass the token from request_human_takeover. On completion the session is authenticated and you can continue.",
-            object_schema(&[("token", &str_t), ("timeout", &pos_int_t)], &["token"]),
+            "Wait for the human to click Done in the takeover page. Returns { completed } — true if they finished, false on timeout. STRONGLY ADVISED: run this in a BACKGROUND task and POLL — call it in a loop with a SHORT `timeout` (e.g. 4000ms) until completed:true — rather than one long blocking call, which can exceed your MCP client's request timeout and make you miss the Done signal. The human may take several minutes; a background poller lets you be notified and resume. On completion the session is authenticated and you can continue; consider save_browser_state so later sessions skip the login.",
+            object_schema(
+                &[
+                    (
+                        "token",
+                        &str_t,
+                        "The token returned by request_human_takeover.",
+                    ),
+                    (
+                        "timeout",
+                        &pos_int_t,
+                        "Milliseconds to wait before returning completed: false. Default 300000, max 1800000.",
+                    ),
+                ],
+                &["token"],
+            ),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
         ),
         tool(
             "save_browser_state",
-            "Save the session's cookies under a name so a future session can load them and resume without logging in again.",
-            object_schema(
-                &[("sessionId", &str_t), ("name", &str_t)],
-                &["sessionId", "name"],
-            ),
+            "Save the session's cookies under a name so a future session can load them with load_browser_state and resume without logging in again. Saving under an existing name replaces that state. Only cookies are saved, not localStorage. Returns { name, savedAt, cookieCount }.",
+            object_schema(&[session_id, state_name], &["sessionId", "name"]),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(true)
+                .open_world(false),
         ),
         tool(
             "load_browser_state",
-            "Load a previously saved set of cookies into this session.",
-            object_schema(
-                &[("sessionId", &str_t), ("name", &str_t)],
-                &["sessionId", "name"],
-            ),
+            "Load cookies saved by save_browser_state into this session, usually right after open_browser_session and before navigate, so the session starts logged in. Loaded cookies replace any with the same name, domain and path; others are kept. Returns { name, cookieCount }. Fails if no state has that name; list_browser_states shows the names.",
+            object_schema(&[session_id, state_name], &["sessionId", "name"]),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(true)
+                .open_world(false),
         ),
         tool(
             "list_browser_states",
-            "List all saved browser states.",
+            "List the saved browser states (cookie sets saved by save_browser_state) that load_browser_state and delete_browser_state accept. Returns { states: [{ name, cookieCount, savedAt }] }. These are saved logins on disk, not open sessions; use list_browser_sessions for those.",
             empty_obj_schema(),
+            read_only(),
         ),
         tool(
             "delete_browser_state",
-            "Delete a saved browser state by name.",
-            object_schema(&[("name", &str_t)], &["name"]),
+            "Delete a saved browser state by name, permanently; open sessions that already loaded it keep their cookies. Returns { name, removed }, with removed false if no state had that name.",
+            object_schema(&[state_name], &["name"]),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(true)
+                .open_world(false),
         ),
     ]
 }
 
-fn tool(name: &'static str, description: &'static str, schema: JsonObject) -> Tool {
+fn tool(
+    name: &'static str,
+    description: &'static str,
+    schema: JsonObject,
+    annotations: ToolAnnotations,
+) -> Tool {
     Tool::new(name.to_string(), description.to_string(), Arc::new(schema))
+        .with_annotations(annotations)
+}
+
+/// Annotations for a tool that only reads.
+fn read_only() -> ToolAnnotations {
+    ToolAnnotations::new().read_only(true).open_world(false)
+}
+
+/// Annotations for a tool that acts on web pages: `destructive` when it can
+/// trigger whatever the page does (submit, delete, buy).
+fn writes(destructive: bool, open_world: bool) -> ToolAnnotations {
+    ToolAnnotations::new()
+        .read_only(false)
+        .destructive(destructive)
+        .idempotent(false)
+        .open_world(open_world)
 }
 
 fn obj(pairs: &[(&str, Value)]) -> Value {
@@ -1443,10 +1742,12 @@ fn empty_obj_schema() -> JsonObject {
     m
 }
 
-fn object_schema(props: &[(&str, &Value)], required: &[&str]) -> JsonObject {
+fn object_schema(props: &[(&str, &Value, &str)], required: &[&str]) -> JsonObject {
     let mut properties = Map::new();
-    for (k, v) in props {
-        properties.insert((*k).into(), (*v).clone());
+    for (k, v, description) in props {
+        let mut prop = (*v).clone();
+        prop["description"] = Value::String((*description).into());
+        properties.insert((*k).into(), prop);
     }
     let mut m = Map::new();
     m.insert("type".into(), Value::String("object".into()));

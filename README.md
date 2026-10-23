@@ -183,7 +183,7 @@ background roles from [Deployment](docs/deployment.md).
 
 **Acting on it** (real CDP input, not synthetic JavaScript events)
 - `click({ sessionId, selector | x,y, timeout? })`
-- `type({ sessionId, selector, text, delay?, clear? })`
+- `type({ sessionId, selector, text, delay?, clear?, timeout? })`
 - `press_key({ sessionId, key, selector?, timeout? })`: `key` is a name (Enter, Tab, ArrowDown…) or a character
 - `scroll({ sessionId, deltaY?, deltaX?, x?, y? })`
 - `move_mouse({ sessionId, x, y })`
