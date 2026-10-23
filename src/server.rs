@@ -748,7 +748,10 @@ impl BrowserSessionServer {
     }
 
     async fn get_stealth(&self, args: JsonObject) -> Result<CallToolResult> {
+        let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
+        // Validate the session exists, as set_stealth does.
+        let _ = sessions.context_id_for(&session_id).await?;
         let enabled = takeover::is_stealth(&session_id).await;
         Ok(ok_text_struct(
             format!("stealth = {enabled}"),
@@ -1210,7 +1213,14 @@ fn tool_defs() -> Vec<Tool> {
         tool(
             "close_browser_session",
             "Close a browser session for good: closes all its tabs and discards its cookies and storage. Use close_tab to close one tab and keep the session; use save_browser_state first if the login should outlive the session. Idempotent: closing an unknown or already-closed session succeeds.",
-            object_schema(&[session_id], &["sessionId"]),
+            object_schema(
+                &[(
+                    "sessionId",
+                    &str_t,
+                    "The id returned by open_browser_session. An unknown or already-closed id succeeds without error.",
+                )],
+                &["sessionId"],
+            ),
             ToolAnnotations::new()
                 .read_only(false)
                 .destructive(true)
