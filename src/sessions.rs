@@ -19,6 +19,7 @@ use chromiumoxide::cdp::browser_protocol::{
         TargetId, TargetInfo,
     },
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,7 +28,7 @@ use tokio::sync::Mutex;
 use crate::state::StateStore;
 use crate::user_agent::{self, UaOverride};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SessionInfo {
     #[serde(rename = "sessionId")]
     pub session_id: String,

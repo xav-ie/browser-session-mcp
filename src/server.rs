@@ -22,6 +22,7 @@ use rmcp::model::{
 };
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler};
+use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
@@ -31,8 +32,8 @@ use std::time::Duration;
 use crate::chrome_ctx::ChromeContext;
 use crate::logs::{self, LogKind, ReadOpts, SessionLogEntry};
 use crate::profiler;
-use crate::saved_states::SavedStateStore;
-use crate::sessions::Viewport;
+use crate::saved_states::{SavedStateStore, StateSummary};
+use crate::sessions::{SessionInfo, Viewport};
 use crate::snapshot;
 use crate::takeover;
 
@@ -98,56 +99,20 @@ impl ServerHandler for BrowserSessionServer {
 }
 
 impl BrowserSessionServer {
-    async fn dispatch(&self, name: &str, args: JsonObject) -> Result<CallToolResult> {
-        match name {
-            "open_browser_session" => self.open_session(args).await,
-            "close_browser_session" => self.close_session(args).await,
-            "list_browser_sessions" => self.list_sessions().await,
-            "new_page" => self.new_page(args).await,
-            "list_pages" => self.list_pages(args).await,
-            "switch_tab" => self.switch_tab(args).await,
-            "close_tab" => self.close_tab(args).await,
-            "navigate" => self.navigate(args).await,
-            "take_screenshot" => self.take_screenshot(args).await,
-            "take_snapshot" => self.take_snapshot(args).await,
-            "click" => self.click(args).await,
-            "type" => self.type_text(args).await,
-            "press_key" => self.press_key(args).await,
-            "scroll" => self.scroll(args).await,
-            "move_mouse" => self.move_mouse(args).await,
-            "wait_for" => self.wait_for(args).await,
-            "evaluate" => self.evaluate(args).await,
-            "start_profiling" => self.start_profiling(args).await,
-            "stop_profiling" => self.stop_profiling(args).await,
-            "list_visits" => self.list_visits(args).await,
-            "list_console_messages" => self.list_console_messages(args).await,
-            "list_network_requests" => self.list_network_requests(args).await,
-            "set_stealth" => self.set_stealth(args).await,
-            "get_stealth" => self.get_stealth(args).await,
-            "request_human_takeover" => self.request_human_takeover(args).await,
-            "await_human_takeover" => self.await_human_takeover(args).await,
-            "save_browser_state" => self.save_state(args).await,
-            "load_browser_state" => self.load_state(args).await,
-            "list_browser_states" => self.list_states().await,
-            "delete_browser_state" => self.delete_state(args).await,
-            other => bail!("unknown tool: {other}"),
-        }
-    }
-
     // --- lifecycle ---
 
-    async fn open_session(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn open_session(&self, args: JsonObject) -> Result<Structured<SessionInfo>> {
         let sessions = self.ctx.sessions().await?;
         let viewport = optional_viewport(&args, "viewport")?;
         let use_mobile = optional_bool(&args, "useMobileUA").unwrap_or(false);
         let info = sessions.open(viewport, use_mobile).await?;
         Ok(ok_text_struct(
             format!("Opened session {}", info.session_id),
-            json!(info),
+            info,
         ))
     }
 
-    async fn close_session(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn close_session(&self, args: JsonObject) -> Result<Text> {
         let session_id = required_str(&args, "sessionId")?.to_string();
         // Best-effort — closing an unknown sessionId is not an error.
         if let Ok(sm) = self.ctx.sessions().await {
@@ -158,7 +123,7 @@ impl BrowserSessionServer {
         Ok(ok_text(format!("Closed session {session_id}")))
     }
 
-    async fn list_sessions(&self) -> Result<CallToolResult> {
+    async fn list_sessions(&self, _args: JsonObject) -> Result<Structured<SessionsOut>> {
         let sessions = self.ctx.sessions().await?;
         let list = sessions.list().await?;
         let body = if list.is_empty() {
@@ -176,12 +141,12 @@ impl BrowserSessionServer {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        Ok(ok_text_struct(body, json!({ "sessions": list })))
+        Ok(ok_text_struct(body, SessionsOut { sessions: list }))
     }
 
     // --- tabs ---
 
-    async fn new_page(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn new_page(&self, args: JsonObject) -> Result<Structured<TabOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let url = optional_str(&args, "url").map(str::to_string);
@@ -191,11 +156,14 @@ impl BrowserSessionServer {
         let page_url = page.url().await?.unwrap_or_default();
         Ok(ok_text_struct(
             format!("Opened tab #{index}"),
-            json!({ "index": index, "url": page_url }),
+            TabOut {
+                index,
+                url: page_url,
+            },
         ))
     }
 
-    async fn list_pages(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn list_pages(&self, args: JsonObject) -> Result<Structured<PagesOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         // Stable order + active marker from the tab registry. Titles/urls come
@@ -226,10 +194,10 @@ impl BrowserSessionServer {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        Ok(ok_text_struct(body, json!({ "pages": summaries })))
+        Ok(ok_text_struct(body, PagesOut { pages: summaries }))
     }
 
-    async fn switch_tab(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn switch_tab(&self, args: JsonObject) -> Result<Structured<TabOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let index = optional_u64(&args, "tabIndex")
@@ -238,11 +206,11 @@ impl BrowserSessionServer {
         let url = sessions.switch_tab(&session_id, index).await?;
         Ok(ok_text_struct(
             format!("Switched to tab #{index} ({url})"),
-            json!({ "index": index, "url": url }),
+            TabOut { index, url },
         ))
     }
 
-    async fn close_tab(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn close_tab(&self, args: JsonObject) -> Result<Text> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let index = optional_u64(&args, "tabIndex")
@@ -252,7 +220,7 @@ impl BrowserSessionServer {
         Ok(ok_text(format!("Closed tab #{index}")))
     }
 
-    async fn navigate(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn navigate(&self, args: JsonObject) -> Result<Structured<NavigateOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let url = required_str(&args, "url")?.to_string();
@@ -276,13 +244,13 @@ impl BrowserSessionServer {
         let resolved_url = page.url().await?.unwrap_or(url);
         Ok(ok_text_struct(
             format!("Navigated to {resolved_url}"),
-            json!({ "url": resolved_url }),
+            NavigateOut { url: resolved_url },
         ))
     }
 
     // --- capture ---
 
-    async fn take_screenshot(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn take_screenshot(&self, args: JsonObject) -> Result<Screenshot> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let full_page = optional_bool(&args, "fullPage").unwrap_or(false);
@@ -297,13 +265,13 @@ impl BrowserSessionServer {
             .context("Page.captureScreenshot")?;
         let len = bytes.len();
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        Ok(CallToolResult::success(vec![
-            ContentBlock::text(format!("Captured {len} bytes PNG.")),
-            ContentBlock::image(b64, "image/png".to_string()),
-        ]))
+        Ok(Screenshot {
+            text: format!("Captured {len} bytes PNG."),
+            png_base64: b64,
+        })
     }
 
-    async fn take_snapshot(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn take_snapshot(&self, args: JsonObject) -> Result<Text> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let page = sessions.active_page(&session_id).await?;
@@ -313,7 +281,7 @@ impl BrowserSessionServer {
 
     // --- interact ---
 
-    async fn click(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn click(&self, args: JsonObject) -> Result<Text> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let page = sessions.active_page(&session_id).await?;
@@ -336,7 +304,7 @@ impl BrowserSessionServer {
         Ok(ok_text(format!("Clicked {label}")))
     }
 
-    async fn press_key(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn press_key(&self, args: JsonObject) -> Result<Text> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let key = required_str(&args, "key")?.to_string();
@@ -357,7 +325,7 @@ impl BrowserSessionServer {
         Ok(ok_text(format!("Pressed {key}")))
     }
 
-    async fn scroll(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn scroll(&self, args: JsonObject) -> Result<Text> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let page = sessions.active_page(&session_id).await?;
@@ -379,7 +347,7 @@ impl BrowserSessionServer {
         Ok(ok_text(format!("Scrolled (deltaX={dx}, deltaY={dy})")))
     }
 
-    async fn move_mouse(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn move_mouse(&self, args: JsonObject) -> Result<Text> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let page = sessions.active_page(&session_id).await?;
@@ -391,7 +359,7 @@ impl BrowserSessionServer {
         Ok(ok_text(format!("Moved mouse to ({x}, {y})")))
     }
 
-    async fn type_text(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn type_text(&self, args: JsonObject) -> Result<Text> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let selector = required_str(&args, "selector")?.to_string();
@@ -435,7 +403,7 @@ impl BrowserSessionServer {
         )))
     }
 
-    async fn wait_for(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn wait_for(&self, args: JsonObject) -> Result<Text> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let selector = optional_str(&args, "selector").map(str::to_string);
@@ -465,7 +433,7 @@ impl BrowserSessionServer {
         Ok(ok_text(format!("Matched text \"{needle}\"")))
     }
 
-    async fn evaluate(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn evaluate(&self, args: JsonObject) -> Result<Structured<EvaluateOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let expression = required_str(&args, "expression")?.to_string();
@@ -492,7 +460,7 @@ impl BrowserSessionServer {
         }
         .context("evaluate")?;
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-        Ok(ok_text_struct(text, json!({ "result": value })))
+        Ok(ok_text_struct(text, EvaluateOut { result: value }))
     }
 
     // --- profiling ---
@@ -506,7 +474,7 @@ impl BrowserSessionServer {
         }
     }
 
-    async fn start_profiling(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn start_profiling(&self, args: JsonObject) -> Result<Text> {
         let page = self.tab_page(&args).await?;
         let interval = optional_u64(&args, "samplingIntervalUs")
             .map_or(profiler::DEFAULT_INTERVAL_US, |n| n as i64);
@@ -516,7 +484,7 @@ impl BrowserSessionServer {
         )))
     }
 
-    async fn stop_profiling(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn stop_profiling(&self, args: JsonObject) -> Result<Structured<ProfileOut>> {
         let session_id = required_str(&args, "sessionId")?;
         let page = self.tab_page(&args).await?;
         let timeout = Duration::from_millis(optional_u64(&args, "timeout").unwrap_or(30_000));
@@ -533,15 +501,19 @@ impl BrowserSessionServer {
         if terminated {
             text.insert_str(0, "Page JS was still running when stopping, so it was terminated to collect the profile (the page was hung; the long task at the end is the culprit).\n");
         }
-        let mut structured = json!(summary);
-        structured["path"] = json!(path);
-        structured["terminated"] = json!(terminated);
-        Ok(ok_text_struct(text, structured))
+        Ok(ok_text_struct(
+            text,
+            ProfileOut {
+                summary,
+                path,
+                terminated,
+            },
+        ))
     }
 
     // --- human takeover ---
 
-    async fn request_human_takeover(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn request_human_takeover(&self, args: JsonObject) -> Result<Structured<TakeoverOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         // How long the link stays valid, in minutes so no plausible number
@@ -579,11 +551,15 @@ impl BrowserSessionServer {
                  with a short timeout until completed — do NOT block your main loop; the human may \
                  take several minutes:\n{url}"
             ),
-            json!({ "url": url, "token": token, "expiresAtMs": expires_at_ms }),
+            TakeoverOut {
+                url,
+                token,
+                expires_at_ms,
+            },
         ))
     }
 
-    async fn await_human_takeover(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn await_human_takeover(&self, args: JsonObject) -> Result<Structured<TakeoverDoneOut>> {
         let token = required_str(&args, "token")?.to_string();
         // How long to block. Default 5 min; capped at 30 to match the max link TTL.
         let timeout_ms = optional_u64(&args, "timeout")
@@ -600,13 +576,13 @@ impl BrowserSessionServer {
         };
         Ok(ok_text_struct(
             body.to_string(),
-            json!({ "completed": completed, "token": token }),
+            TakeoverDoneOut { completed, token },
         ))
     }
 
     // --- per-visit logs ---
 
-    async fn list_visits(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn list_visits(&self, args: JsonObject) -> Result<Structured<VisitsOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let _ = sessions.context_id_for(&session_id).await?;
@@ -627,10 +603,10 @@ impl BrowserSessionServer {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        Ok(ok_text_struct(body, json!({ "visits": visits })))
+        Ok(ok_text_struct(body, VisitsOut { visits }))
     }
 
-    async fn list_console_messages(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn list_console_messages(&self, args: JsonObject) -> Result<Structured<ConsoleOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let _ = sessions.context_id_for(&session_id).await?;
@@ -658,17 +634,17 @@ impl BrowserSessionServer {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let json_entries: Vec<Value> = entries
-            .iter()
+        let messages = entries
+            .into_iter()
             .filter_map(|e| match e {
-                SessionLogEntry::Console(c) => serde_json::to_value(c).ok(),
+                SessionLogEntry::Console(c) => Some(c),
                 _ => None,
             })
             .collect();
-        Ok(ok_text_struct(body, json!({ "messages": json_entries })))
+        Ok(ok_text_struct(body, ConsoleOut { messages }))
     }
 
-    async fn list_network_requests(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn list_network_requests(&self, args: JsonObject) -> Result<Structured<NetworkOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let _ = sessions.context_id_for(&session_id).await?;
@@ -716,19 +692,19 @@ impl BrowserSessionServer {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let json_entries: Vec<Value> = entries
-            .iter()
+        let requests = entries
+            .into_iter()
             .filter_map(|e| match e {
-                SessionLogEntry::Network(n) => serde_json::to_value(n).ok(),
+                SessionLogEntry::Network(n) => Some(n),
                 _ => None,
             })
             .collect();
-        Ok(ok_text_struct(body, json!({ "requests": json_entries })))
+        Ok(ok_text_struct(body, NetworkOut { requests }))
     }
 
     // --- stealth ---
 
-    async fn set_stealth(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn set_stealth(&self, args: JsonObject) -> Result<Structured<StealthOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         // Validate the session exists (resolves from Chrome).
@@ -743,11 +719,11 @@ impl BrowserSessionServer {
         };
         Ok(ok_text_struct(
             msg.to_string(),
-            json!({ "stealth": enabled }),
+            StealthOut { stealth: enabled },
         ))
     }
 
-    async fn get_stealth(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn get_stealth(&self, args: JsonObject) -> Result<Structured<StealthOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         // Validate the session exists, as set_stealth does.
@@ -755,13 +731,13 @@ impl BrowserSessionServer {
         let enabled = takeover::is_stealth(&session_id).await;
         Ok(ok_text_struct(
             format!("stealth = {enabled}"),
-            json!({ "stealth": enabled }),
+            StealthOut { stealth: enabled },
         ))
     }
 
     // --- saved browser states ---
 
-    async fn save_state(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn save_state(&self, args: JsonObject) -> Result<Structured<SavedOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let name = required_str(&args, "name")?.to_string();
@@ -785,15 +761,15 @@ impl BrowserSessionServer {
         let state = self.saved_states.save(&name, cookies_json.clone()).await?;
         Ok(ok_text_struct(
             format!("Saved {} cookies as \"{name}\".", state.cookies.len()),
-            json!({
-                "name": state.name,
-                "savedAt": state.saved_at,
-                "cookieCount": state.cookies.len(),
-            }),
+            SavedOut {
+                cookie_count: state.cookies.len(),
+                name: state.name,
+                saved_at: state.saved_at,
+            },
         ))
     }
 
-    async fn load_state(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn load_state(&self, args: JsonObject) -> Result<Structured<LoadedOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let name = required_str(&args, "name")?.to_string();
@@ -834,11 +810,14 @@ impl BrowserSessionServer {
         }
         Ok(ok_text_struct(
             format!("Loaded {} cookies from \"{name}\".", state.cookies.len()),
-            json!({ "name": name, "cookieCount": state.cookies.len() }),
+            LoadedOut {
+                cookie_count: state.cookies.len(),
+                name,
+            },
         ))
     }
 
-    async fn list_states(&self) -> Result<CallToolResult> {
+    async fn list_states(&self, _args: JsonObject) -> Result<Structured<StatesOut>> {
         let list = self.saved_states.list().await?;
         let body = if list.is_empty() {
             "(no saved states)".to_string()
@@ -853,10 +832,10 @@ impl BrowserSessionServer {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        Ok(ok_text_struct(body, json!({ "states": list })))
+        Ok(ok_text_struct(body, StatesOut { states: list }))
     }
 
-    async fn delete_state(&self, args: JsonObject) -> Result<CallToolResult> {
+    async fn delete_state(&self, args: JsonObject) -> Result<Structured<DeletedOut>> {
         let name = required_str(&args, "name")?.to_string();
         let removed = self.saved_states.delete(&name).await?;
         let msg = if removed {
@@ -864,31 +843,270 @@ impl BrowserSessionServer {
         } else {
             format!("No saved state named \"{name}\".")
         };
-        Ok(ok_text_struct(
-            msg,
-            json!({ "name": name, "removed": removed }),
-        ))
+        Ok(ok_text_struct(msg, DeletedOut { name, removed }))
     }
 }
 
 // ---- helpers --------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct PageSummary {
+    /// 0-based index to pass as `tabIndex`.
     index: usize,
     url: String,
     title: String,
+    /// Whether this is the tab other tools act on by default.
     active: bool,
 }
 
-fn ok_text(text: impl Into<String>) -> CallToolResult {
-    CallToolResult::success(vec![ContentBlock::text(text.into())])
+// ---- tool results ---------------------------------------------------------
+//
+// Every handler returns a `ToolOutput`, and `tools!` declares each tool's
+// outputSchema from its handler's return type, so the schema clients see can't
+// drift from the `structuredContent` the handler sends.
+
+trait ToolOutput {
+    /// Add this result type's outputSchema, if it has one, to `tool`.
+    fn declare(tool: Tool) -> Tool;
+    fn into_result(self) -> CallToolResult;
 }
 
-fn ok_text_struct(text: impl Into<String>, structured: Value) -> CallToolResult {
-    let mut r = CallToolResult::success(vec![ContentBlock::text(text.into())]);
-    r.structured_content = Some(structured);
-    r
+/// A text-only result; declares no outputSchema.
+struct Text(String);
+
+impl ToolOutput for Text {
+    fn declare(tool: Tool) -> Tool {
+        tool
+    }
+
+    fn into_result(self) -> CallToolResult {
+        CallToolResult::success(vec![ContentBlock::text(self.0)])
+    }
+}
+
+/// Text plus `structuredContent` serialized from `T`, whose JSON Schema is the
+/// tool's outputSchema.
+struct Structured<T> {
+    text: String,
+    value: T,
+}
+
+impl<T: Serialize + JsonSchema + 'static> ToolOutput for Structured<T> {
+    fn declare(tool: Tool) -> Tool {
+        tool.with_output_schema::<T>()
+    }
+
+    fn into_result(self) -> CallToolResult {
+        let mut r = CallToolResult::success(vec![ContentBlock::text(self.text)]);
+        r.structured_content =
+            Some(serde_json::to_value(self.value).expect("tool results serialize to JSON"));
+        r
+    }
+}
+
+/// A PNG image plus a caption; declares no outputSchema.
+struct Screenshot {
+    text: String,
+    png_base64: String,
+}
+
+impl ToolOutput for Screenshot {
+    fn declare(tool: Tool) -> Tool {
+        tool
+    }
+
+    fn into_result(self) -> CallToolResult {
+        CallToolResult::success(vec![
+            ContentBlock::text(self.text),
+            ContentBlock::image(self.png_base64, "image/png".to_string()),
+        ])
+    }
+}
+
+/// Declare `tool`'s outputSchema from `_handler`'s return type. The handler is
+/// never called; it only names the type.
+fn declare_output<'a, F, Fut, O>(tool: Tool, _handler: F) -> Tool
+where
+    F: FnOnce(&'a BrowserSessionServer, JsonObject) -> Fut,
+    Fut: std::future::Future<Output = Result<O>>,
+    O: ToolOutput,
+{
+    O::declare(tool)
+}
+
+/// The tool table: each tool name and its handler. Generates `dispatch` and
+/// `declare_output_for`, so routing and output schemas come from one list.
+macro_rules! tools {
+    ($($name:literal => $handler:ident,)*) => {
+        impl BrowserSessionServer {
+            async fn dispatch(&self, name: &str, args: JsonObject) -> Result<CallToolResult> {
+                match name {
+                    $($name => Ok(self.$handler(args).await?.into_result()),)*
+                    other => bail!("unknown tool: {other}"),
+                }
+            }
+        }
+
+        /// Add `tool`'s outputSchema from its handler. Panics on a tool with no
+        /// handler, which the `tool_table_matches_definitions` test catches.
+        fn declare_output_for(tool: Tool) -> Tool {
+            match tool.name.as_ref() {
+                $($name => declare_output(tool, BrowserSessionServer::$handler),)*
+                other => panic!("tool `{other}` has no handler in tools!"),
+            }
+        }
+
+        #[cfg(test)]
+        const TOOL_NAMES: &[&str] = &[$($name,)*];
+    };
+}
+
+tools! {
+    "open_browser_session" => open_session,
+    "close_browser_session" => close_session,
+    "list_browser_sessions" => list_sessions,
+    "new_page" => new_page,
+    "list_pages" => list_pages,
+    "switch_tab" => switch_tab,
+    "close_tab" => close_tab,
+    "navigate" => navigate,
+    "take_screenshot" => take_screenshot,
+    "take_snapshot" => take_snapshot,
+    "click" => click,
+    "type" => type_text,
+    "press_key" => press_key,
+    "scroll" => scroll,
+    "move_mouse" => move_mouse,
+    "wait_for" => wait_for,
+    "evaluate" => evaluate,
+    "start_profiling" => start_profiling,
+    "stop_profiling" => stop_profiling,
+    "list_visits" => list_visits,
+    "list_console_messages" => list_console_messages,
+    "list_network_requests" => list_network_requests,
+    "set_stealth" => set_stealth,
+    "get_stealth" => get_stealth,
+    "request_human_takeover" => request_human_takeover,
+    "await_human_takeover" => await_human_takeover,
+    "save_browser_state" => save_state,
+    "load_browser_state" => load_state,
+    "list_browser_states" => list_states,
+    "delete_browser_state" => delete_state,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct SessionsOut {
+    sessions: Vec<SessionInfo>,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct TabOut {
+    /// The tab's 0-based list_pages index.
+    index: usize,
+    url: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct PagesOut {
+    pages: Vec<PageSummary>,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct NavigateOut {
+    /// The page's URL after any redirects.
+    url: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct EvaluateOut {
+    /// The expression's value; null for undefined.
+    result: Value,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct ProfileOut {
+    #[serde(flatten)]
+    summary: profiler::Summary,
+    /// Where the .cpuprofile was saved.
+    path: PathBuf,
+    /// Whether hung page JS was terminated to collect the profile.
+    terminated: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct TakeoverOut {
+    /// The link to show the person who will log in.
+    url: String,
+    /// Pass to await_human_takeover.
+    token: String,
+    /// When the link stops working, in milliseconds since the Unix epoch.
+    expires_at_ms: u128,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct TakeoverDoneOut {
+    /// True once the person clicked Done; false on timeout.
+    completed: bool,
+    token: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct VisitsOut {
+    visits: Vec<logs::VisitHeader>,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct ConsoleOut {
+    messages: Vec<logs::ConsoleEntry>,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct NetworkOut {
+    requests: Vec<logs::NetworkEntry>,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct StealthOut {
+    stealth: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SavedOut {
+    name: String,
+    saved_at: String,
+    cookie_count: usize,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct LoadedOut {
+    name: String,
+    cookie_count: usize,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct StatesOut {
+    states: Vec<StateSummary>,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct DeletedOut {
+    name: String,
+    /// False if no state had that name.
+    removed: bool,
+}
+
+fn ok_text(text: impl Into<String>) -> Text {
+    Text(text.into())
+}
+
+fn ok_text_struct<T>(text: impl Into<String>, value: T) -> Structured<T> {
+    Structured {
+        text: text.into(),
+        value,
+    }
 }
 
 fn looks_like_disconnect(err: &anyhow::Error) -> bool {
@@ -1257,7 +1475,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "switch_tab",
-            "Make the tab at `tabIndex` the active tab, so later navigate/evaluate/screenshot/click/type calls target it, and bring it to the front in Chrome (the human-takeover live view follows it too). Use new_page to open a tab instead. Returns { index, url }.",
+            "Make the tab at `tabIndex` the active tab, so later navigate/evaluate/screenshot/click/type calls target it, and bring it to the front in Chrome (the human-takeover live view follows it too). Use new_page to open a tab instead. Fails if the session has no tab at that index; list_pages shows the current ones. Returns { index, url }.",
             object_schema(&[session_id, tab_index], &["sessionId", "tabIndex"]),
             ToolAnnotations::new()
                 .read_only(false)
@@ -1316,7 +1534,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "click",
-            "Click in the session's active tab with real CDP mouse input (trusted events — fires handlers reliably and grants user activation, so it can open popups/new tabs that a JS click can't). Provide a CSS `selector` (clicks its center after scrolling it into view) OR explicit `x`/`y` viewport coordinates. Fails if the selector matches nothing within `timeout`, or if neither a selector nor both coordinates are given.",
+            "Click in the session's active tab with real CDP mouse input (trusted events — fires handlers reliably and grants user activation, so it can open popups/new tabs that a JS click can't). Provide a CSS `selector` (clicks its center after scrolling it into view) OR explicit `x`/`y` viewport coordinates. Returns a confirmation naming what was clicked. Fails if the selector matches nothing within `timeout`, or if neither a selector nor both coordinates are given.",
             object_schema(
                 &[
                     session_id,
@@ -1347,7 +1565,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "type",
-            "Type text into the first element matching a CSS selector in the session's active tab: waits for it, clicks it to focus, then sends real key events for each character. Use press_key afterwards for Enter or Tab. Fails if the selector matches nothing within `timeout`.",
+            "Type text into the first element matching a CSS selector in the session's active tab: waits for it, clicks it to focus, then sends real key events for each character. Use press_key afterwards for Enter or Tab. Returns how many characters were typed. Fails if the selector matches nothing within `timeout`.",
             object_schema(
                 &[
                     session_id,
@@ -1457,7 +1675,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "wait_for",
-            "Wait until a CSS selector matches an element, or a text string appears in the page's visible text, in the session's active tab. Use it after navigate, click or scroll when content loads asynchronously. Pass `selector` or `text`; if both are given, only `selector` is checked. Fails with a timeout error if nothing matches within `timeout`.",
+            "Wait until a CSS selector matches an element, or a text string appears in the page's visible text, in the session's active tab. Use it after navigate, click or scroll when content loads asynchronously. Pass `selector` or `text`; if both are given, only `selector` is checked. Returns which selector or text matched. Fails with a timeout error if nothing matches within `timeout`.",
             object_schema(
                 &[
                     session_id,
@@ -1500,7 +1718,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "start_profiling",
-            "Start the V8 CPU profiler on a tab (active tab by default, or `tabIndex`). Use to find which JavaScript makes a page slow or unresponsive: start, reproduce the problem (navigate/click/wait), then call stop_profiling on the same tab.",
+            "Start the V8 CPU profiler on a tab (active tab by default, or `tabIndex`). Use to find which JavaScript makes a page slow or unresponsive: start, reproduce the problem (navigate/click/wait), then call stop_profiling on the same tab. Fails if that tab is already being profiled; the running recording continues.",
             object_schema(
                 &[
                     session_id,
@@ -1525,7 +1743,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "stop_profiling",
-            "Stop the CPU profiler started by start_profiling, save a .cpuprofile (flame graph in DevTools Performance panel or speedscope.app) and return the culprits: long tasks (>=50ms) split into JS vs browser-native (parse/style/layout) vs GC time with their top scripts, top JS functions and heaviest JS stack, top functions by self and total time (with url:line:col), and self time per script. If page JS is hung, the renderer can't answer until it yields, so after `terminateAfterMs` the running script is terminated to get the profile out.",
+            "Stop the CPU profiler started by start_profiling, save a .cpuprofile under $STATE_DIR/logs/<sessionId>/profiles/ (its `path` is in the result; open it as a flame graph in the DevTools Performance panel or speedscope.app) and return the culprits: long tasks (>=50ms) split into JS vs browser-native (parse/style/layout) vs GC time with their top scripts, top JS functions and heaviest JS stack, top functions by self and total time (with url:line:col), and self time per script. If page JS is hung, the renderer can't answer until it yields, so after `terminateAfterMs` the running script is terminated to get the profile out. Fails if start_profiling wasn't called on that tab.",
             object_schema(
                 &[
                     session_id,
@@ -1587,7 +1805,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "list_network_requests",
-            "List the network requests the session's pages made, oldest first, from the most recent `limit`: method, URL, status (or failure reason), redirects and request body. Use it to check API calls, tracking pixels and failed loads. Returns { requests }. Empty unless the listener role is running.",
+            "List the network requests the session's pages made, oldest first, from the most recent `limit`: method, URL, status (or failure reason), redirects and request body. Use it to check API calls, tracking pixels and failed loads; use list_console_messages for script errors and logs. Returns { requests }. Empty unless the listener role is running.",
             object_schema(
                 &[
                     session_id,
@@ -1700,7 +1918,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "delete_browser_state",
-            "Delete a saved browser state by name, permanently; open sessions that already loaded it keep their cookies. Returns { name, removed }, with removed false if no state had that name.",
+            "Delete a saved browser state by name, permanently; open sessions that already loaded it keep their cookies. Use list_browser_states to see the names, and save_browser_state to replace a state instead of deleting it. Returns { name, removed }, with removed false if no state had that name.",
             object_schema(&[state_name], &["name"]),
             ToolAnnotations::new()
                 .read_only(false)
@@ -1717,8 +1935,10 @@ fn tool(
     schema: JsonObject,
     annotations: ToolAnnotations,
 ) -> Tool {
-    Tool::new(name.to_string(), description.to_string(), Arc::new(schema))
-        .with_annotations(annotations)
+    declare_output_for(
+        Tool::new(name.to_string(), description.to_string(), Arc::new(schema))
+            .with_annotations(annotations),
+    )
 }
 
 /// Annotations for a tool that only reads.
@@ -1775,4 +1995,26 @@ fn object_schema(props: &[(&str, &Value, &str)], required: &[&str]) -> JsonObjec
     }
     m.insert("additionalProperties".into(), Value::Bool(false));
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn tool_table_matches_definitions() {
+        let defined: BTreeSet<String> = tool_defs().iter().map(|t| t.name.to_string()).collect();
+        let routed: BTreeSet<String> = TOOL_NAMES.iter().map(|n| n.to_string()).collect();
+        assert_eq!(defined, routed);
+    }
+
+    #[test]
+    fn output_schemas_are_objects() {
+        for tool in tool_defs() {
+            if let Some(schema) = &tool.output_schema {
+                assert_eq!(schema.get("type"), Some(&json!("object")), "{}", tool.name);
+            }
+        }
+    }
 }

@@ -146,6 +146,8 @@ has the details and the code.
 
 Most tools take a `sessionId` first. Tools marked ⚙ need one of the optional
 background roles from [Deployment](docs/deployment.md).
+Tools that return JSON declare its shape as an MCP `outputSchema`, so clients
+can type their results.
 
 | Group | Tools |
 |---|---|

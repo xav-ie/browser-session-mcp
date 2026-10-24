@@ -182,7 +182,8 @@
                     environment.systemPackages = [
                       config.packages.browser-session-mcp
                       pkgs.bash
-                      pkgs.python3
+                      # jsonschema: smoke.sh checks every result against its outputSchema.
+                      (pkgs.python3.withPackages (ps: [ ps.jsonschema ]))
                       pkgs.curl
                     ];
                   };

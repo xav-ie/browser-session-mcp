@@ -5,6 +5,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{os::unix::fs::DirBuilderExt, path::PathBuf};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -26,7 +27,7 @@ pub struct SavedState {
     pub origins: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StateSummary {
     pub name: String,
     #[serde(rename = "savedAt")]

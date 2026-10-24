@@ -17,6 +17,7 @@ use chromiumoxide::cdp::js_protocol::profiler::{
     StopReturns,
 };
 use chromiumoxide::cdp::js_protocol::runtime::TerminateExecutionParams;
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -100,7 +101,7 @@ pub async fn write(dir: &Path, profile: &Profile) -> Result<PathBuf> {
     Ok(path)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Summary {
     pub duration_ms: f64,
@@ -112,7 +113,7 @@ pub struct Summary {
     pub long_tasks: Vec<LongTask>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FnStat {
     pub function: String,
@@ -121,7 +122,7 @@ pub struct FnStat {
     pub percent: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptStat {
     pub url: String,
@@ -129,7 +130,7 @@ pub struct ScriptStat {
     pub percent: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LongTask {
     /// Offset from profile start.
