@@ -5,6 +5,7 @@
 [![CI](https://github.com/xav-ie/browser-session-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/xav-ie/browser-session-mcp/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/xav-ie/browser-session-mcp?color=7c4dbb)](https://github.com/xav-ie/browser-session-mcp/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-7c4dbb)](LICENSE)
+[![xav-ie/browser-session-mcp MCP server](https://glama.ai/mcp/servers/xav-ie/browser-session-mcp/badges/score.svg)](https://glama.ai/mcp/servers/xav-ie/browser-session-mcp)
 
 **Give every AI agent its own real Chrome, one that keeps its logins, records
 what the page did, and gets past bot checks.** browser-session-mcp is an MCP
