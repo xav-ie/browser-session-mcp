@@ -1410,7 +1410,7 @@ fn tool_defs() -> Vec<Tool> {
     vec![
         tool(
             "open_browser_session",
-            "Open a new isolated browser session and return its sessionId; call this first, then pass the id to every other tool. Each session is its own Chrome BrowserContext with separate cookies, storage and tabs, so sessions never see each other. To reuse a login from an earlier session, follow with load_browser_state. Returns { sessionId, pageCount, activeUrl }. Fails if Chrome is unreachable at BROWSER_URL.",
+            "Open a new isolated browser session and return its sessionId; call this first, then pass the id to every other tool. Each session is its own Chrome BrowserContext with separate cookies, storage and tabs, so sessions never see each other, and it starts with one blank tab. Don't open a new session per page: reuse one and use new_page for more tabs. To start logged in, follow with load_browser_state before navigate. Set `viewport` for a specific window size and `useMobileUA` to look like a phone; both are fixed for the session's life. Sessions persist until close_browser_session, or until the reaper role closes ones idle for MAX_IDLE_HOURS (default 24). Returns { sessionId, pageCount, activeUrl }. Fails if Chrome is unreachable at BROWSER_URL.",
             object_schema(
                 &[
                     (
@@ -1430,7 +1430,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "close_browser_session",
-            "Close a browser session for good: closes all its tabs and discards its cookies and storage. Use close_tab to close one tab and keep the session; use save_browser_state first if the login should outlive the session. Idempotent: closing an unknown or already-closed session succeeds.",
+            "Close a browser session for good: closes all its tabs, discards its cookies and storage, and deletes its console and network logs and saved .cpuprofile files. Call it when the task is done so the session doesn't sit open until the reaper closes it. Use close_tab instead to close one tab and keep the session, and save_browser_state first if the login should outlive the session. Idempotent: closing an unknown or already-closed session succeeds, so it is safe in cleanup code. Returns a confirmation.",
             object_schema(
                 &[(
                     "sessionId",
@@ -1447,13 +1447,13 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "list_browser_sessions",
-            "List every open browser session on the shared Chrome, including ones opened by other agents. Returns { sessions: [{ sessionId, pageCount, activeUrl }] }. Use it to recover a lost sessionId; use list_pages for the tabs inside one session, and list_browser_states for saved logins.",
+            "List every open browser session on the shared Chrome, sorted by sessionId, including ones opened by other agents; it takes no arguments. Use it to recover a lost sessionId or to find sessions left open; don't use it to see the tabs inside one session (list_pages) or saved logins (list_browser_states). activeUrl is null for a session with no tabs. Returns { sessions: [{ sessionId, pageCount, activeUrl }] }, empty if none are open.",
             empty_obj_schema(),
             read_only(),
         ),
         tool(
             "new_page",
-            "Open a new tab in the session and make it the active tab, so later navigate/click/type/screenshot calls act on it. Use navigate instead to load a URL in the current tab. Returns { index, url }, where index is the new tab's list_pages index.",
+            "Open a new tab in the session and make it the active tab, so later navigate/click/type/screenshot calls act on it. Use navigate instead to load a URL in the current tab, and switch_tab to go back to an existing one. Tabs stay open until close_tab or close_browser_session, so close ones you no longer need. With `url`, the tab loads it and the call returns after the load event; if the URL fails to load, the call errors but the new tab still exists and is active. Returns { index, url }, where index is the new tab's list_pages index.",
             object_schema(
                 &[
                     session_id,
@@ -1469,13 +1469,13 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "list_pages",
-            "List the session's tabs in a stable order. The active tab (the one navigate/evaluate/screenshot/click target by default) is marked with `*` in the text and `active: true` in the structured output. Returns { pages: [{ index, url, title, active }] }; pass an index as `tabIndex` to switch_tab, close_tab, evaluate or the profiling tools. Indices stay stable until a tab is closed.",
+            "List the session's tabs in a stable order; it changes nothing. The active tab (the one navigate/evaluate/screenshot/click target by default) is marked with `*` in the text and `active: true` in the structured output. Call it before switch_tab, close_tab, or evaluate/profiling with `tabIndex`, to get a current index; use list_browser_sessions to see sessions rather than tabs, and list_visits for navigation history. Indices stay stable until a tab is closed, after which later tabs shift down one. Returns { pages: [{ index, url, title, active }] }, empty if every tab was closed (the next navigate opens a new one).",
             object_schema(&[session_id], &["sessionId"]),
             read_only(),
         ),
         tool(
             "switch_tab",
-            "Make the tab at `tabIndex` the active tab, so later navigate/evaluate/screenshot/click/type calls target it, and bring it to the front in Chrome (the human-takeover live view follows it too). Use new_page to open a tab instead. Fails if the session has no tab at that index; list_pages shows the current ones. Returns { index, url }.",
+            "Make the tab at `tabIndex` the active tab, so later navigate/evaluate/screenshot/click/type calls target it, and bring it to the front in Chrome (the human-takeover live view follows it too). Use new_page to open a tab instead, and pass `tabIndex` straight to evaluate or the profiling tools to act on another tab without switching. Indices come from list_pages and shift when a tab closes, so list again if unsure. Returns { index, url }. Fails if the session has no tab at that index.",
             object_schema(&[session_id, tab_index], &["sessionId", "tabIndex"]),
             ToolAnnotations::new()
                 .read_only(false)
@@ -1485,7 +1485,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "close_tab",
-            "Close the tab at `tabIndex`. The session and its other tabs stay open; if the closed tab was active, the last remaining tab becomes active. Tabs after it shift down one index, so call list_pages again before using another index. To end the whole session, use close_browser_session.",
+            "Close the tab at `tabIndex` (from list_pages). The session and its other tabs stay open; if the closed tab was active, the last remaining tab becomes active. Tabs after it shift down one index, so call list_pages again before using another index. Closing the last tab leaves the session open with no tabs; the next navigate opens a new one. To end the whole session, use close_browser_session. Returns a confirmation. Fails if the session has no tab at that index.",
             object_schema(&[session_id, tab_index], &["sessionId", "tabIndex"]),
             ToolAnnotations::new()
                 .read_only(false)
@@ -1495,7 +1495,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "navigate",
-            "Load a URL in the session's active tab and return once the page's load event fires. Returns { url } with the final URL after any redirects. Use new_page to keep the current page and load the URL in a new tab. Fails if the URL can't be loaded or `timeout` passes first; the page may still be loading after a timeout.",
+            "Load a URL in the session's active tab and return once the page's load event fires. Use new_page instead to keep the current page and load the URL in a new tab, and wait_for after this when content arrives after the load event. If every tab was closed, a new one is opened. `url` must be absolute (https://, http://, data:, about:); `timeout` bounds only the wait for the load event. Returns { url } with the final URL after any redirects. Fails with Chrome's net error (e.g. net::ERR_NAME_NOT_RESOLVED) if the page can't load, or if `timeout` passes first, in which case the page may still be loading.",
             object_schema(
                 &[
                     session_id,
@@ -1512,7 +1512,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "take_screenshot",
-            "Capture a PNG of the session's active tab and return it as an image. Use it to see layout and visual state; use take_snapshot for a cheaper text view of the page's structure, and evaluate to read specific values.",
+            "Capture a PNG of the session's active tab and return it as an image. Use it when visual layout, styling or images matter; use take_snapshot for a cheaper text view of the page's structure, and evaluate to read specific values. `fullPage` captures the whole scrollable page instead of the visible viewport, which can make a very large image on long pages. It reads the page without changing it. Returns the image plus a caption with its size in bytes.",
             object_schema(
                 &[
                     session_id,
@@ -1528,13 +1528,13 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "take_snapshot",
-            "Return the accessibility tree of the session's active tab as indented text: each node's role and name (links, buttons, headings, form fields and their labels). Use it to find what's on the page and what to click or type into, far more cheaply than take_screenshot; use take_screenshot when visual layout matters.",
+            "Return the accessibility tree of the session's active tab as indented text: each node's role and name (links, buttons, headings, form fields and their labels, and current values), nested by structure. Use it to find what's on the page and what to click or type into, far more cheaply than take_screenshot; use take_screenshot when visual layout matters, and evaluate for data not shown as text. It reads the page without changing it and returns the whole tree, so a large page gives long output.",
             object_schema(&[session_id], &["sessionId"]),
             read_only(),
         ),
         tool(
             "click",
-            "Click in the session's active tab with real CDP mouse input (trusted events — fires handlers reliably and grants user activation, so it can open popups/new tabs that a JS click can't). Provide a CSS `selector` (clicks its center after scrolling it into view) OR explicit `x`/`y` viewport coordinates. Returns a confirmation naming what was clicked. Fails if the selector matches nothing within `timeout`, or if neither a selector nor both coordinates are given.",
+            "Click in the session's active tab with real CDP mouse input (trusted events — fires handlers reliably and grants user activation, so it can open popups/new tabs that a JS click can't). Pass a CSS `selector` to click the first match's center, after waiting up to `timeout` for it and scrolling it into view; or pass both `x` and `y` to click viewport coordinates, which are used only when there is no selector. Don't use evaluate to click: synthetic JS clicks can be ignored by pages. Coordinates outside the viewport are not rejected; the click lands on nothing. A click can submit forms or trigger purchases, like a real user's. Returns a confirmation naming what was clicked. Fails if the selector matches nothing within `timeout`, or if neither a selector nor both coordinates are given.",
             object_schema(
                 &[
                     session_id,
@@ -1565,7 +1565,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "type",
-            "Type text into the first element matching a CSS selector in the session's active tab: waits for it, clicks it to focus, then sends real key events for each character. Use press_key afterwards for Enter or Tab. Returns how many characters were typed. Fails if the selector matches nothing within `timeout`.",
+            "Type text into the first element matching a CSS selector in the session's active tab: waits up to `timeout` for it, clicks it to focus, then sends real key events for each character, so the page's input handlers fire. Use press_key afterwards for Enter or Tab, and press_key alone for single keys. `clear` empties the field first; without it, text is appended. `delay` paces the characters for pages that react to typing speed. It doesn't check that the element is editable: typing into a button or plain text reports success but changes nothing, so target an input, textarea or contenteditable element. Returns how many characters were typed. Fails if the selector matches nothing within `timeout`.",
             object_schema(
                 &[
                     session_id,
@@ -1597,7 +1597,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "press_key",
-            "Press a key via CDP keyboard input in the session's active tab. `key` is a name (Enter, Tab, Escape, Backspace, ArrowDown, …) or a single character. With a `selector`, focuses that element first (e.g. type into a field then press Enter); without, presses on whatever is focused. Use type for whole strings. Fails on an unknown key name, or if the selector matches nothing within `timeout`.",
+            "Press a key via CDP keyboard input in the session's active tab. `key` is a name (Enter, Tab, Escape, Backspace, ArrowDown, …) or a single character. With a `selector`, waits up to `timeout` for it and focuses it first (e.g. type into a field then press Enter); without, presses on whatever is focused, and `timeout` is unused. Use type for whole strings and click to activate buttons. Pressing Enter can submit a form, like a real user. Returns a confirmation. Fails on an unknown key name, or if the selector matches nothing within `timeout`.",
             object_schema(
                 &[
                     session_id,
@@ -1623,7 +1623,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "scroll",
-            "Scroll the session's active tab with a real mouse-wheel event at a viewport position; whatever scrollable element is under that point scrolls. Useful to reveal lazy-loaded content and to generate human-like behavioral signals. Returns immediately without waiting for content to load; follow with wait_for if needed.",
+            "Scroll the session's active tab with a real mouse-wheel event at a viewport position; whatever scrollable element is under (`x`,`y`) scrolls, so point inside a scrollable panel to scroll it rather than the page. `deltaY` and `deltaX` are in pixels; negative values scroll up or left. Useful to reveal lazy-loaded content and to generate human-like behavioral signals. Don't use it just to reach an element before clicking: click scrolls its target into view itself. Returns immediately without waiting for content to load; follow with wait_for if needed.",
             object_schema(
                 &[
                     session_id,
@@ -1654,7 +1654,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "move_mouse",
-            "Move the mouse to viewport coordinates `x`,`y` in the session's active tab via CDP input (trusted move event). Use it to trigger hover menus and tooltips, and to add human-like behavioral telemetry; use click to click.",
+            "Move the mouse to viewport coordinates `x`,`y` (CSS pixels from the top-left) in the session's active tab via CDP input (trusted move event), so the page's hover, mouseover and mousemove handlers fire. Use it to open hover menus and tooltips before reading or clicking them, and to add human-like behavioral telemetry. Don't use it to click, drag or scroll: use click and scroll. Coordinates outside the viewport are not rejected; the move just hovers nothing. Returns a confirmation with the position.",
             object_schema(
                 &[
                     session_id,
@@ -1675,7 +1675,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "wait_for",
-            "Wait until a CSS selector matches an element, or a text string appears in the page's visible text, in the session's active tab. Use it after navigate, click or scroll when content loads asynchronously. Pass `selector` or `text`; if both are given, only `selector` is checked. Returns which selector or text matched. Fails with a timeout error if nothing matches within `timeout`.",
+            "Wait until a CSS selector matches an element, or a text string appears in the page's visible text, in the session's active tab, polling every 100ms. Use it after navigate, click or scroll when content loads asynchronously, instead of sleeping. Pass `selector` or `text`; if both are given, only `selector` is checked. `text` is a case-sensitive substring of document.body.innerText, so text hidden with CSS doesn't count. It reads the page without changing it. Returns which selector or text matched. Fails with a timeout error if nothing matches within `timeout`, or if neither argument is given.",
             object_schema(
                 &[
                     session_id,
@@ -1697,7 +1697,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "evaluate",
-            "Run JavaScript in a tab and return its value as JSON in { result }. A bare expression returns its value; for several statements use `return ...`. It runs in the page's main world (can read page globals like window.dataLayer); on stealth sessions (see set_stealth) it runs in an isolated world instead, which sees the DOM but not page-defined globals. The code can change the page like any script, so prefer take_snapshot or wait_for when they suffice. Fails with the JS exception's message if the code throws.",
+            "Run JavaScript in a tab and return its value as JSON in { result }. A bare expression returns its value; for several statements use `return ...`; promises are awaited. Values that aren't JSON come back reduced: undefined as null and DOM nodes as {}. It runs in the page's main world (can read page globals like window.dataLayer); on stealth sessions (see set_stealth) it runs in an isolated world instead, which sees the DOM but not page-defined globals. `tabIndex` runs it in another tab without switching to it. The code can change the page like any script, so prefer take_snapshot or wait_for when they suffice, and click or type for interaction. Fails with the JS exception's message if the code throws.",
             object_schema(
                 &[
                     session_id,
@@ -1718,7 +1718,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "start_profiling",
-            "Start the V8 CPU profiler on a tab (active tab by default, or `tabIndex`). Use to find which JavaScript makes a page slow or unresponsive: start, reproduce the problem (navigate/click/wait), then call stop_profiling on the same tab. Fails if that tab is already being profiled; the running recording continues.",
+            "Start the V8 CPU profiler on a tab (active tab by default, or `tabIndex`). Use to find which JavaScript makes a page slow or unresponsive: start, reproduce the problem (navigate/click/wait), then call stop_profiling on the same tab. Don't use it for network slowness; list_network_requests shows that. A smaller `samplingIntervalUs` catches shorter functions but adds overhead and a larger profile. Profiling continues until stop_profiling, so always stop it. Returns a confirmation. Fails if that tab is already being profiled; the running recording continues.",
             object_schema(
                 &[
                     session_id,
@@ -1743,7 +1743,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "stop_profiling",
-            "Stop the CPU profiler started by start_profiling, save a .cpuprofile under $STATE_DIR/logs/<sessionId>/profiles/ (its `path` is in the result; open it as a flame graph in the DevTools Performance panel or speedscope.app) and return the culprits: long tasks (>=50ms) split into JS vs browser-native (parse/style/layout) vs GC time with their top scripts, top JS functions and heaviest JS stack, top functions by self and total time (with url:line:col), and self time per script. If page JS is hung, the renderer can't answer until it yields, so after `terminateAfterMs` the running script is terminated to get the profile out. Fails if start_profiling wasn't called on that tab.",
+            "Stop the CPU profiler started by start_profiling, save a .cpuprofile under $STATE_DIR/logs/<sessionId>/profiles/ (its `path` is in the result; open it as a flame graph in the DevTools Performance panel or speedscope.app) and return the culprits: long tasks (>=50ms) split into JS vs browser-native (parse/style/layout) vs GC time with their top scripts, top JS functions and heaviest JS stack, top functions by self and total time (with url:line:col), and self time per script. Pass the same `tabIndex` given to start_profiling. If page JS is hung, the renderer can't answer until it yields, so after `terminateAfterMs` the running script is terminated to get the profile out (`terminated` in the result says so); set it to 0 to never terminate, and keep `timeout` above it. The file is deleted with the session by close_browser_session. Fails if start_profiling wasn't called on that tab.",
             object_schema(
                 &[
                     session_id,
@@ -1778,13 +1778,13 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "list_visits",
-            "List the session's page visits, oldest first. Each visit is one top-level navigation in one tab, numbered by `seq`; pass that number as `visit` to list_console_messages or list_network_requests to see only that page load's logs. Returns { visits: [{ seq, targetId, url, openedAt }] }. Empty unless the listener role is running.",
+            "List the session's page visits, oldest first. Each visit is one top-level navigation in one tab, numbered by `seq`; pass that number as `visit` to list_console_messages or list_network_requests to see only that page load's logs. Use it to find which page load to inspect; use list_pages for the tabs open now. It reads logs and changes nothing. Returns { visits: [{ seq, targetId, url, openedAt }] }. Empty unless the listener role is running, and deleted when the session closes.",
             object_schema(&[session_id], &["sessionId"]),
             read_only(),
         ),
         tool(
             "list_console_messages",
-            "List console messages (console.log, warnings, errors, uncaught exceptions) the session's pages emitted, oldest first, from the most recent `limit`. Use it to debug page errors; use list_network_requests for failed requests. Returns { messages }. Empty unless the listener role is running, and nothing is captured while stealth is on.",
+            "List console messages (console.log, warnings, errors, uncaught exceptions) the session's pages emitted, oldest first, from the most recent `limit`. Use it to debug page errors; use list_network_requests for failed requests. Pass `visit` (a seq from list_visits) to see one page load; without it, messages from every visit are merged and `limit` keeps the newest. It reads logs and changes nothing. Returns { messages: [{ t, type, text }] }. Empty unless the listener role is running, nothing is captured while stealth is on, and logs are deleted when the session closes.",
             object_schema(
                 &[
                     session_id,
@@ -1805,7 +1805,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "list_network_requests",
-            "List the network requests the session's pages made, oldest first, from the most recent `limit`: method, URL, status (or failure reason), redirects and request body. Use it to check API calls, tracking pixels and failed loads; use list_console_messages for script errors and logs. Returns { requests }. Empty unless the listener role is running.",
+            "List the network requests the session's pages made, oldest first, from the most recent `limit`: method, URL, status (or failure reason), redirects and request body. Use it to check API calls, tracking pixels and failed loads; use list_console_messages for script errors and logs. Pass `visit` (a seq from list_visits) to see one page load; without it, requests from every visit are merged and `limit` keeps the newest. A null status means the request hadn't finished when logged. It reads logs and changes nothing. Returns { requests }. Empty unless the listener role is running, and logs are deleted when the session closes.",
             object_schema(
                 &[
                     session_id,
@@ -1826,7 +1826,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "set_stealth",
-            "Toggle stealth for a session. `enabled: true` disables the CDP Runtime domain (removes the Runtime.enable automation tell that anti-bot systems like Cloudflare detect) — load/navigate pages in this mode to pass CDP-based bot gates; the cost is no console capture and `evaluate` runs in an isolated world (can't read page globals like window.dataLayer). `enabled: false` re-enables Runtime: console capture + main-world `evaluate` (reads page globals) return, but the CDP tell is present. Typical flow: set_stealth(true) → navigate → set_stealth(false) → evaluate. Returns { stealth }.",
+            "Toggle stealth for a session. `enabled: true` disables the CDP Runtime domain (removes the Runtime.enable automation tell that anti-bot systems like Cloudflare detect) — load/navigate pages in this mode to pass CDP-based bot gates; the cost is no console capture and `evaluate` runs in an isolated world (can't read page globals like window.dataLayer). `enabled: false` re-enables Runtime: console capture + main-world `evaluate` (reads page globals) return, but the CDP tell is present. Typical flow: set_stealth(true) → navigate → set_stealth(false) → evaluate. Leave it off for sites without bot detection. Returns { stealth }.",
             object_schema(
                 &[
                     session_id,
@@ -1846,13 +1846,13 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "get_stealth",
-            "Return whether stealth is on for a session, as { stealth: bool }. Check it before evaluate or list_console_messages, whose behavior it changes; use set_stealth to change it.",
+            "Return whether stealth is on for a session, as { stealth: bool }; it changes nothing. Check it before evaluate or list_console_messages, whose behavior it changes; use set_stealth to change it. A new session starts with stealth off. Fails if no open session has the sessionId.",
             object_schema(&[session_id], &["sessionId"]),
             read_only(),
         ),
         tool(
             "request_human_takeover",
-            "Hand the session's active page to a human to log in themselves (passwords/passkeys the agent must not see). Returns { url, token, expiresAtMs }: show the URL to the user and keep the token. Does NOT block. STRONGLY ADVISED: after showing the URL, run await_human_takeover in a BACKGROUND task (subagent/job) — not your main loop — because the human may take many minutes and you should stay responsive. Fails if TAKEOVER_BASE_URL isn't configured on the server.",
+            "Hand the session's active page to a human to log in themselves (passwords/passkeys the agent must not see). Use it only when a login needs a person; for a site you've logged into before, try load_browser_state first. Returns { url, token, expiresAtMs }: show the URL to the user and keep the token. Does NOT block. STRONGLY ADVISED: after showing the URL, run await_human_takeover in a BACKGROUND task (subagent/job) — not your main loop — because the human may take many minutes and you should stay responsive. The URL is a bearer credential that gives live control of the tab until `ttlMinutes` passes, so share it only with the intended person. Fails if TAKEOVER_BASE_URL isn't configured on the server.",
             object_schema(
                 &[
                     session_id,
@@ -1868,7 +1868,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "await_human_takeover",
-            "Wait for the human to click Done in the takeover page. Returns { completed } — true if they finished, false on timeout. STRONGLY ADVISED: run this in a BACKGROUND task and POLL — call it in a loop with a SHORT `timeout` (e.g. 4000ms) until completed:true — rather than one long blocking call, which can exceed your MCP client's request timeout and make you miss the Done signal. The human may take several minutes; a background poller lets you be notified and resume. On completion the session is authenticated and you can continue; consider save_browser_state so later sessions skip the login.",
+            "Wait for the human to click Done in the takeover page. Returns { completed } — true if they finished, false on timeout. STRONGLY ADVISED: run this in a BACKGROUND task and POLL — call it in a loop with a SHORT `timeout` (e.g. 4000ms) until completed:true — rather than one long blocking call, which can exceed your MCP client's request timeout and make you miss the Done signal. The human may take several minutes; a background poller lets you be notified and resume. On completion the session is authenticated and you can continue; consider save_browser_state so later sessions skip the login. Fails on a token that request_human_takeover didn't issue or that has already completed.",
             object_schema(
                 &[
                     (
@@ -1892,7 +1892,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "save_browser_state",
-            "Save the session's cookies under a name so a future session can load them with load_browser_state and resume without logging in again. Saving under an existing name replaces that state. Only cookies are saved, not localStorage. Returns { name, savedAt, cookieCount }.",
+            "Save the session's cookies under a name so a future session can load them with load_browser_state and resume without logging in again. Call it after a successful login (for example once await_human_takeover completes). Saving under an existing name replaces that state, so use a distinct name per site or account. Only cookies are saved, not localStorage, so sites that keep their login in localStorage won't resume. States are stored on disk as plaintext and include session credentials. Returns { name, savedAt, cookieCount }. Fails on a name with characters other than letters, digits, '.', '_' and '-'.",
             object_schema(&[session_id, state_name], &["sessionId", "name"]),
             ToolAnnotations::new()
                 .read_only(false)
@@ -1902,7 +1902,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "load_browser_state",
-            "Load cookies saved by save_browser_state into this session, usually right after open_browser_session and before navigate, so the session starts logged in. Loaded cookies replace any with the same name, domain and path; others are kept. Returns { name, cookieCount }. Fails if no state has that name; list_browser_states shows the names.",
+            "Load cookies saved by save_browser_state into this session, usually right after open_browser_session and before navigate, so the session starts logged in. Pages already open need a reload or navigate to use them. Loaded cookies replace any with the same name, domain and path; others are kept. Expired logins won't work again; if the site still asks to log in, use request_human_takeover and save again. Returns { name, cookieCount }. Fails if no state has that name; list_browser_states shows the names.",
             object_schema(&[session_id, state_name], &["sessionId", "name"]),
             ToolAnnotations::new()
                 .read_only(false)
@@ -1912,13 +1912,13 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "list_browser_states",
-            "List the saved browser states (cookie sets saved by save_browser_state) that load_browser_state and delete_browser_state accept. Returns { states: [{ name, cookieCount, savedAt }] }. These are saved logins on disk, not open sessions; use list_browser_sessions for those.",
+            "List the saved browser states (cookie sets saved by save_browser_state) that load_browser_state and delete_browser_state accept, sorted by name; it takes no arguments and changes nothing. Use it to pick a name to load; these are saved logins on disk, not open sessions, so use list_browser_sessions for those. Returns { states: [{ name, cookieCount, savedAt }] }, empty if nothing has been saved.",
             empty_obj_schema(),
             read_only(),
         ),
         tool(
             "delete_browser_state",
-            "Delete a saved browser state by name, permanently; open sessions that already loaded it keep their cookies. Use list_browser_states to see the names, and save_browser_state to replace a state instead of deleting it. Returns { name, removed }, with removed false if no state had that name.",
+            "Delete a saved browser state by name, permanently; open sessions that already loaded it keep their cookies. Use it to forget a login that is stale or no longer wanted; to update a state, call save_browser_state with the same name instead. Use list_browser_states to see the names. Deleting a name that doesn't exist succeeds with removed false, so it is safe to repeat. Returns { name, removed }.",
             object_schema(&[state_name], &["name"]),
             ToolAnnotations::new()
                 .read_only(false)
