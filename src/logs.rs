@@ -6,6 +6,7 @@
 //! lines are console + network events. The listener opens a new file on every
 //! top-level navigation; the MCP server reads them lazily.
 use anyhow::{Context, Result};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -36,7 +37,7 @@ pub enum LogLine {
     Network(NetworkEntry),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VisitHeader {
     pub seq: u32,
     #[serde(rename = "targetId")]
@@ -46,7 +47,7 @@ pub struct VisitHeader {
     pub opened_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ConsoleEntry {
     pub t: String,
     #[serde(rename = "type")]
@@ -54,7 +55,7 @@ pub struct ConsoleEntry {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NetworkEntry {
     pub t: String,
     pub method: String,

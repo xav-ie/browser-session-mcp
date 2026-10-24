@@ -38,6 +38,10 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required (used for JSON extraction)" >&2
   exit 1
 fi
+if ! python3 -c 'import jsonschema' 2>/dev/null; then
+  echo "python3's jsonschema module is required (checks results against each tool's outputSchema)" >&2
+  exit 1
+fi
 
 # ---- tempdir + port ------------------------------------------------------
 
@@ -45,6 +49,8 @@ PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); pr
 TMP=$(mktemp -d /tmp/browser-session-mcp-smoke.XXXXXX)
 export STATE_DIR="$TMP"
 export BROWSER_URL="http://127.0.0.1:$PORT"
+# Only builds takeover links; nothing serves them during the smoke run.
+export TAKEOVER_BASE_URL="http://127.0.0.1:1"
 
 # Runs from the EXIT trap below.
 # shellcheck disable=SC2329
@@ -98,7 +104,42 @@ coproc SERVER { exec "$MCP_BIN" mcp 2>"$TMP/mcp.log"; }
 req() {
   printf '%s\n' "$1" >&"${SERVER[1]}"
   IFS= read -r -u "${SERVER[0]}" line
+  check_output "$1" "$line"
   printf '%s' "$line"
+}
+
+# Validate a tools/call result's structuredContent against the tool's
+# outputSchema from tools/list, appending any mismatch to schema-failures.
+# req() runs in a subshell, so failures go through a file rather than FAIL.
+check_output() {
+  [[ -f $TMP/tools.json ]] || return 0
+  python3 - "$TMP/tools.json" "$1" "$2" >>"$TMP/schema-failures" <<'PY'
+import json, sys
+from jsonschema import validators
+
+tools = {t["name"]: t for t in json.load(open(sys.argv[1]))}
+request, response = json.loads(sys.argv[2]), json.loads(sys.argv[3])
+if request.get("method") != "tools/call":
+    sys.exit()
+name = request["params"]["name"]
+result = response.get("result", {})
+schema = tools.get(name, {}).get("outputSchema")
+if not schema or result.get("isError"):
+    sys.exit()
+if "structuredContent" not in result:
+    print(f"{name}: declares an outputSchema but returned no structuredContent")
+    sys.exit()
+validator = validators.validator_for(schema)(schema)
+for error in validator.iter_errors(result["structuredContent"]):
+    print(f"{name}: {error.json_path}: {error.message}")
+PY
+}
+
+# Call a tool by name with a JSON arguments object.
+call() {
+  req "$(python3 -c 'import json, sys
+print(json.dumps({"jsonrpc": "2.0", "id": 100, "method": "tools/call",
+                  "params": {"name": sys.argv[1], "arguments": json.loads(sys.argv[2])}}))' "$1" "$2")"
 }
 
 notify() {
@@ -144,6 +185,8 @@ check "tools/list has open_browser_session" "$LIST" '"open_browser_session"'
 check "tools/list has navigate" "$LIST" '"navigate"'
 check "tools/list has take_snapshot" "$LIST" '"take_snapshot"'
 check "tools/list has save_browser_state" "$LIST" '"save_browser_state"'
+printf '%s' "$LIST" | python3 -c 'import json, sys
+json.dump(json.load(sys.stdin)["result"]["tools"], open(sys.argv[1], "w"))' "$TMP/tools.json"
 
 # ---- session lifecycle ---------------------------------------------------
 
@@ -263,6 +306,22 @@ check "list_pages shows both tabs" "$LIST_PAGES" 'tab2'
 
 # ---- close ---------------------------------------------------------------
 
+# The remaining tools with an outputSchema, so check_output sees each result.
+ARGS=$(printf '{"sessionId":"%s"}' "$SID")
+check "switch_tab activates tab 0" "$(call switch_tab "$(printf '{"sessionId":"%s","tabIndex":0}' "$SID")")" 'Switched to tab #0'
+check "set_stealth on" "$(call set_stealth "$(printf '{"sessionId":"%s","enabled":true}' "$SID")")" '"stealth":true'
+check "get_stealth reads it back" "$(call get_stealth "$ARGS")" '"stealth":true'
+check "set_stealth off" "$(call set_stealth "$(printf '{"sessionId":"%s","enabled":false}' "$SID")")" '"stealth":false'
+check "list_visits returns visits" "$(call list_visits "$ARGS")" '"visits"'
+check "list_console_messages returns messages" "$(call list_console_messages "$ARGS")" '"messages"'
+check "list_network_requests returns requests" "$(call list_network_requests "$ARGS")" '"requests"'
+check "start_profiling starts" "$(call start_profiling "$ARGS")" 'CPU profiler running'
+check "stop_profiling returns a summary" "$(call stop_profiling "$ARGS")" '"durationMs"'
+TAKEOVER=$(call request_human_takeover "$ARGS")
+check "request_human_takeover returns a link" "$TAKEOVER" '/takeover/'
+TOKEN=$(pluck "$TAKEOVER" .result.structuredContent.token)
+check "await_human_takeover times out with nobody there" "$(call await_human_takeover "$(printf '{"token":"%s","timeout":1}' "$TOKEN")")" '"completed":false'
+
 CLOSE_REQ=$(python3 -c '
 import json,sys
 print(json.dumps({"jsonrpc":"2.0","id":16,"method":"tools/call","params":{
@@ -287,6 +346,15 @@ if ((cleared)); then
 else
   echo "[FAIL] session state file still present after close"
   FAIL=$((FAIL + 1))
+fi
+
+if [[ -s $TMP/schema-failures ]]; then
+  echo "[FAIL] results match their outputSchema:"
+  sed 's/^/       /' "$TMP/schema-failures"
+  FAIL=$((FAIL + 1))
+else
+  echo "[PASS] every tool result matches its outputSchema"
+  PASS=$((PASS + 1))
 fi
 
 echo
