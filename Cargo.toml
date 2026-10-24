@@ -69,3 +69,11 @@ chromiumoxide = { git = "https://github.com/xav-ie/chromiumoxide", rev = "c9b3bb
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# CI's check build on pull requests: the release profile without its slow
+# whole-crate optimization, so a change compiles in a fraction of the time.
+# Shipped binaries always use `release`.
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16

@@ -94,13 +94,22 @@ jobs:
       - uses: ./.github/actions/nix-cache
         with:
           push-token: ${{ secrets.ATTIC_TOKEN }}
-      - run: |
-          nix build -L \
-            ".#checks.x86_64-linux.build" \
-            ".#checks.x86_64-linux.clippy" \
-            ".#checks.x86_64-linux.treefmt" \
-            ".#packages.x86_64-linux.systemd-units" \
-            ".#packages.x86_64-linux.release"
+      # Pull requests build the fast `ci` profile and skip the optimized package
+      # and the static musl release; pushes to main build those too, which also
+      # fills the cache.
+      - env:
+          FULL: ${{ github.event_name == 'push' }}
+        run: |
+          targets=(
+            ".#packages.x86_64-linux.browser-session-mcp-ci"
+            ".#checks.x86_64-linux.clippy"
+            ".#checks.x86_64-linux.treefmt"
+            ".#packages.x86_64-linux.systemd-units"
+          )
+          if [[ $FULL == true ]]; then
+            targets+=(".#checks.x86_64-linux.build" ".#packages.x86_64-linux.release")
+          fi
+          nix build -L "${targets[@]}"
 
   # NixOS VM integration test (checks.smoke): boots a VM running the real
   # nixos-module.nix stack and drives the full MCP surface. VM tests need
@@ -130,7 +139,7 @@ jobs:
   # Builds the aarch64-darwin package and release binary via Nix on an arm64
   # macOS runner, so the Darwin build path the flake exposes is actually
   # exercised, and the release build's check that it links nothing from
-  # /nix/store runs on every change. macos-latest is arm64, matching
+  # /nix/store runs on every push to main. macos-latest is arm64, matching
   # aarch64-darwin.
   build-darwin:
     name: build (aarch64-darwin)
@@ -147,10 +156,15 @@ jobs:
       - uses: ./.github/actions/nix-cache
         with:
           push-token: ${{ secrets.ATTIC_TOKEN }}
-      - run: |
-          nix build -L \
-            ".#packages.aarch64-darwin.default" \
-            ".#packages.aarch64-darwin.release"
+      # As on Linux: the `ci` profile on pull requests, the shipped builds on main.
+      - env:
+          FULL: ${{ github.event_name == 'push' }}
+        run: |
+          targets=(".#packages.aarch64-darwin.browser-session-mcp-ci")
+          if [[ $FULL == true ]]; then
+            targets+=(".#packages.aarch64-darwin.default" ".#packages.aarch64-darwin.release")
+          fi
+          nix build -L "${targets[@]}"
 
   # The check main's ruleset requires: it passes when every job above passed or
   # was skipped as unrelated to the change, so a docs-only PR isn't left waiting
