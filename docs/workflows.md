@@ -35,13 +35,13 @@ const { url, token } = (
 // → present `url`; the user opens it, sees a live view of the page, logs in
 //   themselves (passkey/password/2FA), and clicks "Done".
 
-// Wait for them to finish — IN A BACKGROUND TASK, polling with a short timeout.
-// One long await can exceed the MCP client's request timeout (and you'd miss
-// the Done signal); the human may take minutes. Poll until completed:
+// Wait for them to finish in a background task. A 60s timeout per call stays
+// under typical MCP client request limits (and you won't miss the Done
+// signal); the human may take minutes. Poll until completed:
 let done = false;
 while (!done) {
   done = (
-    await tools.browser_session_mcp.await_human_takeover({ token, timeout: 4000 })
+    await tools.browser_session_mcp.await_human_takeover({ token, timeout: 60000 })
   ).structuredContent.completed;
 }
 // Now authenticated — continue (and optionally save_browser_state to reuse it).

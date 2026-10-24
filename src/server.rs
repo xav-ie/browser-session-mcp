@@ -61,7 +61,7 @@ impl ServerHandler for BrowserSessionServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("browser-session-mcp", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "Per-call isolated browser sessions against a shared persistent Chrome. Call open_browser_session to obtain a sessionId; pass it into every subsequent tool call. For human-takeover (request_human_takeover/await_human_takeover): show the URL, then run await_human_takeover in a BACKGROUND task that polls with a short timeout — don't block your main loop waiting on the human.".into(),
+            "Per-call isolated browser sessions against a shared persistent Chrome. Call open_browser_session to obtain a sessionId; pass it into every subsequent tool call. For human takeover: show the request_human_takeover URL to the user right away, then wait with await_human_takeover (timeout about 60000ms per call, repeated) in a background task; with no background task, end your turn and call it once the user says they're done.".into(),
         );
         info
     }
@@ -546,10 +546,10 @@ impl BrowserSessionServer {
         let url = format!("{base}/takeover/{token}");
         Ok(ok_text_struct(
             format!(
-                "Human takeover ready. Show this URL to the user so they can log in themselves. \
-                 Then run await_human_takeover(token=\"{token}\") in a BACKGROUND task that polls \
-                 with a short timeout until completed — do NOT block your main loop; the human may \
-                 take several minutes:\n{url}"
+                "Human takeover ready. Show this URL to the user now so they can log in themselves. \
+                 Then wait with await_human_takeover(token=\"{token}\", timeout=60000), repeated \
+                 until completed, in a background task; with no background task, end your turn and \
+                 call it once the user says they're done:\n{url}"
             ),
             TakeoverOut {
                 url,
@@ -1852,7 +1852,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "request_human_takeover",
-            "Hand the session's active page to a human to log in themselves (passwords/passkeys the agent must not see). Returns { url, token, expiresAtMs }: show the URL to the user and keep the token. Does NOT block. STRONGLY ADVISED: after showing the URL, run await_human_takeover in a BACKGROUND task (subagent/job) — not your main loop — because the human may take many minutes and you should stay responsive. Fails if TAKEOVER_BASE_URL isn't configured on the server.",
+            "Get a human takeover link (URL) for the session's active page, so the user can log in themselves (passwords/passkeys the agent must not see).\nReturns { url, token, expiresAtMs } without blocking: show the URL to the user right away and keep the token for await_human_takeover. Fails if TAKEOVER_BASE_URL isn't configured on the server.",
             object_schema(
                 &[
                     session_id,
@@ -1868,7 +1868,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "await_human_takeover",
-            "Wait for the human to click Done in the takeover page. Returns { completed } — true if they finished, false on timeout. STRONGLY ADVISED: run this in a BACKGROUND task and POLL — call it in a loop with a SHORT `timeout` (e.g. 4000ms) until completed:true — rather than one long blocking call, which can exceed your MCP client's request timeout and make you miss the Done signal. The human may take several minutes; a background poller lets you be notified and resume. On completion the session is authenticated and you can continue; consider save_browser_state so later sessions skip the login.",
+            "Wait for the human to click Done on the takeover page; returns { completed }, false on timeout.\nPass a timeout of about 60000ms and repeat until completed:true: each call stays under typical MCP client request limits, and polling costs one call per minute rather than one every few seconds. Run the loop in a background task; with no background task, show the link, end your turn, and call this once the user says they're done. The human may take several minutes. On completion the session is authenticated and you can continue; consider save_browser_state so later sessions skip the login.",
             object_schema(
                 &[
                     (
