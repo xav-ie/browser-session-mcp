@@ -26,6 +26,9 @@
   # loader and runs on any Linux host, Nix or not.
   staticTarget ? null,
   staticCc ? null,
+  # Cargo profile to build with. CI's pull-request check uses "ci" (see
+  # Cargo.toml); everything shipped uses "release".
+  cargoProfile ? "release",
 }:
 let
   version = "0.1.5";
@@ -82,6 +85,7 @@ let
     inherit src version;
     pname = "browser-session-mcp";
     strictDeps = true;
+    CARGO_PROFILE = cargoProfile;
 
     # aws-lc-rs (via reqwest's rustls feature) needs cmake + a C toolchain to
     # build. Its build script runs its own cmake, so suppress the nixpkgs cmake

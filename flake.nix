@@ -57,6 +57,13 @@
               };
               default = config.packages.browser-session-mcp;
 
+              # The same package built with Cargo's `ci` profile: what pull-request
+              # CI builds, lints and smoke-tests, since it compiles far faster.
+              browser-session-mcp-ci = pkgs.callPackage ./package.nix {
+                craneLib = inputs.crane.mkLib pkgs;
+                cargoProfile = "ci";
+              };
+
               # Unwrapped binary for the release tarball. On Darwin this is an
               # ordinary Nix build (macOS can't be statically linked; libSystem is
               # always dynamic) whose only /nix/store library is libiconv. Pointing
@@ -132,7 +139,7 @@
               # The package (all four binaries) must build.
               build = config.packages.default;
               # `cargo clippy --all-targets -- --deny warnings`.
-              clippy = config.packages.browser-session-mcp.clippy;
+              clippy = config.packages.browser-session-mcp-ci.clippy;
             }
             # End-to-end integration test in a throwaway NixOS VM. It imports the
             # real nixos-module.nix, enables the whole stack (persistent Chrome +
@@ -160,7 +167,7 @@
 
                     services.browser-session = {
                       enable = true;
-                      package = config.packages.browser-session-mcp;
+                      package = config.packages.browser-session-mcp-ci;
                       chrome.package = pkgs.ungoogled-chromium;
                       chrome.executable = "chromium";
                       # The module targets chrome-headless-shell (headless by
@@ -180,7 +187,7 @@
 
                     # smoke.sh's harness: coproc/bash, JSON extraction, /json probe.
                     environment.systemPackages = [
-                      config.packages.browser-session-mcp
+                      config.packages.browser-session-mcp-ci
                       pkgs.bash
                       # jsonschema: smoke.sh checks every result against its outputSchema.
                       (pkgs.python3.withPackages (ps: [ ps.jsonschema ]))
@@ -207,7 +214,7 @@
                   machine.succeed(
                       "env "
                       "CHROME_BIN=${pkgs.ungoogled-chromium}/bin/chromium "
-                      "MCP_BIN=${config.packages.browser-session-mcp}/bin/browser-session "
+                      "MCP_BIN=${config.packages.browser-session-mcp-ci}/bin/browser-session "
                       "bash ${./scripts/smoke.sh} 2>&1"
                   )
                 '';
