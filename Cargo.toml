@@ -50,7 +50,11 @@ reqwest = { version = "0.13", default-features = false, features = [
   "json",
   "rustls",
 ] }
-async-tungstenite = { version = "0.35", default-features = false, features = [
+# The version MUST stay in sync with chromiumoxide's own async-tungstenite
+# requirement (0.32): feature unification only applies within one version,
+# so a newer major here silently leaves chromiumoxide's instance without
+# TLS and every wss:// attach fails with "TLS support not compiled in".
+async-tungstenite = { version = "0.32", default-features = false, features = [
   "tokio-runtime",
   "tokio-rustls-webpki-roots",
 ] }
