@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::chrome_ctx::ChromeContext;
+use crate::jev;
 use crate::logs::{self, LogKind, ReadOpts, SessionLogEntry};
 use crate::profiler;
 use crate::saved_states::{SavedStateStore, StateSummary};
@@ -290,9 +291,9 @@ impl BrowserSessionServer {
         // `.click()` cannot. Target a selector's center or explicit x/y.
         let (x, y, label) = if let Some(sel) = optional_str(&args, "selector") {
             let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
-            wait_for_selector(&page, sel, timeout).await?;
-            let (x, y) = element_center(&page, sel).await?;
-            (x, y, sel.to_string())
+            let (css, note) = resolve_and_wait(&page, sel, timeout).await?;
+            let (x, y) = element_center(&page, &css).await?;
+            (x, y, note.unwrap_or(css))
         } else if let (Some(x), Some(y)) = (optional_f64(&args, "x"), optional_f64(&args, "y")) {
             (x, y, format!("({x}, {y})"))
         } else {
@@ -309,11 +310,14 @@ impl BrowserSessionServer {
         let session_id = required_str(&args, "sessionId")?.to_string();
         let key = required_str(&args, "key")?.to_string();
         let page = sessions.active_page(&session_id).await?;
+        // None unless Jev picked the element; names what was chosen.
+        let mut note = None;
         if let Some(sel) = optional_str(&args, "selector") {
             // Focus the element, then press (e.g. type into a field then Enter).
             let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
-            wait_for_selector(&page, sel, timeout).await?;
-            page.find_element(sel.to_string())
+            let (css, resolved) = resolve_and_wait(&page, sel, timeout).await?;
+            note = resolved;
+            page.find_element(css)
                 .await
                 .with_context(|| format!("locating {sel}"))?
                 .press_key(key.as_str())
@@ -322,7 +326,8 @@ impl BrowserSessionServer {
         } else {
             dispatch_key(&page, &key).await?;
         }
-        Ok(ok_text(format!("Pressed {key}")))
+        let on = note.map(|n| format!(" on {n}")).unwrap_or_default();
+        Ok(ok_text(format!("Pressed {key}{on}")))
     }
 
     async fn scroll(&self, args: JsonObject) -> Result<Text> {
@@ -368,7 +373,7 @@ impl BrowserSessionServer {
         let delay = optional_u64(&args, "delay").unwrap_or(0);
         let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
         let page = sessions.active_page(&session_id).await?;
-        wait_for_selector(&page, &selector, timeout).await?;
+        let (selector, note) = resolve_and_wait(&page, &selector, timeout).await?;
         let element = page
             .find_element(selector.clone())
             .await
@@ -397,8 +402,9 @@ impl BrowserSessionServer {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
         }
+        let target = note.unwrap_or(selector);
         Ok(ok_text(format!(
-            "Typed {} chars into {selector}",
+            "Typed {} chars into {target}",
             text.chars().count()
         )))
     }
@@ -411,6 +417,12 @@ impl BrowserSessionServer {
         let timeout = optional_u64(&args, "timeout").unwrap_or(10_000);
         if selector.is_none() && text.is_none() {
             bail!("wait_for requires either `selector` or `text`.");
+        }
+        if let Some(s) = selector.as_deref().filter(|s| s.starts_with("jev:")) {
+            bail!(
+                "wait_for doesn't support `jev:` ({s:?}) — wait for `text` content instead, \
+                 then click/type with a plain-language or CSS selector"
+            );
         }
         let page = sessions.active_page(&session_id).await?;
         if let Some(s) = selector {
@@ -1185,7 +1197,7 @@ fn optional_viewport(args: &JsonObject, field: &str) -> Result<Option<Viewport>>
 /// an isolated world also keeps the probe invisible to page scripts.
 /// Trade-off: page-defined `window` globals aren't visible here — but DOM,
 /// `navigator`, `document`, `location` all are, which covers our use.
-async fn iso_eval_function(page: &Page, function_declaration: &str) -> Result<Value> {
+pub(crate) async fn iso_eval_function(page: &Page, function_declaration: &str) -> Result<Value> {
     let frame_id = page
         .mainframe()
         .await?
@@ -1268,6 +1280,61 @@ async fn main_world_eval(page: &Page, function_declaration: &str) -> Result<Valu
         bail!("JS exception: {}", exc.text);
     }
     Ok(resp.result.result.value.clone().unwrap_or(Value::Null))
+}
+
+/// Resolve a `selector` argument to a CSS selector and wait up to
+/// `timeout_ms` for the element to appear. Three routes:
+///
+/// 1. A `jev:` prefix goes straight to the Jev decision model (`src/jev.rs`),
+///    which picks one of the page's interactive elements for the goal.
+/// 2. Anything else is used as a CSS selector, as-is.
+/// 3. Automatic fallback: if that selector matches nothing within
+///    `timeout_ms` and a TypeSafe API key is configured, the same string is
+///    retried as a plain-language goal via Jev — so `selector: "the login
+///    button"` works with no special syntax. The fallback only fires after
+///    the wait expires (an element that merely loads slowly is still found
+///    as CSS), and it fails closed: on low confidence or any Jev problem the
+///    error names both attempts rather than guessing.
+///
+/// Returns the CSS selector to act on and, when Jev picked the element, a
+/// note for the confirmation text naming what was chosen.
+async fn resolve_and_wait(
+    page: &Page,
+    selector: &str,
+    timeout_ms: u64,
+) -> Result<(String, Option<String>)> {
+    if let Some(goal) = selector.strip_prefix("jev:") {
+        let goal = goal.trim();
+        if goal.is_empty() {
+            bail!("`jev:` needs a goal after the colon, e.g. `jev: the login button`");
+        }
+        let res = jev::resolve(page, goal).await?;
+        // Extraction only offers currently-present elements, so this is an
+        // instant match; the wait just covers a re-render in between.
+        wait_for_selector(page, &res.css, timeout_ms).await?;
+        let note = format!(
+            "{} (jev: \"{goal}\", confidence {:.2}, {} offered)",
+            res.description, res.confidence, res.offered
+        );
+        return Ok((res.css, Some(note)));
+    }
+    if let Err(css_err) = wait_for_selector(page, selector, timeout_ms).await {
+        if !jev::available() {
+            return Err(css_err);
+        }
+        let res = match jev::resolve_fallback(page, selector).await {
+            Ok(res) => res,
+            // Keep the CSS timeout visible: it explains why Jev was tried.
+            Err(jev_err) => bail!("{css_err}; jev fallback: {jev_err}"),
+        };
+        wait_for_selector(page, &res.css, timeout_ms).await?;
+        let note = format!(
+            "{} (jev fallback for \"{selector}\", confidence {:.2}, {} offered)",
+            res.description, res.confidence, res.offered
+        );
+        return Ok((res.css, Some(note)));
+    }
+    Ok((selector.to_string(), None))
 }
 
 /// Center of an element in viewport CSS pixels, after scrolling it into view.
@@ -1534,14 +1601,14 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "click",
-            "Click in the session's active tab with real CDP mouse input (trusted events — fires handlers reliably and grants user activation, so it can open popups/new tabs that a JS click can't). Pass a CSS `selector` to click the first match's center, after waiting up to `timeout` for it and scrolling it into view; or pass both `x` and `y` to click viewport coordinates, which are used only when there is no selector. Don't use evaluate to click: synthetic JS clicks can be ignored by pages. Coordinates outside the viewport are not rejected; the click lands on nothing. A click can submit forms or trigger purchases, like a real user's. Returns a confirmation naming what was clicked. Fails if the selector matches nothing within `timeout`, or if neither a selector nor both coordinates are given.",
+            "Click in the session's active tab with real CDP mouse input (trusted events — fires handlers reliably and grants user activation, so it can open popups/new tabs that a JS click can't). Pass a CSS `selector` to click the first match's center, after waiting up to `timeout` for it and scrolling it into view. Plain language works too: a `jev:` prefix (e.g. `jev: the login button`) goes straight to the Jev decision model, and with TYPESAFE_API_KEY configured on the server any selector that matches nothing as CSS is retried as a plain-language goal the same way — the server sends the page's interactive elements to Jev, which picks one (on low confidence or any Jev problem it errors instead of guessing, so nothing is clicked blindly; elements are picked from the page as it is at call time, so wait_for content first if the page is still loading). Or pass both `x` and `y` to click viewport coordinates, which are used only when there is no selector. Don't use evaluate to click: synthetic JS clicks can be ignored by pages. Coordinates outside the viewport are not rejected; the click lands on nothing. A click can submit forms or trigger purchases, like a real user's. Returns a confirmation naming what was clicked. Fails if the selector matches nothing within `timeout` and Jev can't (or isn't configured to) resolve it, or if neither a selector nor both coordinates are given.",
             object_schema(
                 &[
                     session_id,
                     (
                         "selector",
                         &str_t,
-                        "CSS selector of the element to click; the first match is used.",
+                        "CSS selector of the element to click; the first match is used. Or describe the element in plain words — `jev:<goal>` (e.g. `jev: the login button`) goes straight to the Jev decision model, and when TYPESAFE_API_KEY is set a selector that matches nothing as CSS is retried as such a description.",
                     ),
                     (
                         "x",
@@ -1565,14 +1632,14 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "type",
-            "Type text into the first element matching a CSS selector in the session's active tab: waits up to `timeout` for it, clicks it to focus, then sends real key events for each character, so the page's input handlers fire. Use press_key afterwards for Enter or Tab, and press_key alone for single keys. `clear` empties the field first; without it, text is appended. `delay` paces the characters for pages that react to typing speed. It doesn't check that the element is editable: typing into a button or plain text reports success but changes nothing, so target an input, textarea or contenteditable element. Returns how many characters were typed. Fails if the selector matches nothing within `timeout`.",
+            "Type text into the first element matching a CSS selector in the session's active tab: waits up to `timeout` for it, clicks it to focus, then sends real key events for each character, so the page's input handlers fire. Plain language works too: a `jev:` prefix (e.g. `jev: the email field`) goes straight to the Jev decision model, and with TYPESAFE_API_KEY set on the server a selector that matches nothing as CSS is retried as a plain-language goal — Jev picks the input from the page's interactive elements (it errors rather than guesses); the text itself always comes from you. Use press_key afterwards for Enter or Tab, and press_key alone for single keys. `clear` empties the field first; without it, text is appended. `delay` paces the characters for pages that react to typing speed. It doesn't check that the element is editable: typing into a button or plain text reports success but changes nothing, so target an input, textarea or contenteditable element. Returns how many characters were typed. Fails if the selector matches nothing within `timeout` and Jev can't (or isn't configured to) resolve it.",
             object_schema(
                 &[
                     session_id,
                     (
                         "selector",
                         &str_t,
-                        "CSS selector of the input, textarea or editable element.",
+                        "CSS selector of the input, textarea or editable element. Or describe it in plain words — `jev:<goal>` (e.g. `jev: the email field`) goes straight to the Jev decision model, and when TYPESAFE_API_KEY is set a selector that matches nothing as CSS is retried as such a description.",
                     ),
                     ("text", &str_t, "The text to type."),
                     (
@@ -1597,7 +1664,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "press_key",
-            "Press a key via CDP keyboard input in the session's active tab. `key` is a name (Enter, Tab, Escape, Backspace, ArrowDown, …) or a single character. With a `selector`, waits up to `timeout` for it and focuses it first (e.g. type into a field then press Enter); without, presses on whatever is focused, and `timeout` is unused. Use type for whole strings and click to activate buttons. Pressing Enter can submit a form, like a real user. Returns a confirmation. Fails on an unknown key name, or if the selector matches nothing within `timeout`.",
+            "Press a key via CDP keyboard input in the session's active tab. `key` is a name (Enter, Tab, Escape, Backspace, ArrowDown, …) or a single character. With a `selector` (CSS; or plain language — a `jev:` goal such as `jev: the password field` goes straight to the Jev decision model, and with TYPESAFE_API_KEY set a selector that matches nothing as CSS is retried as plain language), waits up to `timeout` for it and focuses it first (e.g. type into a field then press Enter); without, presses on whatever is focused, and `timeout` is unused. Use type for whole strings and click to activate buttons. Pressing Enter can submit a form, like a real user. Returns a confirmation. Fails on an unknown key name, or if the selector matches nothing within `timeout` and Jev can't (or isn't configured to) resolve it.",
             object_schema(
                 &[
                     session_id,
@@ -1609,7 +1676,7 @@ fn tool_defs() -> Vec<Tool> {
                     (
                         "selector",
                         &str_t,
-                        "CSS selector of an element to focus before pressing. Omit to press on the focused element.",
+                        "CSS selector of an element to focus before pressing. Or describe it in plain words (`jev:<goal>` goes straight to the Jev decision model; when TYPESAFE_API_KEY is set a selector that matches nothing as CSS is retried as such a description). Omit to press on the focused element.",
                     ),
                     (
                         "timeout",

@@ -58,6 +58,7 @@ cleanup() {
   rc=$?
   [[ -n ${SERVER_PID:-} ]] && kill "$SERVER_PID" 2>/dev/null || true
   [[ -n ${CHROME_PID:-} ]] && kill "$CHROME_PID" 2>/dev/null || true
+  [[ -n ${JEV_PID:-} ]] && kill "$JEV_PID" 2>/dev/null || true
   # Wait for chrome to fully exit before removing its data dir — otherwise it's
   # still writing chrome-data/ and `rm -rf` races it ("Directory not empty").
   [[ -n ${CHROME_PID:-} ]] && wait "$CHROME_PID" 2>/dev/null || true
@@ -96,6 +97,65 @@ if ! curl -fs "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1; then
   echo "chrome failed to come up" >&2
   exit 1
 fi
+
+# ---- stub Jev API ----------------------------------------------------------
+# A tiny /v1/systemone that "picks" the element matching the goal, so both
+# jev paths run end-to-end without a real TypeSafe key: explicit `jev:`
+# goals and the automatic fallback for selectors that match nothing as CSS.
+# Cues it reads from the goal (the state's first line — the element menu
+# below it mentions every marker too): "email" -> pick the input, otherwise
+# the "Log in" button; "bogus" -> answer with an unknown id (fail-closed
+# validation); "unsure" -> confidence 0.2 (the confidence floor).
+
+JEV_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+python3 - "$JEV_PORT" >"$TMP/jev-stub.log" 2>&1 <<'PY' &
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        goal = body.get("state", "").split("\n")[0].lower()
+        criteria = body["questions"]["element"]["criteria"]
+        confidence = 0.2 if "unsure" in goal else 0.91
+        if "bogus" in goal:
+            choice = "e999"
+        else:
+            marker = "email" if "email" in goal else "log in"
+            order = sorted(criteria, key=lambda k: int(k[1:]))
+            choice = next((k for k in order if marker in criteria[k].lower()), order[0])
+        resp = json.dumps({
+            "model": "jev-stub",
+            "answers": {"element": {
+                "choice": choice,
+                "confidence": confidence,
+                "probabilities": {choice: confidence},
+            }},
+            "usage": {"input_tokens": 1234},
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(resp)))
+        self.end_headers()
+        self.wfile.write(resp)
+
+    def log_message(self, *_):
+        pass
+
+print("ready", flush=True)
+HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+PY
+JEV_PID=$!
+for _ in $(seq 1 40); do
+  grep -q ready "$TMP/jev-stub.log" 2>/dev/null && break
+  sleep 0.25
+done
+grep -q ready "$TMP/jev-stub.log" || { echo "jev stub failed to come up" >&2; exit 1; }
+
+# The MCP reads these lazily, per jev: call — but set them before launch so
+# the whole run sees them.
+export TYPESAFE_API_KEY=smoke-key
+export JEV_BASE_URL="http://127.0.0.1:$JEV_PORT"
 
 # ---- start MCP server ----------------------------------------------------
 
@@ -303,6 +363,36 @@ print(json.dumps({"jsonrpc":"2.0","id":15,"method":"tools/call","params":{
   "name":"list_pages","arguments":{"sessionId":sys.argv[1]}}}))' "$SID")
 LIST_PAGES=$(req "$LIST_PAGES_REQ")
 check "list_pages shows both tabs" "$LIST_PAGES" 'tab2'
+
+# ---- jev: selectors (against the stub API above) ---------------------------
+
+JEV_URL="data:text/html,<title>jev</title><button id=jev-a>Cancel</button><button id=jev-b>Log%20in</button><input id=jev-in placeholder=Email>"
+check "jev: navigate to test page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$JEV_URL")")" 'Navigated to'
+
+# A page handler proves the trusted click really landed on the picked button.
+check "jev: wire a click handler" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).addEventListener(%s, () => { document.title = %s }); return 1 })()"}' "$SID" "'jev-b'" "'click'" "'clicked-jev'")")" '"result":1'
+
+JEV_CLICK=$(call click "$(printf '{"sessionId":"%s","selector":"jev: the Log in button"}' "$SID")")
+check "jev: click resolves via the stub" "$JEV_CLICK" 'confidence 0.91'
+check "jev: click names the picked element" "$JEV_CLICK" '#jev-b'
+check "jev: click really clicked it" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'clicked-jev'
+
+check "jev: type picks the email input" "$(call type "$(printf '{"sessionId":"%s","selector":"jev: the Email field","text":"hi@x.io"}' "$SID")")" 'Typed 7 chars into input #jev-in'
+check "jev: type typed into the picked input" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.getElementById(%s).value"}' "$SID" "'jev-in'")")" 'hi@x.io'
+
+check "jev: unknown id fails closed" "$(call click "$(printf '{"sessionId":"%s","selector":"jev: bogus target"}' "$SID")")" 'not one of the offered'
+check "jev: low confidence fails closed" "$(call click "$(printf '{"sessionId":"%s","selector":"jev: unsure target"}' "$SID")")" 'below the 0.50 floor'
+
+# Auto-fallback: with TYPESAFE_API_KEY set, a selector that matches nothing
+# as CSS is retried as a plain-language goal. Short timeout keeps the CSS
+# wait quick.
+check "auto: reset title" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title = 1"}' "$SID")")" '"result":1'
+AUTO_CLICK=$(call click "$(printf '{"sessionId":"%s","selector":"the Log in button","timeout":250}' "$SID")")
+check "auto: plain-language selector resolves via jev" "$AUTO_CLICK" 'jev fallback for'
+check "auto: names the picked element" "$AUTO_CLICK" '#jev-b'
+check "auto: click really clicked it" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'clicked-jev'
+check "auto: type falls back too" "$(call type "$(printf '{"sessionId":"%s","selector":"the Email field","text":"auto@x.io","timeout":250}' "$SID")")" 'Typed 9 chars into input #jev-in'
+check "auto: fail-closed when jev is unsure" "$(call click "$(printf '{"sessionId":"%s","selector":"the unsure control","timeout":250}' "$SID")")" 'below the 0.85 floor'
 
 # ---- close ---------------------------------------------------------------
 

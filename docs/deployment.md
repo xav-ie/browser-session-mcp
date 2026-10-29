@@ -90,6 +90,12 @@ install steps (drop the binary in `/usr/local/bin`, the units in
 | `BROWSER_URL` | — (**required**) | DevTools HTTP(S) endpoint |
 | `STATE_DIR` | — (**required**) | shared by every role: `sessions/`, `logs/`, `states/` (saved cookies), `takeover/` (takeover IPC) |
 | `TAKEOVER_BASE_URL` | — | public URL of the takeover daemon; without it `request_human_takeover` errors |
+| `TYPESAFE_API_KEY` | — | enables Jev element picking on click/type/press_key: `jev:` goals plus the automatic fallback that retries selectors matching nothing as CSS (see below); without it, plain CSS only |
+| `JEV_MODEL` | `jev-1.14.0` | pinned Jev model; upgrade deliberately, don't ride `jev-latest` |
+| `JEV_BASE_URL` | `https://api.typesafe.ai` | any `/v1/systemone`-compatible carrier (Vercel AI Gateway, OpenRouter, Cloudflare) |
+| `JEV_TIMEOUT_MS` | `10000` | per-request timeout for Jev calls |
+| `JEV_MIN_CONFIDENCE` | `0.5` | below this confidence a `jev:` resolution errors instead of acting |
+| `JEV_FALLBACK_MIN_CONFIDENCE` | `0.85` | confidence floor for the automatic fallback (a selector that matched nothing as CSS retried as a plain-language goal); stricter than `JEV_MIN_CONFIDENCE` because the caller asked for CSS, not a Jev best guess |
 
 > Every role must get the same `STATE_DIR`; they cooperate through files in it.
 > Running standalone, point it at any writable dir, e.g. `STATE_DIR=./bs`. The

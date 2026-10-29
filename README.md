@@ -143,6 +143,49 @@ The link works for one browser only: the first to open it claims it, and it
 expires after 30 minutes by default. [Workflows](docs/workflows.md#human-takeover)
 has the details and the code.
 
+## Picking elements with Jev
+
+`take_snapshot` returns the page as text without element references, so
+acting on it means writing CSS selectors by hand. With a
+[Jev](https://typesafe.ai) key configured, the acting tools also accept
+plain language: describe the element and the Jev decision model picks it.
+
+```
+click({ sessionId, selector: "the login button" })        ← plain words
+click({ sessionId, selector: "jev: the login button" })   ← straight to Jev
+type({ sessionId, selector: "the email field", text: "xavier@example.com" })
+```
+
+No syntax to remember: a selector is first used as CSS, and if it matches
+nothing within `timeout` it is retried as a plain-language goal via Jev —
+the automatic fallback, which also rescues mistyped CSS selectors when Jev
+recognizes the intent. A `jev:` prefix skips the CSS step and goes straight
+to Jev. Either way, the confirmation names the element that was picked.
+
+Each Jev resolution extracts the page's interactive elements from the DOM
+(in-viewport first, capped at 240 — Jev's Choice limit is 255), stamps them
+with `data-jev-id` attributes, and sends one Choice request to TypeSafe's
+API (~150–500ms, $0.042 per million input tokens — a fraction of a cent per
+action). The chosen element is then clicked or typed into through the same
+trusted-CDP paths as a CSS selector.
+
+Jev only picks the element — it never generates text, coordinates or
+scripts — and everything fails closed: with no key the fallback is simply
+skipped and the original CSS error returned; an empty page, confidence
+below the floor, or a malformed response is an error, not a guess.
+Confidence is held to a higher bar on the automatic fallback
+(`JEV_FALLBACK_MIN_CONFIDENCE`, default 0.85) than on explicit `jev:` goals
+(`JEV_MIN_CONFIDENCE`, default 0.5): when the caller passed CSS that matched
+nothing, a Jev guess should only act if it is clearly right. Elements are
+chosen from the page as it is when the call runs; `wait_for` content first on
+pages that are still loading (`wait_for` itself takes CSS selectors and text
+only).
+
+Set `TYPESAFE_API_KEY` (from [console.typesafe.ai](https://console.typesafe.ai))
+to enable it. `JEV_MODEL`, `JEV_BASE_URL`, `JEV_TIMEOUT_MS`,
+`JEV_MIN_CONFIDENCE` and `JEV_FALLBACK_MIN_CONFIDENCE` tune it — see
+[Deployment](docs/deployment.md#environment).
+
 ## All 30 tools
 
 Most tools take a `sessionId` first. Tools marked ⚙ need one of the optional
@@ -185,12 +228,12 @@ can type their results.
 - `take_snapshot({ sessionId })`: the accessibility tree as indented text
 
 **Acting on it** (real CDP input, not synthetic JavaScript events)
-- `click({ sessionId, selector | x,y, timeout? })`
-- `type({ sessionId, selector, text, delay?, clear?, timeout? })`
-- `press_key({ sessionId, key, selector?, timeout? })`: `key` is a name (Enter, Tab, ArrowDown…) or a character
+- `click({ sessionId, selector | x,y, timeout? })`: `selector` may be plain language or a `jev:<goal>` — the Jev decision model picks the element (see [Picking elements with Jev](#picking-elements-with-jev))
+- `type({ sessionId, selector, text, delay?, clear?, timeout? })`: `selector` may be plain language or a `jev:` goal; the text itself always comes from you
+- `press_key({ sessionId, key, selector?, timeout? })`: `key` is a name (Enter, Tab, ArrowDown…) or a character; `selector` may be plain language or a `jev:` goal and is optional
 - `scroll({ sessionId, deltaY?, deltaX?, x?, y? })`
 - `move_mouse({ sessionId, x, y })`
-- `wait_for({ sessionId, selector? | text?, timeout? })`
+- `wait_for({ sessionId, selector? | text?, timeout? })`: CSS selector or page text (no `jev:` here — it's a poll, not an action)
 - `evaluate({ sessionId, expression, tabIndex? })`: runs JavaScript and returns the value
 
 **Logs** ⚙ (written by the `listener` role)
