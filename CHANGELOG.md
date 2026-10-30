@@ -1,4 +1,25 @@
 # Changelog
+## 0.1.9 (2026-10-30)
+
+### Features
+
+#### act: a Jev-driven goal loop
+
+New `act({ sessionId, goal, values?, maxSteps? })` tool. The server extracts
+the page's interactive elements, asks Jev for the next step (one fan-out
+request also judging goal-met and stuck, gated at 0.85), executes it — click,
+type, select, scroll or wait — and repeats until the goal reads achieved,
+nothing can progress, or the step budget runs out. Values are typed via CDP;
+only their keys reach the model.
+
+### Fixes
+
+#### Security: override postcss-selector-parser
+
+Pins postcss-selector-parser to ^7.1.6 (resolves 7.1.7) via a pnpm
+override, clearing the Dependabot moderate alert, with the pnpmDeps
+hash repinned for the updated lockfile.
+
 ## 0.1.8 (2026-10-30)
 
 ### Features
