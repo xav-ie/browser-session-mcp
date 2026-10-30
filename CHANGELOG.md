@@ -1,4 +1,16 @@
 # Changelog
+## 0.1.12 (2026-10-30)
+
+### Fixes
+
+#### Jev sees checkbox and toggle state
+
+Extracted elements now carry their state: checkboxes and radios read
+(checked) or (unchecked), and aria-checked, aria-pressed, aria-expanded and
+aria-selected show up too. Unlabeled checkboxes and radios take the bare
+text next to them as their label instead of their form value ("on"). act
+can now tell a toggle goal is met instead of clicking the box back off.
+
 ## 0.1.11 (2026-10-30)
 
 ### Fixes
