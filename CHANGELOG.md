@@ -1,4 +1,36 @@
 # Changelog
+## 0.1.14 (2026-10-30)
+
+### Features
+
+#### MCP over streamable HTTP
+
+`browser-session mcp` serves streamable HTTP at `/mcp` when `MCP_HTTP_BIND` is
+set (stateless, JSON responses), so it no longer needs a stdio to HTTP proxy in
+front. One process shares its Chrome connection and session state across all
+clients. `MCP_HTTP_ALLOWED_HOSTS` lists the accepted `Host` values (loopback
+only by default), for running behind a reverse proxy. Without `MCP_HTTP_BIND`
+it speaks stdio as before.
+
+#### NixOS module can skip its units
+
+The NixOS module gains `systemd.enable` (default on). Turning it off drops the
+Chrome, listener, reaper and takeover units but keeps the `chrome-headless`
+user and the state and profile directories, for running the stack in
+containers. The new read-only `chrome.command` is the exact Chrome command
+line, and the `chrome-headless` unit runs it.
+
+### Fixes
+
+#### Jev never sees what's typed into a field
+
+Element descriptions sent to Jev used to fall back to a text field's
+current value when it had no label, so a card number or autofilled email
+typed into an unlabeled box went to the Jev API on the next step. Text
+inputs, textareas and contenteditable editors now never use their contents
+as a label; they read (filled) or (empty) instead, which also tells act a
+field is already done. Button-type inputs keep their value as their text.
+
 ## 0.1.13 (2026-10-30)
 
 ### Features
