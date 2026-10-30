@@ -186,7 +186,7 @@ const diagrams = {
     const group = { x: M, y: 150, w: W - 2 * M, h: 196 };
     const rw = (group.w - 32 - 3 * 16) / 4;
     const role = (i, t) => ({ x: group.x + 16 + i * (rw + 16), y: group.y + 44, w: rw, h: 104, kind: "key", text: t });
-    const mcp = role(0, ["mcp", "the 30 tools, over stdio; restart it any time"]);
+    const mcp = role(0, ["mcp", "the 31 tools, over stdio; restart it any time"]);
     const listener = role(1, ["listener", "records console and network traffic, per visit"]);
     const reaper = role(2, ["reaper", "on a timer, closes sessions left idle"]);
     const takeover = role(3, ["takeover", "serves the page a person logs in through"]);
