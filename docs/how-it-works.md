@@ -48,7 +48,7 @@ MCP server itself is a stdio subprocess that can be killed and respawned freely.
 All four roles are the one `browser-session` binary invoked with a different
 first argument:
 
-- **`browser-session mcp`** — the MCP server (stdio). Connects to Chrome
+- **`browser-session mcp`** — the MCP server (stdio, or streamable HTTP with `MCP_HTTP_BIND`). Connects to Chrome
   lazily, hands out contexts, drives navigation/interaction, and reads the
   on-disk event logs back. Stateless beyond Chrome + the shared state dir, so
   mcp-proxy churn or cache eviction can restart it at will.

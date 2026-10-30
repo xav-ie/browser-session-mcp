@@ -30,6 +30,16 @@ or `https://chrome.<domain>` behind a TLS proxy — TLS is supported):
 BROWSER_URL=http://localhost:9222 browser-session mcp
 ```
 
+Set `MCP_HTTP_BIND` to serve streamable HTTP at `/mcp` instead (stateless, JSON
+responses; one process shares its Chrome connection and session state across
+every client). Behind a reverse proxy, list the public hostname in
+`MCP_HTTP_ALLOWED_HOSTS`, since only loopback `Host` headers are accepted by
+default:
+
+```sh
+BROWSER_URL=http://localhost:9222 MCP_HTTP_BIND=127.0.0.1:9224 browser-session mcp
+```
+
 Without the Nix wrapper, point the takeover daemon at the bundled `webroot/`
 yourself:
 
@@ -86,6 +96,8 @@ install steps (drop the binary in `/usr/local/bin`, the units in
 |---|---|---|
 | `BROWSER_URL` | — (**required**) | DevTools HTTP(S) endpoint |
 | `STATE_DIR` | — (**required**) | shared by every role: `sessions/`, `logs/`, `states/` (saved cookies), `takeover/` (takeover IPC) |
+| `MCP_HTTP_BIND` | — | serve streamable HTTP at `/mcp` on this address (e.g. `0.0.0.0:9224`) instead of stdio |
+| `MCP_HTTP_ALLOWED_HOSTS` | loopback | comma separated `Host` values the HTTP mode accepts (e.g. `mcp.example.com`) |
 | `TAKEOVER_BASE_URL` | — | public URL of the takeover daemon; without it `request_human_takeover` errors |
 | `TYPESAFE_API_KEY` | — | enables Jev element picking on click/type/press_key (`jev:` goals plus the automatic fallback that retries selectors matching nothing as CSS) and the `act` goal loop; without it, plain CSS only |
 | `JEV_MODEL` | `jev-1.14.0` | pinned Jev model; upgrade deliberately, don't ride `jev-latest` |

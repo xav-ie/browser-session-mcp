@@ -12,7 +12,19 @@ name = "browser-session"
 path = "src/main.rs"
 
 [dependencies]
-rmcp = { version = "3.5", features = ["server", "transport-io"] }
+rmcp = { version = "3.5", features = [
+  "server",
+  "transport-io",
+  # `mcp` over HTTP when MCP_HTTP_BIND is set (see src/mcp.rs).
+  "transport-streamable-http-server",
+] }
+# The HTTP mode's listener: rmcp's service only handles requests, so hyper
+# serves the connections and answers 404 off the /mcp path.
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 chromiumoxide = { version = "0.9", default-features = false }
 futures = "0.3"
 tokio = { version = "1", features = [

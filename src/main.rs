@@ -3,7 +3,7 @@
 //! Dispatches on the first argument to one of four long-lived roles that
 //! cooperate around one Chrome (see the README architecture diagram):
 //!
-//!   browser-session mcp        MCP server over stdio (the tool surface)
+//!   browser-session mcp        MCP server over stdio or HTTP (the tool surface)
 //!   browser-session listener   always-on CDP console/network capture → NDJSON
 //!   browser-session reaper     one-shot sweep of idle contexts (run on a timer)
 //!   browser-session takeover   HTTP daemon serving the human-takeover page
@@ -18,7 +18,8 @@ browser-session — isolated browser sessions over a shared Chrome
 Usage: browser-session <command>
 
 Commands:
-  mcp         MCP server over stdio (needs BROWSER_URL)
+  mcp         MCP server over stdio (needs BROWSER_URL); set
+              MCP_HTTP_BIND to serve streamable HTTP at /mcp instead
   listener    always-on console + network capture to NDJSON
   reaper      one-shot sweep of idle sessions (run on a timer)
   takeover    HTTP daemon serving the human-takeover page
