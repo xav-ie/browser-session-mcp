@@ -182,15 +182,23 @@ pages that are still loading (`wait_for` itself takes CSS selectors and text
 only).
 
 `act` runs the same machinery as a server-side loop for a whole goal: each
-step is one Jev request that picks the next element — or a scroll/wait
+step is one Jev request that picks the next element — or a scroll/wait/back
 action — and simultaneously judges whether the goal is met or the page is a
 dead end (both gates at 0.85), so a multi-step flow costs seconds and
-fractions of a cent instead of a driving-LLM round trip per click. Pass
-`values` for anything to type: Jev sees only their keys and picks which
-field each belongs to; the text goes straight through CDP, never to a
-model. It returns a per-step trace, stops at `maxSteps` (default 8), and
-still fails closed — but Jev can be eager to call a goal met, so verify the
-final page yourself.
+fractions of a cent instead of a driving-LLM round trip per click. Every
+decision also sees the page's visible text (a modal's text first when one
+is open), so goals can reference content that is not a button label.
+Pass `values` for anything to type: Jev sees only their keys and picks which
+field each belongs to in the same request that picks the element; the text
+goes straight through CDP, never to a model. The loop verifies each action
+had an effect (URL or title moved), retries with Jev's next-best element
+when one does not, and validates the probability distribution of every
+answer. It returns a per-step trace and stops at `maxSteps` (default 8)
+with a status: `completed`, `stuck`, `needs_login` (a sign-in wall — pair
+it with `request_human_takeover` or `load_browser_state`), `blocked` (the
+page showed an error), or `no_progress` (repeated actions had no visible
+effect). It still fails closed — but Jev can be eager to call a goal met,
+so verify the final page yourself.
 
 Set `TYPESAFE_API_KEY` (from [console.typesafe.ai](https://console.typesafe.ai))
 to enable it. `JEV_MODEL`, `JEV_BASE_URL`, `JEV_TIMEOUT_MS`,
@@ -239,7 +247,7 @@ can type their results.
 - `take_snapshot({ sessionId })`: the accessibility tree as indented text
 
 **Acting on it** (real CDP input, not synthetic JavaScript events)
-- `act({ sessionId, goal, values?, maxSteps? })` → `{ status, goal, steps, url, title }`: a Jev-driven loop toward a goal — click, type (from `values`), select, scroll or wait per step until the goal reads met, stuck or out of budget
+- `act({ sessionId, goal, values?, maxSteps? })` → `{ status, goal, steps, url, title }`: a Jev-driven loop toward a goal — click, type (from `values`), select, scroll, wait or back per step, checking goal-met, dead-end, login and error walls each round until it finishes, gets stuck or runs out of budget
 - `click({ sessionId, selector | x,y, timeout? })`: `selector` may be plain language or a `jev:<goal>` — the Jev decision model picks the element (see [Picking elements with Jev](#picking-elements-with-jev))
 - `type({ sessionId, selector, text, delay?, clear?, timeout? })`: `selector` may be plain language or a `jev:` goal; the text itself always comes from you
 - `press_key({ sessionId, key, selector?, timeout? })`: `key` is a name (Enter, Tab, ArrowDown…) or a character; `selector` may be plain language or a `jev:` goal and is optional
