@@ -116,7 +116,7 @@ dependencies = [
  "base64 0.23.1",
  "chromiumoxide",
  "futures",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "regex",
  "reqwest",
