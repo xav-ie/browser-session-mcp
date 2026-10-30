@@ -1,4 +1,15 @@
 # Changelog
+## 0.1.15 (2026-10-30)
+
+### Features
+
+#### Bearer token for MCP over HTTP
+
+`MCP_HTTP_TOKEN` makes the HTTP mode reject any request without
+`Authorization: Bearer <token>` (401), so only the intended client can drive
+the browser even when other hosts or containers can reach the port. Unset, the
+HTTP mode accepts every request as before.
+
 ## 0.1.14 (2026-10-30)
 
 ### Features
