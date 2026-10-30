@@ -1,4 +1,22 @@
 # Changelog
+## 0.1.8 (2026-10-30)
+
+### Features
+
+#### Plain-language element selection with Jev
+
+`click`, `type`, and `press_key` selectors accept plain language, resolved by TypeSafe's Jev decision model. A `jev:<goal>` prefix goes straight to it, and with `TYPESAFE_API_KEY` set, a selector that matches nothing as CSS is retried as a plain-language goal once the timeout lapses. Jev picks from the page's interactive elements (viewport-first, capped at 240) and every miss fails closed with the original error. `JEV_FALLBACK_MIN_CONFIDENCE` (0.85) guards the automatic path and `JEV_MIN_CONFIDENCE` (0.5) the `jev:` one.
+
+### Fixes
+
+#### Dependencies refreshed
+
+A full `cargo update` — rustls 0.23.46, quinn-proto 0.11.19, getrandom 0.4 among them — clears both Rust security alerts, and pnpm overrides (`fast-uri` 3.1.9, `brace-expansion` 5.0.12) clear all twelve npm alerts. Also folds in Dependabot's schemars/syn and getrandom bumps.
+
+#### wss TLS restored
+
+A dependency update had left the crate's direct `async-tungstenite` on 0.35 while `chromiumoxide` still resolved 0.32, and cargo features never unify across versions, so browser-level `wss://` attaches failed with "TLS support not compiled in". The direct dependency is pinned back to 0.32 with a comment tying it to `chromiumoxide`'s line.
+
 ## 0.1.7 (2026-10-24)
 
 ### Fixes
