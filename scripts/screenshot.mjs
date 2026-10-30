@@ -45,7 +45,7 @@ const start = (cmd, args, env = {}) => {
 // A Chrome on a port of its own choosing, which it writes to DevToolsActivePort.
 const chrome = async (name, flags = []) => {
   const dir = path.join(tmp, name);
-  start(CHROME, ["--headless=new", "--remote-debugging-port=0", "--remote-allow-origins=*", `--user-data-dir=${dir}`, ...flags]);
+  start(CHROME, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${dir}`, ...flags]);
   const port = await until(`${name} Chrome`, async () => readFileSync(path.join(dir, "DevToolsActivePort"), "utf8").split("\n")[0]);
   return `127.0.0.1:${port}`;
 };
@@ -64,7 +64,6 @@ try {
   const env = {
     STATE_DIR: path.join(tmp, "state"),
     BROWSER_URL: `http://${session}`,
-    CHROME_WS_BASE: `ws://${session}`,
     TAKEOVER_BIND: takeover,
     TAKEOVER_BASE_URL: `http://${takeover}`,
   };

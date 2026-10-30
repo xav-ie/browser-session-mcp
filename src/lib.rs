@@ -14,6 +14,7 @@ pub mod sessions;
 pub mod snapshot;
 pub mod state;
 pub mod takeover;
+pub mod takeover_relay;
 pub mod user_agent;
 
 use anyhow::{Result, bail};

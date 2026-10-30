@@ -57,11 +57,13 @@ How it works:
    targetId) to `${STATE_DIR}/takeover/tokens/<token>.json` and returns a link,
    `${TAKEOVER_BASE_URL}/takeover/<token>`.
 2. The `browser-session-takeover` daemon serves that page. Its JavaScript opens
-   a WebSocket directly to Chrome's DevTools endpoint (`${CHROME_WS_BASE}`),
-   streams the live page via `Page.startScreencast`, and forwards the human's
-   mouse/keyboard back as CDP input.
-3. Because that WebSocket goes page→Chrome directly, credentials never pass
-   through the agent or the takeover daemon.
+   a WebSocket back to the daemon, which relays it to the tab in Chrome (only
+   with this link's claim cookie, only for the session's tabs, and only the
+   CDP methods the page needs). It streams the live page via
+   `Page.startScreencast` and forwards the human's mouse/keyboard as CDP input.
+   The socket closes on Done or when the link expires.
+3. Chrome's DevTools endpoint stays on loopback, and nothing the human types
+   reaches the agent; the daemon only passes CDP messages through.
 4. Clicking "Done" POSTs back and drops `${STATE_DIR}/takeover/done/<token>`, which
    unblocks `await_human_takeover`.
 

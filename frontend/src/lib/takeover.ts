@@ -1,6 +1,7 @@
-// Takeover client: connects straight to Chrome's DevTools WebSocket, renders the
-// screencast, forwards input, manages tabs, and relays vault autofill — all over
-// CDP. The daemon only serves this page + the /claim and /done endpoints.
+// Takeover client: speaks CDP over a WebSocket to the takeover daemon, which
+// relays it to the tab (gated on this link's claim, filtered to the session).
+// Renders the screencast, forwards input, manages tabs, and relays vault
+// autofill. The daemon also serves this page and the /claim and /done endpoints.
 
 // Token comes from the URL (/takeover/<token>) — no server-side templating.
 const TOKEN =
@@ -18,7 +19,7 @@ const toastEl = document.getElementById("toast") as HTMLElement;
 let nextId = 1;
 let lastMeta: any = null; // most recent screencastFrame metadata (for coord mapping)
 let ws: WebSocket | null = null;
-let wsBase: string | null = null; // e.g. wss://chrome.<base>
+let wsBase: string | null = null; // this daemon's relay, e.g. wss://<host>/takeover/<token>
 let ctxId: string | null = null; // this session's browserContextId — tabs filtered to it
 let currentTarget: string | null = null; // targetId currently screencast
 let getTargetsId: number | null = null;
@@ -742,7 +743,8 @@ doneBtn.addEventListener("click", async () => {
   doneBtn.disabled = true;
   setStatus("handing back to agent…", "pending");
   try {
-    await fetch("/takeover/" + TOKEN + "/done", { method: "POST" });
+    const r = await fetch("/takeover/" + TOKEN + "/done", { method: "POST" });
+    if (!r.ok) throw new Error("done failed: HTTP " + r.status);
     if (ws) {
       try {
         send("Page.stopScreencast");
@@ -804,7 +806,10 @@ async function start() {
     setStatus("no session URL returned", "err");
     return;
   }
-  wsBase = info.wsBase;
+  // The relay base is a path on this daemon; same host, ws(s) scheme.
+  const base = new URL(info.wsBase, location.href);
+  base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+  wsBase = base.href.replace(/\/$/, "");
   ctxId = info.ctxId;
   if (info.viewport && info.viewport.width > 0 && info.viewport.height > 0)
     sessionVp = info.viewport;

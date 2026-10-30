@@ -227,9 +227,6 @@
                         "--ozone-platform=headless"
                         "--disable-gpu"
                       ];
-                      # takeover asserts a non-empty chromeWsBase; the daemon only
-                      # binds + serves here (nothing connects), so a dummy suffices.
-                      takeover.chromeWsBase = "ws://127.0.0.1:9222";
                     };
 
                     # smoke.sh's harness: coproc/bash, JSON extraction, /json probe.

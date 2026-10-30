@@ -28,7 +28,7 @@ From the extracted release tarball (`browser-session-<ver>-<target>/`):
 sudo install -Dm755 browser-session /usr/local/bin/browser-session
 sudo cp -r webroot /usr/local/share/browser-session/webroot
 
-# 2. Config (edit BROWSER_URL / CHROME_WS_BASE / paths to taste)
+# 2. Config (edit BROWSER_URL / paths to taste)
 sudo install -Dm644 systemd/browser-session.env /etc/browser-session/browser-session.env
 sudo "${EDITOR:-nano}" /etc/browser-session/browser-session.env
 
