@@ -1,8 +1,13 @@
 # NixOS module for the browser-session stack: a persistent headless Chrome plus
 # the three host-side daemons (listener, reaper, takeover) that cooperate around
 # it. The MCP server itself is a stdio subprocess spawned by your MCP client /
-# proxy — it is intentionally NOT managed here; point it at `browserUrl` and the
-# shared `stateDir`.
+# proxy, or a streamable HTTP server when MCP_HTTP_BIND is set. It is
+# intentionally NOT managed here; point it at `browserUrl` and the shared
+# `stateDir`.
+#
+# To run the processes yourself (e.g. in containers), set `systemd.enable =
+# false`: the user, directories and options stay, and `chrome.command` gives
+# the exact Chrome command line the unit would have run.
 #
 # The flake exports this pre-wired as `nixosModules.default` with `package`
 # defaulted to the flake's build. Consumers set at least `chrome.package` (the
@@ -61,6 +66,17 @@ in
 
   options.services.browser-session = {
     enable = lib.mkEnableOption "the browser-session stack (isolated browser sessions over a shared Chrome)";
+
+    systemd.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Run Chrome and the listener, reaper and takeover daemons as systemd
+        units. Turn off to run them elsewhere (e.g. containers) while keeping
+        the `chrome-headless` user, the state and profile directories, and
+        `chrome.command`.
+      '';
+    };
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -146,6 +162,16 @@ in
         type = lib.types.str;
         default = "chrome-headless";
         description = "Group for the Chrome service.";
+      };
+      command = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        readOnly = true;
+        default = [ "${cfg.chrome.package}/bin/${cfg.chrome.executable}" ] ++ chromeArgs;
+        defaultText = lib.literalMD "the Chrome binary followed by the module's base flags and `chrome.extraArgs`";
+        description = ''
+          The full Chrome command line the `chrome-headless` unit runs. Read it
+          to run the same Chrome outside systemd (`systemd.enable = false`).
+        '';
       };
       extraArgs = lib.mkOption {
         type = lib.types.listOf lib.types.str;
@@ -254,7 +280,7 @@ in
           "d ${cfg.chrome.dataDir} 0750 ${cfg.chrome.user} ${cfg.chrome.group} - -"
         ];
 
-        systemd.services.chrome-headless = {
+        systemd.services.chrome-headless = lib.mkIf cfg.systemd.enable {
           description = "Persistent headless Chrome for automation";
           after = [ "network.target" ];
           wantedBy = [ "multi-user.target" ];
@@ -266,16 +292,14 @@ in
             WorkingDirectory = cfg.chrome.dataDir;
             Restart = "on-failure";
             RestartSec = 5;
-            ExecStart = lib.escapeShellArgs (
-              [ "${cfg.chrome.package}/bin/${cfg.chrome.executable}" ] ++ chromeArgs
-            );
+            ExecStart = lib.escapeShellArgs cfg.chrome.command;
           };
         };
       })
 
       # Always-on console + network capture.
       (lib.mkIf cfg.listener.enable {
-        systemd.services.browser-session-listener = {
+        systemd.services.browser-session-listener = lib.mkIf cfg.systemd.enable {
           description = "browser-session event listener (console + network → NDJSON)";
           after = lib.optional cfg.chrome.enable "chrome-headless.service";
           requires = lib.optional cfg.chrome.enable "chrome-headless.service";
@@ -296,7 +320,7 @@ in
 
       # Idle-session reaper (oneshot on a timer).
       (lib.mkIf cfg.reaper.enable {
-        systemd.services.browser-session-reaper = {
+        systemd.services.browser-session-reaper = lib.mkIf cfg.systemd.enable {
           description = "Close idle browser-session sessions";
           after = lib.optional cfg.chrome.enable "chrome-headless.service";
           requires = lib.optional cfg.chrome.enable "chrome-headless.service";
@@ -318,7 +342,7 @@ in
           };
         };
 
-        systemd.timers.browser-session-reaper = {
+        systemd.timers.browser-session-reaper = lib.mkIf cfg.systemd.enable {
           description = "Periodic reaper for browser-session";
           wantedBy = [ "timers.target" ];
           timerConfig = {
@@ -332,7 +356,7 @@ in
 
       # Human-takeover page server.
       (lib.mkIf cfg.takeover.enable {
-        systemd.services.browser-session-takeover = {
+        systemd.services.browser-session-takeover = lib.mkIf cfg.systemd.enable {
           description = "browser-session human-takeover page server";
           after = [ "network.target" ];
           wantedBy = [ "multi-user.target" ];

@@ -78,7 +78,12 @@ not manage it — point it at the same `stateDir` and `browserUrl`.)
 `package` defaults to this flake's build for the host's system. Key options:
 `stateDir`, `browserUrl`, `chrome.{enable,port,dataDir,extraArgs,environment}`,
 `listener.enable`, `reaper.{interval,maxIdleHours}`, `takeover.{address,port}`.
-Reverse-proxy/TLS routing to Chrome and the takeover daemon is left to you.
+Reverse-proxy/TLS routing to the takeover daemon is left to you.
+
+To run the processes yourself (e.g. Chrome and the daemons in containers), set
+`systemd.enable = false`. The module then defines no units but still creates the
+`chrome-headless` user and the state and profile directories, and the read-only
+`chrome.command` holds the exact Chrome command line the unit would have run.
 
 ## Running the daemons without Nix (systemd)
 
