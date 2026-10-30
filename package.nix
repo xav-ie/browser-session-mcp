@@ -31,7 +31,7 @@
   cargoProfile ? "release",
 }:
 let
-  version = "0.1.9";
+  version = "0.1.10";
 
   # Pin the pnpm hooks to pnpm 10 so the build agrees with the committed lockfile.
   pnpm10ConfigHook = pnpmConfigHook.override { pnpm = pnpm_10; };
