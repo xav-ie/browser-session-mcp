@@ -14,8 +14,13 @@
 //!      with a data-jev-id attribute (in-viewport first, cap 240 — below
 //!      Jev's 255-option Choice limit)
 //!   2. one Choice call over those ids, goal in the state string
-//!   3. act on [data-jev-id="e17"] through the same trusted-CDP path as ever
+//!   3. act on [data-jev-id="<stamp>-e17"] through the same trusted-CDP path
 //! ```
+//!
+//! The DOM stamp carries a random per-extraction token: a concurrent
+//! extraction on the same tab (another `act`, another MCP process) re-stamps
+//! the page, and a stale pick then matches nothing and fails closed instead
+//! of landing on whichever element became "e17" in the newer menu.
 //!
 //! Everything fails closed: no key configured, empty page, low confidence,
 //! malformed answer — the tool errors and the caller falls back to a CSS
@@ -44,9 +49,11 @@ const MAX_ELEMENTS: usize = 240;
 /// `[data-jev-id="eN"]` selector can only ever match an element Jev was just
 /// offered, then re-stamps in offer order: in-viewport elements first so the
 /// cap can't crowd them out on long pages. [`MAX_ELEMENTS`] is injected into
-/// the template below so the Rust and JS caps can't drift apart.
+/// the template below so the Rust and JS caps can't drift apart; the stamp
+/// token is injected per call (see [`extract_fn`]).
 const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   var MAX = __MAX_ELEMENTS__;
+  var STAMP = '__STAMP__';
   var SEL = 'a[href], button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="option"], [role="checkbox"], [role="radio"], [role="switch"], [onclick]';
   var clamp = function(s, n) {
     s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
@@ -99,7 +106,7 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   var elements = [];
   for (var j = 0; j < chosen.length; j++) {
     var id = 'e' + (j + 1);
-    chosen[j].setAttribute('data-jev-id', id);
+    chosen[j].setAttribute('data-jev-id', STAMP + '-' + id);
     var rec = { id: id, desc: describe(chosen[j]) };
     if (chosen[j].tagName === 'SELECT' && chosen[j].options) {
       var opts = [];
@@ -131,12 +138,54 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
 static EXTRACT_FN: Lazy<String> =
     Lazy::new(|| EXTRACT_FN_TEMPLATE.replace("__MAX_ELEMENTS__", &MAX_ELEMENTS.to_string()));
 
+/// The extraction script for one call, stamping with `stamp` (hex only, so
+/// it is safe inside the JS string literal).
+fn extract_fn(stamp: &str) -> String {
+    EXTRACT_FN.replace("__STAMP__", stamp)
+}
+
+/// A fresh random stamp token for one extraction.
+fn new_stamp() -> Result<String> {
+    let mut buf = [0u8; 4];
+    getrandom::fill(&mut buf).map_err(|e| anyhow!("getrandom: {e}"))?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// A cheap fingerprint of what an action could visibly change: location,
+/// title, visible text, the interactive-element count, open dialogs,
+/// expanded/checked/selected states and form values. `act` compares it
+/// before and after each action, so a modal opening, a checkbox ticking or
+/// a single-page-app re-render counts as an effect even when the URL and
+/// title stay put. Hashed in the page: form values never leave it.
+pub const FINGERPRINT_FN: &str = r#"function() {
+  var h = 2166136261;
+  var mix = function(s) {
+    s = String(s == null ? '' : s);
+    for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+    h ^= 31; h = Math.imul(h, 16777619);
+  };
+  mix(location.href);
+  mix(document.title);
+  mix(document.body ? document.body.innerText : '');
+  mix(document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"]').length);
+  var els = document.querySelectorAll('a[href], button, input, textarea, select, summary, details, [contenteditable="true"], [role], [aria-expanded], [aria-checked], [aria-selected], [aria-pressed]');
+  mix(els.length);
+  for (var k = 0; k < els.length; k++) {
+    var el = els[k];
+    mix((el.getAttribute('aria-expanded') || '') + (el.getAttribute('aria-checked') || '') +
+      (el.getAttribute('aria-selected') || '') + (el.getAttribute('aria-pressed') || '') +
+      (el.checked ? 'c' : '') + (el.open ? 'o' : '') +
+      (el.value !== undefined && el.type !== 'password' ? el.value : ''));
+  }
+  return (h >>> 0).toString(16);
+}"#;
+
 /// One resolved `jev:` goal: everything the caller needs to act and to tell
 /// the agent what was picked.
 pub struct Resolution {
-    /// The chosen element's `data-jev-id` value, e.g. "e17".
+    /// The chosen element's offered id, e.g. "e17".
     pub element_id: String,
-    /// CSS selector targeting it, e.g. `[data-jev-id="e17"]`.
+    /// CSS selector targeting it, e.g. `[data-jev-id="1a2b3c4d-e17"]`.
     pub css: String,
     /// The chosen element's compact description, for the confirmation text.
     pub description: String,
@@ -214,7 +263,8 @@ pub struct SelectOption {
 
 /// One extracted interactive element.
 pub struct Element {
-    /// Its `data-jev-id` value, e.g. "e17".
+    /// Its offered id, e.g. "e17" (the DOM stamp prefixes the extraction's
+    /// token; see [`PageInfo::css`]).
     pub id: String,
     /// Compact description, as offered to Jev.
     pub desc: String,
@@ -234,6 +284,16 @@ pub struct PageInfo {
     pub elements: Vec<Element>,
     /// Interactive elements beyond [`MAX_ELEMENTS`], not offered.
     pub omitted: usize,
+    /// This extraction's stamp token.
+    pub stamp: String,
+}
+
+impl PageInfo {
+    /// CSS selector for an element this extraction offered. Matches nothing
+    /// once a newer extraction has re-stamped the page.
+    pub fn css(&self, id: &str) -> String {
+        format!("[data-jev-id=\"{}-{id}\"]", self.stamp)
+    }
 }
 
 /// The `state` string sent to Jev: the goal, the page's identity, and the
@@ -394,9 +454,11 @@ async fn extract_with_retry(page: &Page) -> Result<PageInfo> {
     const ATTEMPTS: usize = 3;
     const PAUSE_MS: u64 = 400;
     let mut last: Option<anyhow::Error> = None;
+    let stamp = new_stamp()?;
+    let script = extract_fn(&stamp);
     for attempt in 1..=ATTEMPTS {
-        match iso_eval_function(page, EXTRACT_FN.as_str()).await {
-            Ok(raw) => match parse_extraction(&raw) {
+        match iso_eval_function(page, &script).await {
+            Ok(raw) => match parse_extraction(&raw, &stamp) {
                 Ok(info) => return Ok(info),
                 Err(e) => last = Some(e),
             },
@@ -447,7 +509,7 @@ async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resol
         "jev resolved element"
     );
     Ok(Resolution {
-        css: format!("[data-jev-id=\"{element_id}\"]"),
+        css: page_info.css(&element_id),
         description,
         confidence,
         offered: page_info.elements.len(),
@@ -888,7 +950,7 @@ async fn post_systemone(cfg: &Config, body: &Value) -> Result<Value> {
     }
 }
 
-fn parse_extraction(v: &Value) -> Result<PageInfo> {
+fn parse_extraction(v: &Value, stamp: &str) -> Result<PageInfo> {
     let url = v
         .get("url")
         .and_then(|v| v.as_str())
@@ -949,6 +1011,7 @@ fn parse_extraction(v: &Value) -> Result<PageInfo> {
         text,
         elements,
         omitted,
+        stamp: stamp.to_string(),
     })
 }
 
@@ -976,6 +1039,7 @@ mod tests {
                 },
             ],
             omitted: 3,
+            stamp: "ab12".to_string(),
         };
         let state = build_state("the login button", &page);
         assert!(state.starts_with("The agent wants to act on: \"the login button\"."));
@@ -999,6 +1063,7 @@ mod tests {
                 options: vec![],
             }],
             omitted: 0,
+            stamp: "ab12".to_string(),
         };
         let state = build_act_state(
             "search for oolong tea",
@@ -1023,6 +1088,7 @@ mod tests {
             text: "Nothing here".to_string(),
             elements: vec![],
             omitted: 0,
+            stamp: "ab12".to_string(),
         };
         let state = build_act_state("confirm we are on the empty page", &page, &[], &[]);
         assert!(state.contains("(no interactive elements were found on this page)"));
@@ -1043,6 +1109,7 @@ mod tests {
                 })
                 .collect(),
             omitted: 0,
+            stamp: "ab12".to_string(),
         };
         let criteria = act_criteria(&page);
         assert_eq!(criteria.len(), MAX_ELEMENTS + PSEUDO_ACTIONS.len());
@@ -1182,7 +1249,7 @@ mod tests {
             ],
             "omitted": 12
         });
-        let page = parse_extraction(&raw).unwrap();
+        let page = parse_extraction(&raw, "ab12").unwrap();
         assert_eq!(page.elements.len(), 3);
         assert_eq!(page.elements[0].id, "e1");
         assert_eq!(page.elements[1].options.len(), 3);
@@ -1191,6 +1258,7 @@ mod tests {
         assert!(page.elements[2].options.is_empty());
         assert_eq!(page.omitted, 12);
         assert_eq!(page.text, "Example page text");
-        assert!(parse_extraction(&json!({})).is_err());
+        assert!(parse_extraction(&json!({}), "ab12").is_err());
+        assert_eq!(page.css("e2"), "[data-jev-id=\"ab12-e2\"]");
     }
 }

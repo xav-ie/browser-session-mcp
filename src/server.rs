@@ -88,10 +88,11 @@ impl ServerHandler for BrowserSessionServer {
         match self.dispatch(name, args).await {
             Ok(result) => Ok(result.into()),
             Err(err) => {
-                // Connection-died errors mean the next call should rebuild
-                // the chromiumoxide handle from scratch.
-                if looks_like_disconnect(&err) {
-                    self.ctx.invalidate().await;
+                // A transport-level failure may mean the connection died:
+                // have the next call probe it (and reconnect only if the
+                // probe fails) rather than trust the recent-success window.
+                if is_transport_error(&err) {
+                    self.ctx.suspect().await;
                 }
                 Ok(CallToolResult::error(vec![ContentBlock::text(format!("{err:#}"))]).into())
             }
@@ -457,7 +458,10 @@ impl BrowserSessionServer {
             if d.stuck >= ACT_GATE {
                 return Ok(act_done("stuck", &goal, steps, url, title));
             }
-            if d.login >= ACT_WALL_GATE {
+            // With `values` passed, a login form may be the work itself
+            // (the caller supplied what to type), so only a value-less run
+            // treats a sign-in wall as a stop.
+            if d.login >= ACT_WALL_GATE && values.is_empty() {
                 return Ok(act_done("needs_login", &goal, steps, url, title));
             }
             if d.error >= ACT_WALL_GATE {
@@ -498,8 +502,10 @@ impl BrowserSessionServer {
             } else {
                 None
             };
+            // Snapshot what the action could change, for the effect check.
+            let before = page_fingerprint(&page).await;
             let (record, recent_line) = if let Some(el) = el {
-                let css = format!("[data-jev-id=\"{}\"]", el.id);
+                let css = d.page.css(&el.id);
                 let mut typed = None;
                 let action = if !el.options.is_empty() {
                     match jev::decide_select_option(&goal, &el.desc, &el.options).await {
@@ -583,21 +589,25 @@ impl BrowserSessionServer {
             // Wikipedia right after a navigational click). The extraction
             // retries in jev.rs cover slower transitions.
             tokio::time::sleep(Duration::from_millis(ACT_SETTLE_MS)).await;
-            // Did that action do anything visible? URL/title deltas are the
-            // cheap signal (jev-ultrafast's page-changed fingerprint, minus
-            // the DOM hashing). Typing, scrolling and waiting count as
-            // effect by definition; only surprising no-ops are the problem.
+            // Did that action do anything visible? Compare the page
+            // fingerprint (location, title, visible text, dialog, element
+            // and form state) from before and after, so modals, toggles and
+            // in-place re-renders count, not just navigation. Typing,
+            // scrolling and waiting count as effect by definition; a failed
+            // read (mid-navigation teardown) counts as a change.
             let soft_action = matches!(
                 steps.last().map(|s| s.action.as_str()),
                 Some("type") | Some("scroll_down") | Some("scroll_up") | Some("wait")
             );
-            let now = current_url_title(&page).await;
+            let after = page_fingerprint(&page).await;
             let had_effect = soft_action
-                || now.as_ref().map(|(u, _)| u != &url).unwrap_or(true)
-                || now.as_ref().map(|(_, t)| t != &title).unwrap_or(true);
-            if let Some((u, t)) = &now {
-                url = u.clone();
-                title = t.clone();
+                || match (&before, &after) {
+                    (Some(b), Some(a)) => b != a,
+                    _ => true,
+                };
+            if let Some((u, t)) = current_url_title(&page).await {
+                url = u;
+                title = t;
             }
             if d.is_element {
                 if had_effect {
@@ -1366,13 +1376,36 @@ fn ok_text_struct<T>(text: impl Into<String>, value: T) -> Structured<T> {
     }
 }
 
-fn looks_like_disconnect(err: &anyhow::Error) -> bool {
-    let msg = format!("{err:#}").to_lowercase();
-    msg.contains("connection closed")
-        || msg.contains("disconnected")
-        || msg.contains("connection refused")
-        || msg.contains("broken pipe")
-        || msg.contains("websocket")
+/// Whether Chrome itself rejected a command (a protocol error response,
+/// e.g. "Cannot find context with specified id"), as opposed to a transport
+/// failure.
+fn is_protocol_error(err: &anyhow::Error) -> bool {
+    use chromiumoxide::error::CdpError;
+    err.chain().any(|e| {
+        matches!(
+            e.downcast_ref::<CdpError>(),
+            Some(CdpError::Chrome(_) | CdpError::ChromeMessage(_))
+        )
+    })
+}
+
+/// Whether an error came off the CDP transport itself (socket, channel, no
+/// reply), judged by chromiumoxide's error type anywhere in the chain. Page
+/// errors that merely mention a websocket don't count.
+fn is_transport_error(err: &anyhow::Error) -> bool {
+    use chromiumoxide::error::CdpError;
+    err.chain().any(|e| {
+        matches!(
+            e.downcast_ref::<CdpError>(),
+            Some(
+                CdpError::Ws(_)
+                    | CdpError::Io(_)
+                    | CdpError::NoResponse
+                    | CdpError::ChannelSendError(_)
+                    | CdpError::Timeout
+            )
+        )
+    })
 }
 
 fn required_str<'a>(args: &'a JsonObject, field: &str) -> Result<&'a str> {
@@ -1430,8 +1463,8 @@ fn optional_viewport(args: &JsonObject, field: &str) -> Result<Option<Viewport>>
     Ok(Some(Viewport { width, height }))
 }
 
-/// Evaluate a JS *function declaration* in a fresh isolated world and return
-/// its JSON result.
+/// Evaluate a JS *function declaration* in the tab's isolated world and
+/// return its JSON result.
 ///
 /// Our forked chromiumoxide deliberately never sends `Runtime.enable` (the
 /// primary CDP automation tell anti-bot systems watch for), so no execution
@@ -1442,12 +1475,40 @@ fn optional_viewport(args: &JsonObject, field: &str) -> Result<Option<Viewport>>
 /// an isolated world also keeps the probe invisible to page scripts.
 /// Trade-off: page-defined `window` globals aren't visible here — but DOM,
 /// `navigator`, `document`, `location` all are, which covers our use.
+///
+/// Worlds live as long as their document, so one is created per document and
+/// reused (a fresh world per call grew renderer memory without bound under
+/// `wait_for` polling on pages that never navigate). Context ids are only
+/// unique per renderer process, so after a cross-process navigation a cached
+/// id could name a different context, even the page's main world. Each world
+/// therefore carries a random marker, and every call checks it before running
+/// anything: a missing context or a missing marker means "make a new world".
 pub(crate) async fn iso_eval_function(page: &Page, function_declaration: &str) -> Result<Value> {
     let frame_id = page
         .mainframe()
         .await?
         .ok_or_else(|| anyhow!("no main frame to evaluate in"))?;
-    let world = page
+    let key = format!("{}:{}", page.target_id().as_ref(), frame_id.as_ref());
+    let cached = ISO_WORLDS
+        .lock()
+        .expect("iso worlds lock")
+        .get(&key)
+        .cloned();
+    if let Some(world) = cached {
+        // A CDP error (context gone after a navigation) or a missing marker
+        // (the id now names another context) means stale: fall through to a
+        // fresh world. A JS result or exception is final — the code ran, and
+        // must not run twice.
+        match call_in_world(page, &world, function_declaration).await {
+            Ok(Some(outcome)) => return outcome,
+            Ok(None) => {}
+            // Chrome rejected the context id: stale. A transport error, by
+            // contrast, may have run the code already, so it propagates.
+            Err(e) if is_protocol_error(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let created = page
         .execute(
             CreateIsolatedWorldParams::builder()
                 .frame_id(frame_id)
@@ -1456,18 +1517,84 @@ pub(crate) async fn iso_eval_function(page: &Page, function_declaration: &str) -
                 .map_err(|e| anyhow!("CreateIsolatedWorld: {e}"))?,
         )
         .await?;
+    let mut buf = [0u8; 8];
+    getrandom::fill(&mut buf).map_err(|e| anyhow!("getrandom: {e}"))?;
+    let world = IsoWorld {
+        context_id: created.result.execution_context_id,
+        marker: buf.iter().map(|b| format!("{b:02x}")).collect(),
+    };
+    let mark = format!(
+        "function() {{ globalThis._{} = true; return true; }}",
+        world.marker
+    );
+    raw_call(page, world.context_id, &mark).await??;
+    {
+        let mut worlds = ISO_WORLDS.lock().expect("iso worlds lock");
+        // Entries for closed tabs are never looked up again; a coarse reset
+        // keeps the map bounded without tracking tab lifetimes here.
+        if worlds.len() >= 1024 {
+            worlds.clear();
+        }
+        worlds.insert(key, world.clone());
+    }
+    call_in_world(page, &world, function_declaration)
+        .await?
+        .ok_or_else(|| anyhow!("the new isolated world lost its marker"))?
+}
+
+/// One cached isolated world: its context id and the marker set inside it
+/// (a random global name, so even a check that lands in the page's main
+/// world reads a property no page script can know to trap).
+#[derive(Clone)]
+struct IsoWorld {
+    context_id: chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId,
+    marker: String,
+}
+
+/// Isolated worlds by `target:frame`, for [`iso_eval_function`].
+static ISO_WORLDS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<String, IsoWorld>>,
+> = once_cell::sync::Lazy::new(Default::default);
+
+/// Sentinel the marker check returns when the context isn't our world.
+const STALE_WORLD: &str = "__bsw_stale__";
+
+/// Run `decl` in `world` behind the marker check. The outer `Err` is a CDP
+/// failure; `None` means the context isn't ours (anymore), and nothing ran;
+/// `Some` carries the JS outcome, an exception as its `Err`.
+async fn call_in_world(page: &Page, world: &IsoWorld, decl: &str) -> Result<Option<Result<Value>>> {
+    let guarded = format!(
+        // Newlines around `decl`, so a trailing `// comment` in caller code
+        // can't swallow the closing paren.
+        "function() {{ if (globalThis._{marker} !== true) return '{STALE_WORLD}';\n\
+         return (\n{decl}\n).apply(this, arguments); }}",
+        marker = world.marker,
+    );
+    Ok(match raw_call(page, world.context_id, &guarded).await? {
+        Ok(Value::String(s)) if s == STALE_WORLD => None,
+        outcome => Some(outcome),
+    })
+}
+
+/// One `Runtime.callFunctionOn` by context id. The outer `Result` is the CDP
+/// call; the inner one is the JS outcome (an exception becomes `Err`).
+async fn raw_call(
+    page: &Page,
+    context_id: chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId,
+    decl: &str,
+) -> Result<Result<Value>> {
     let call = CallFunctionOnParams::builder()
-        .function_declaration(function_declaration)
-        .execution_context_id(world.result.execution_context_id)
+        .function_declaration(decl)
+        .execution_context_id(context_id)
         .await_promise(true)
         .return_by_value(true)
         .build()
         .map_err(|e| anyhow!("CallFunctionOn builder: {e}"))?;
     let resp = page.execute(call).await?;
     if let Some(exc) = resp.result.exception_details.as_ref() {
-        bail!("JS exception: {}", exc.text);
+        return Ok(Err(anyhow!("JS exception: {}", exc.text)));
     }
-    Ok(resp.result.result.value.clone().unwrap_or(Value::Null))
+    Ok(Ok(resp.result.result.value.clone().unwrap_or(Value::Null)))
 }
 
 /// Turn `evaluate` input into an async function declaration. Bare expressions
@@ -1597,7 +1724,7 @@ const ACT_SETTLE_MS: u64 = 300;
 const ACT_WALL_GATE: f64 = 0.5;
 
 /// `act` gives up as `no_progress` after this many consecutive element
-/// actions with no visible effect (no url/title change). Before then the
+/// actions with no visible effect (an unchanged page fingerprint). Before then the
 /// loop already retries with Jev's next-best option.
 const ACT_NO_EFFECT_LIMIT: usize = 3;
 
@@ -1716,9 +1843,18 @@ async fn go_back(page: &Page) -> Result<()> {
         .context("going back in history")
 }
 
-/// Read the page's current url + title for `act`'s effect checks. `None`
-/// means the read itself failed (mid-navigation teardown) — callers treat
-/// that as "something changed".
+/// [`jev::FINGERPRINT_FN`] for `act`'s effect check; `None` when the read
+/// failed (mid-navigation teardown).
+async fn page_fingerprint(page: &Page) -> Option<String> {
+    iso_eval_function(page, jev::FINGERPRINT_FN)
+        .await
+        .ok()?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Read the page's current url + title for `act`'s final report. `None`
+/// means the read itself failed (mid-navigation teardown).
 async fn current_url_title(page: &Page) -> Option<(String, String)> {
     let v = iso_eval_function(
         page,
@@ -2030,7 +2166,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "act",
-            "Act toward a goal on the session's active tab in one call: the server extracts the page's interactive elements and visible text, asks the Jev decision model for the next step, does it (click, type, select, scroll, back or wait), and repeats — until the goal reads achieved, nothing looks able to make progress, or the step budget runs out. Each step is one cheap Jev request (~150–500ms), not a driving-LLM round trip, so multi-step flows take seconds and fractions of a cent. Pass `values` (e.g. { query: \"Oolong\" }) for anything to type: Jev only sees the keys and picks which field each belongs to — the text goes straight to the page, so secrets never reach a model. Needs TYPESAFE_API_KEY; fails closed on any Jev problem, and every step lands on an element the extraction just offered. If a login wall or an error page appears, it stops early with a status saying so — pair `needs_login` with request_human_takeover or load_browser_state. Actions with no visible effect trigger a retry with Jev's next-best option before giving up as `no_progress`. Returns a per-step trace with confidences; `status` is completed, stuck, needs_login, blocked, no_progress or max_steps. Jev can be eager to call a goal met — verify with take_snapshot or take_screenshot afterwards. For a single action, click/type with a plain-language selector is cheaper.",
+            "Act toward a goal on the session's active tab in one call: the server extracts the page's interactive elements and visible text, asks the Jev decision model for the next step, does it (click, type, select, scroll, back or wait), and repeats — until the goal reads achieved, nothing looks able to make progress, or the step budget runs out. Each step is one cheap Jev request (~150–500ms), not a driving-LLM round trip, so multi-step flows take seconds and fractions of a cent. Pass `values` (e.g. { query: \"Oolong\" }) for anything to type: Jev only sees the keys and picks which field each belongs to — the text goes straight to the page, so secrets never reach a model. Needs TYPESAFE_API_KEY; fails closed on any Jev problem, and every step lands on an element the extraction just offered. If a login wall or an error page appears, it stops early with a status saying so — pair `needs_login` with request_human_takeover or load_browser_state. A run with `values` keeps going at a login form, since the caller supplied what to type. Actions with no visible effect trigger a retry with Jev's next-best option before giving up as `no_progress`. Returns a per-step trace with confidences; `status` is completed, stuck, needs_login, blocked, no_progress or max_steps. Jev can be eager to call a goal met — verify with take_snapshot or take_screenshot afterwards. For a single action, click/type with a plain-language selector is cheaper.",
             object_schema(
                 &[
                     session_id,
@@ -2523,6 +2659,20 @@ fn object_schema(props: &[(&str, &Value, &str)], required: &[&str]) -> JsonObjec
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn transport_errors_are_judged_by_type_not_text() {
+        use chromiumoxide::error::CdpError;
+        let dropped = anyhow::Error::from(CdpError::NoResponse).context("navigating");
+        assert!(is_transport_error(&dropped));
+        assert!(!is_protocol_error(&dropped));
+        // A page error that merely mentions a websocket is not a dead socket.
+        let page_err = anyhow!("JS exception: WebSocket is closed before the connection");
+        assert!(!is_transport_error(&page_err));
+        let rejected = anyhow::Error::from(CdpError::msg("Cannot find context"));
+        assert!(is_protocol_error(&rejected));
+        assert!(!is_transport_error(&rejected));
+    }
 
     #[test]
     fn tool_table_matches_definitions() {

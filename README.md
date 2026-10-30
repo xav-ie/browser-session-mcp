@@ -191,11 +191,13 @@ is open), so goals can reference content that is not a button label.
 Pass `values` for anything to type: Jev sees only their keys and picks which
 field each belongs to in the same request that picks the element; the text
 goes straight through CDP, never to a model. The loop verifies each action
-had an effect (URL or title moved), retries with Jev's next-best element
+had an effect (a fingerprint of URL, title, visible text and form state
+moved), retries with Jev's next-best element
 when one does not, and validates the probability distribution of every
 answer. It returns a per-step trace and stops at `maxSteps` (default 8)
 with a status: `completed`, `stuck`, `needs_login` (a sign-in wall — pair
-it with `request_human_takeover` or `load_browser_state`), `blocked` (the
+it with `request_human_takeover` or `load_browser_state`; skipped when
+`values` were passed, since then the caller supplied what to type), `blocked` (the
 page showed an error), or `no_progress` (repeated actions had no visible
 effect). It still fails closed — but Jev can be eager to call a goal met,
 so verify the final page yourself.
