@@ -96,7 +96,8 @@ let
     ];
     dontUseCmakeConfigure = true;
 
-    # No unit tests in the crate; skip crane's default `cargo test` phase.
+    # Unit tests run once in the flake's `checks.test` (passthru.test below),
+    # not inside every package build (the musl release included).
     doCheck = false;
   }
   # Static musl release: target musl + force the static C runtime (self-contained
@@ -140,6 +141,15 @@ craneLib.buildPackage (
       // {
         inherit cargoArtifacts;
         cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+      }
+    );
+
+    # `cargo test` over the same artifacts; the flake's `checks.test`.
+    passthru.test = craneLib.cargoTest (
+      commonArgs
+      // {
+        inherit cargoArtifacts;
+        doCheck = true;
       }
     );
 

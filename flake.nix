@@ -140,6 +140,8 @@
               build = config.packages.default;
               # `cargo clippy --all-targets -- --deny warnings`.
               clippy = config.packages.browser-session-mcp-ci.clippy;
+              # `cargo test`: redaction, path checks, Jev parsing.
+              test = config.packages.browser-session-mcp-ci.test;
               # The wss:// TLS regression of 0.1.7: our direct
               # async-tungstenite drifted from the version chromiumoxide
               # resolves, and feature unification never crosses versions —

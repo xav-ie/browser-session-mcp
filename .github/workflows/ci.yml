@@ -103,6 +103,7 @@ jobs:
           targets=(
             ".#packages.x86_64-linux.browser-session-mcp-ci"
             ".#checks.x86_64-linux.clippy"
+            ".#checks.x86_64-linux.test"
             ".#checks.x86_64-linux.deps"
             ".#checks.x86_64-linux.treefmt"
             ".#packages.x86_64-linux.systemd-units"
