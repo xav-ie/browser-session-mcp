@@ -140,6 +140,51 @@
               build = config.packages.default;
               # `cargo clippy --all-targets -- --deny warnings`.
               clippy = config.packages.browser-session-mcp-ci.clippy;
+              # The wss:// TLS regression of 0.1.7: our direct
+              # async-tungstenite drifted from the version chromiumoxide
+              # resolves, and feature unification never crosses versions —
+              # so chromiumoxide's dialer silently lost TLS. Assert the
+              # invariant the Cargo.toml comment demands: exactly one
+              # async-tungstenite in the graph, carrying the TLS stack.
+              # Parses cargo metadata against vendored deps; compiles
+              # nothing.
+              deps =
+                let
+                  craneLib = inputs.crane.mkLib pkgs;
+                  src = craneLib.cleanCargoSource ./.;
+                  cargoDeps = craneLib.vendorCargoDeps { inherit src; };
+                in
+                pkgs.runCommand "browser-session-mcp-deps-check"
+                  {
+                    nativeBuildInputs = [
+                      pkgs.cargo
+                      pkgs.jq
+                    ];
+                    meta.timeout = 300;
+                  }
+                  ''
+                    set -euo pipefail
+                    export CARGO_HOME=$(mktemp -d)
+                    # crane's vendor output is a directory of source trees +
+                    # a config.toml whose source replacements point at them
+                    # via absolute store paths — dropping the config into
+                    # CARGO_HOME is all cargo needs.
+                    cp ${cargoDeps}/config.toml "$CARGO_HOME/config.toml"
+                    cargo metadata --frozen --format-version 1 --manifest-path ${src}/Cargo.toml > metadata.json
+                    jq -e '
+                      ([.packages[] | select(.name == "async-tungstenite") | .version] | unique | length == 1)
+                      and
+                      # node ids look like "registry+…#async-tungstenite@0.32.1";
+                      # async-tungstenite renames its tokio-rustls dep
+                      # (real_tokio_rustls), so match the pkg id, not the name
+                      ([.resolve.nodes[] | select(.id | contains("#async-tungstenite@"))]
+                        | (length == 1)
+                        and ([.[0].deps[]? | select(.pkg | contains("#tokio-rustls@"))] | length >= 1))
+                    ' metadata.json > /dev/null \
+                      || { echo 'deps check: expected exactly one async-tungstenite with the tokio-rustls TLS dep — keep the direct dep in sync with chromiumoxide (see the note in Cargo.toml)'; exit 1; }
+                    cp metadata.json $out
+                    echo 'deps check: single async-tungstenite with TLS' >&2
+                  '';
             }
             # End-to-end integration test in a throwaway NixOS VM. It imports the
             # real nixos-module.nix, enables the whole stack (persistent Chrome +
