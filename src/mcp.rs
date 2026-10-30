@@ -6,7 +6,8 @@
 //! Required env: BROWSER_URL (e.g. http://localhost:9222), STATE_DIR.
 //! Optional: MCP_HTTP_BIND (e.g. 0.0.0.0:9224) serves MCP at `/mcp` on that
 //! address instead of stdio; MCP_HTTP_ALLOWED_HOSTS (comma separated) is the
-//! accepted `Host` list, loopback only by default.
+//! accepted `Host` list, loopback only by default; MCP_HTTP_TOKEN, when set,
+//! is the bearer token every HTTP request must carry.
 
 use std::sync::Arc;
 
@@ -82,6 +83,13 @@ async fn serve_http(srv: BrowserSessionServer, bind: &str) -> Result<()> {
             config.allowed_hosts = hosts;
         }
     }
+    // The HTTP port is reachable from anything on the same network, and the
+    // tools drive a logged-in browser, so a deployment can require a shared
+    // secret that only its intended client sends.
+    let token: Option<Arc<str>> = std::env::var("MCP_HTTP_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .map(Arc::from);
     let cancel = config.cancellation_token.clone();
     let service = StreamableHttpService::new(
         move || Ok(srv.clone()),
@@ -92,7 +100,7 @@ async fn serve_http(srv: BrowserSessionServer, bind: &str) -> Result<()> {
     let listener = TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding MCP_HTTP_BIND {bind}"))?;
-    tracing::info!(%bind, "serving MCP over HTTP at /mcp");
+    tracing::info!(%bind, token = token.is_some(), "serving MCP over HTTP at /mcp");
 
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("installing SIGTERM handler")?;
@@ -109,18 +117,24 @@ async fn serve_http(srv: BrowserSessionServer, bind: &str) -> Result<()> {
             _ = sigterm.recv() => break,
         };
         let service = service.clone();
+        let token = token.clone();
         tokio::spawn(async move {
             let handler = hyper::service::service_fn(move |req: http::Request<_>| {
                 let service = service.clone();
+                let token = token.clone();
                 async move {
                     Ok::<_, std::convert::Infallible>(
-                        if matches!(req.uri().path(), "/mcp" | "/mcp/") {
-                            service.handle(req).await
+                        if !matches!(req.uri().path(), "/mcp" | "/mcp/") {
+                            empty_response(http::StatusCode::NOT_FOUND)
+                        } else if !authorized(&req, token.as_deref()) {
+                            let mut denied = empty_response(http::StatusCode::UNAUTHORIZED);
+                            denied.headers_mut().insert(
+                                http::header::WWW_AUTHENTICATE,
+                                http::HeaderValue::from_static("Bearer"),
+                            );
+                            denied
                         } else {
-                            let mut not_found =
-                                http::Response::new(Full::new(Bytes::new()).boxed());
-                            *not_found.status_mut() = http::StatusCode::NOT_FOUND;
-                            not_found
+                            service.handle(req).await
                         },
                     )
                 }
@@ -136,4 +150,62 @@ async fn serve_http(srv: BrowserSessionServer, bind: &str) -> Result<()> {
     tracing::info!("shutting down");
     cancel.cancel();
     Ok(())
+}
+
+fn empty_response(
+    status: http::StatusCode,
+) -> http::Response<http_body_util::combinators::BoxBody<Bytes, std::convert::Infallible>> {
+    let mut res = http::Response::new(Full::new(Bytes::new()).boxed());
+    *res.status_mut() = status;
+    res
+}
+
+/// True when no token is configured, or the request carries
+/// `Authorization: Bearer <token>`. Compared in constant time so response
+/// timing doesn't reveal how much of a guess matched.
+fn authorized<B>(req: &http::Request<B>, token: Option<&str>) -> bool {
+    let Some(token) = token else { return true };
+    let Some(given) = req
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return false;
+    };
+    given.len() == token.len()
+        && given
+            .bytes()
+            .zip(token.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authorized;
+
+    fn req(auth: Option<&str>) -> http::Request<()> {
+        let mut b = http::Request::builder().uri("/mcp");
+        if let Some(a) = auth {
+            b = b.header(http::header::AUTHORIZATION, a);
+        }
+        b.body(()).unwrap()
+    }
+
+    #[test]
+    fn no_token_configured_allows_everything() {
+        assert!(authorized(&req(None), None));
+    }
+
+    #[test]
+    fn token_must_match_exactly() {
+        let t = Some("s3cret");
+        assert!(authorized(&req(Some("Bearer s3cret")), t));
+        assert!(!authorized(&req(None), t));
+        assert!(!authorized(&req(Some("Bearer s3cre")), t));
+        assert!(!authorized(&req(Some("Bearer s3cret2")), t));
+        assert!(!authorized(&req(Some("Bearer S3CRET")), t));
+        assert!(!authorized(&req(Some("s3cret")), t));
+    }
 }
