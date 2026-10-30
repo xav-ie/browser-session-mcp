@@ -7,6 +7,7 @@ settings:
 overrides:
   fast-uri: ^3.1.9
   brace-expansion: ^5.0.12
+  postcss-selector-parser: ^7.1.6
 
 importers:
 
@@ -1720,8 +1721,8 @@ packages:
     resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
     engines: {node: '>=12'}
 
-  postcss-selector-parser@7.1.4:
-    resolution: {integrity: sha512-HeP7D2wyhkR+XaK6v4W8oRF62Dsz4flyuczALJp61GckGm42u1saSSJ/0auvcBqxs3jMRFEcPK34At/0JBKdOg==}
+  postcss-selector-parser@7.1.7:
+    resolution: {integrity: sha512-wWBro/7hJ40ye6TPiXkUQoXKCw23xSsjriUvqd7Uls9Sso3oLiON1flc18cCdnjgCRXw4fBVqUJJeOdDTh3P3g==}
     engines: {node: '>=4'}
 
   postcss@8.5.31:
@@ -3437,7 +3438,7 @@ snapshots:
       espree: 11.2.0
       globals: 17.13.0
       postcss: 8.5.31
-      postcss-selector-parser: 7.1.4
+      postcss-selector-parser: 7.1.7
       synckit: 0.11.13
     optionalDependencies:
       '@typescript-eslint/parser': 8.71.1(eslint@10.12.0)(typescript@6.0.3)
@@ -3858,7 +3859,7 @@ snapshots:
 
   picomatch@4.0.7: {}
 
-  postcss-selector-parser@7.1.4:
+  postcss-selector-parser@7.1.7:
     dependencies:
       cssesc: 3.0.0
       util-deprecate: 1.0.2
