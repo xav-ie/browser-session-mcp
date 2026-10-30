@@ -544,6 +544,12 @@ impl BrowserSessionServer {
             };
             steps.push(record);
             recent.push(recent_line);
+            // Give the page a beat to react before deciding again: a click
+            // that navigates tears the document down mid-flight, and the
+            // next extraction would run against a dying DOM (seen live on
+            // Wikipedia right after a navigational click). The extraction
+            // retries in jev.rs cover slower transitions.
+            tokio::time::sleep(Duration::from_millis(ACT_SETTLE_MS)).await;
         }
         Ok(act_done("max_steps", &goal, steps, url, title))
     }
@@ -1515,6 +1521,10 @@ async fn resolve_and_wait(
 /// that no action can make progress — must cross this before the loop stops
 /// on it. 0.85 matches what the jev-browser reference uses for both gates.
 const ACT_GATE: f64 = 0.85;
+
+/// Pause between executed `act` steps so the page can settle (navigation,
+/// form submits) before the next extraction.
+const ACT_SETTLE_MS: u64 = 300;
 
 /// Compact one-line step history for `act` error messages, so a mid-loop
 /// failure still tells the caller what already happened.

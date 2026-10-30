@@ -301,12 +301,35 @@ pub async fn resolve_fallback(page: &Page, goal: &str) -> Result<Resolution> {
     resolve_with_floor(page, goal, floor).await
 }
 
+/// Run the DOM extraction with a few retries. Right after an executed
+/// action the page may be mid-navigation — the previous document tearing
+/// down, or the next one not yet interactive — and the injected call can
+/// throw or return a half-built DOM for a moment. A short pause-and-retry
+/// rides those races out; only a page that stays broken errors. An empty
+/// (but parsed) result is returned as-is: "nothing interactive" is a real
+/// answer the callers handle themselves.
+async fn extract_with_retry(page: &Page) -> Result<PageInfo> {
+    const ATTEMPTS: usize = 3;
+    const PAUSE_MS: u64 = 400;
+    let mut last: Option<anyhow::Error> = None;
+    for attempt in 1..=ATTEMPTS {
+        match iso_eval_function(page, EXTRACT_FN.as_str()).await {
+            Ok(raw) => match parse_extraction(&raw) {
+                Ok(info) => return Ok(info),
+                Err(e) => last = Some(e),
+            },
+            Err(e) => last = Some(anyhow!("{e:#}")),
+        }
+        if attempt < ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(PAUSE_MS)).await;
+        }
+    }
+    Err(last.expect("at least one attempt ran")).context("extracting interactive elements")
+}
+
 async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resolution> {
     let cfg = config()?;
-    let raw = iso_eval_function(page, EXTRACT_FN.as_str())
-        .await
-        .map_err(|e| anyhow!("extracting interactive elements: {e:#}"))?;
-    let page_info = parse_extraction(&raw)?;
+    let page_info = extract_with_retry(page).await?;
     if page_info.elements.is_empty() {
         bail!("no interactive elements found on the page — navigate or wait_for content first");
     }
@@ -449,10 +472,7 @@ pub async fn decide_step(
     value_keys: &[String],
 ) -> Result<StepDecision> {
     let cfg = config()?;
-    let raw = iso_eval_function(page, EXTRACT_FN.as_str())
-        .await
-        .map_err(|e| anyhow!("extracting interactive elements: {e:#}"))?;
-    let page_info = parse_extraction(&raw)?;
+    let page_info = extract_with_retry(page).await?;
     if page_info.elements.is_empty() {
         bail!("no interactive elements found on the page — navigate or wait_for content first");
     }

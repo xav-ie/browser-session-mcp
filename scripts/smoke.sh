@@ -107,10 +107,11 @@ fi
 # the "Log in" button; "bogus" -> answer with an unknown id (fail-closed
 # validation); "unsure" -> confidence 0.2 (the confidence floor). act
 # requests carry goal_met/stuck questions: it picks whichever element the
-# goal names ("name"/"color", or the "Do it" button once one thing is typed),
-# answers goal_met 0.97 once the title says act-done, stuck 0.97 for
-# "impossible" goals, and second-stage value/option requests (criteria with
-# __none__) pick "name" or "Blue".
+# goal names ("name"/"color"/"next", or the "Do it" button once one thing is
+# typed), answers goal_met 0.97 once the title says act-done or the page is
+# the post-navigation "page-two", stuck 0.97 for "impossible" goals, and
+# second-stage value/option requests (criteria with __none__) pick "name"
+# or "Blue".
 
 JEV_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 python3 - "$JEV_PORT" >"$TMP/jev-stub.log" 2>&1 <<'PY' &
@@ -138,10 +139,12 @@ class Handler(BaseHTTPRequestHandler):
                 marker = "color"
             elif "1. type" in state:
                 marker = "do it"
+            elif "next" in first:
+                marker = "next"
             else:
                 marker = "name"
             choice = next((k for k in order if marker in descs[k]), order[0])
-            done = "act-done" in state.lower()
+            done = "act-done" in state.lower() or "page-two" in state.lower()
             stuck = "impossible" in first
             answers = {
                 "element": {"choice": choice, "confidence": conf,
@@ -444,6 +447,14 @@ check "act: the select really changed" "$(call evaluate "$(printf '{"sessionId":
 check "act: reset title before the stuck goal" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title = %s"}' "$SID" "'reset'")")" 'reset'
 
 check "act: a stuck goal stops without acting" "$(call act "$(printf '{"sessionId":"%s","goal":"do an impossible thing"}' "$SID")")" 'Stuck after 0 steps'
+
+# A click that navigates: the loop must survive the document teardown
+# between step 1's click and step 2's extraction (settle pause + retries).
+NAV_URL="data:text/html,<title>page-one</title><a id=next-link href=data:text/html,%3Ctitle%3Epage-two%3C/title%3E%3Cbutton%3EDone%3C/button%3E>Next%20page</a>"
+check "act: navigate to the link page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$NAV_URL")")" 'Navigated to'
+ACT_NAV=$(call act "$(printf '{"sessionId":"%s","goal":"open the next page"}' "$SID")")
+check "act: survives a navigational click" "$ACT_NAV" 'Completed the goal in 1 step'
+check "act: really landed on page two" "$ACT_NAV" 'page-two'
 
 # ---- close ---------------------------------------------------------------
 
