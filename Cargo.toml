@@ -51,12 +51,11 @@ anyhow = "1"
 regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# TLS is required: production BROWSER_URL is https://chrome.<domain> behind
-# Traefik (Chrome itself binds 127.0.0.1:9222, so the mcp-proxy container has
-# no plaintext route to it). We need TLS for both reqwest (/json/version
-# probe) and for async-tungstenite (the wss:// CDP upgrade) — the latter is
-# pulled in transitively by chromiumoxide and we activate its TLS feature
-# by adding it as a direct dep here.
+# TLS for the Jev API (https), and for a BROWSER_URL that points at Chrome
+# behind a TLS reverse proxy: reqwest makes the /json/version probe and
+# async-tungstenite the wss:// CDP upgrade. The latter is pulled in
+# transitively by chromiumoxide; listing it as a direct dep here is what
+# activates its TLS feature.
 reqwest = { version = "0.13", default-features = false, features = [
   "json",
   "rustls",
