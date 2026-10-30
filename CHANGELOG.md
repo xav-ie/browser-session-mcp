@@ -1,4 +1,28 @@
 # Changelog
+## 0.1.10 (2026-10-30)
+
+### Features
+
+#### Jev improvements: page text, effect checks, speculative values
+
+Every Jev decision now sees the page's visible text (modals first), so
+goals can reference content that is not a label. The act loop verifies
+each action had an effect, retries with Jev's next-best element when one
+does not, and validates answer probability distributions. Form steps get
+a speculative value-key question in the same round trip. Also: selects
+match by option index instead of truncated labels, a back pseudo-action,
+login/error walls surface as needs_login/blocked statuses, and empty
+pages answer goal-met instead of erroring.
+
+### Fixes
+
+#### act survives navigation races
+
+A click that triggers navigation tore the document down before the next
+step's DOM extraction ran, failing the whole loop one step from success.
+The loop now pauses briefly after each executed action, and extraction
+retries a couple of times before giving up.
+
 ## 0.1.9 (2026-10-30)
 
 ### Features
