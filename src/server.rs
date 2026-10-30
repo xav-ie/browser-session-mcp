@@ -439,6 +439,9 @@ impl BrowserSessionServer {
         let mut recent: Vec<String> = Vec::new();
         let mut url = String::new();
         let mut title = String::new();
+        let mut no_effect = 0usize;
+        let mut last_element: Option<String> = None;
+        let mut last_had_effect = false;
         for step in 1..=max_steps {
             let d = match jev::decide_step(&page, &goal, &recent, &keys).await {
                 Ok(d) => d,
@@ -454,6 +457,19 @@ impl BrowserSessionServer {
             if d.stuck >= ACT_GATE {
                 return Ok(act_done("stuck", &goal, steps, url, title));
             }
+            if d.login >= ACT_WALL_GATE {
+                return Ok(act_done("needs_login", &goal, steps, url, title));
+            }
+            if d.error >= ACT_WALL_GATE {
+                return Ok(act_done("blocked", &goal, steps, url, title));
+            }
+            if !d.has_elements {
+                bail!(
+                    "no interactive elements found on the page — navigate or wait_for \
+                     content first; {}",
+                    trail(&steps)
+                );
+            }
             if d.confidence < floor {
                 bail!(
                     "act stopped at step {step}: confidence for `{}` was only {:.2} \
@@ -464,51 +480,61 @@ impl BrowserSessionServer {
                     trail(&steps)
                 );
             }
+            // No-effect recovery: if Jev re-picks the element that just did
+            // nothing, switch to the next-best element from the same
+            // answer's probability ranking (jev-browser's recovery move).
+            let mut chosen = d.chosen.clone();
+            let mut switched = false;
+            if last_element.as_deref() == Some(d.chosen.as_str()) && !last_had_effect {
+                if let Some((alt, _)) = &d.next_best {
+                    if alt != &d.chosen {
+                        chosen = alt.clone();
+                        switched = true;
+                    }
+                }
+            }
             let el = if d.is_element {
-                d.page.elements.iter().find(|e| e.id == d.chosen)
+                d.page.elements.iter().find(|e| e.id == chosen)
             } else {
                 None
             };
             let (record, recent_line) = if let Some(el) = el {
                 let css = format!("[data-jev-id=\"{}\"]", el.id);
-                let (action, typed) = if !el.options.is_empty() {
+                let mut typed = None;
+                let action = if !el.options.is_empty() {
                     match jev::decide_select_option(&goal, &el.desc, &el.options).await {
-                        Ok(Some((opt, _))) => {
-                            set_select_option(&page, &css, &opt).await?;
-                            ("select".to_string(), None)
+                        Ok(Some((i, label, _))) => {
+                            set_select_option(&page, &css, i, &label).await?;
+                            "select".to_string()
                         }
                         Ok(None) => {
                             click_label(&page, &css, &el.desc).await?;
-                            ("click".to_string(), None)
+                            "click".to_string()
                         }
                         Err(e) => bail!(
                             "act failed choosing an option at step {step}: {e:#}; {}",
                             trail(&steps)
                         ),
                     }
-                } else if jev::is_text_field(&el.desc) && !values.is_empty() {
-                    match jev::decide_value_key(&goal, &el.desc, &keys).await {
-                        Ok(Some((key, _))) => {
-                            let text = values
-                                .iter()
-                                .find(|(k, _)| *k == key)
-                                .map(|(_, v)| v.clone())
-                                .unwrap_or_default();
-                            type_into(&page, &css, &text).await?;
-                            ("type".to_string(), Some(key))
-                        }
-                        Ok(None) => {
+                } else if jev::is_text_field(&el.desc) {
+                    // The value choice already rode the step's fan-out
+                    // request; a missing or low-confidence pick just clicks.
+                    if let Some(key) = &d.value_key {
+                        if let Some((_, text)) = values.iter().find(|(k, _)| k == key) {
+                            type_into(&page, &css, text).await?;
+                            typed = Some(key.clone());
+                            "type".to_string()
+                        } else {
                             click_label(&page, &css, &el.desc).await?;
-                            ("click".to_string(), None)
+                            "click".to_string()
                         }
-                        Err(e) => bail!(
-                            "act failed choosing a value at step {step}: {e:#}; {}",
-                            trail(&steps)
-                        ),
+                    } else {
+                        click_label(&page, &css, &el.desc).await?;
+                        "click".to_string()
                     }
                 } else {
                     click_label(&page, &css, &el.desc).await?;
-                    ("click".to_string(), None)
+                    "click".to_string()
                 };
                 (
                     ActStep {
@@ -526,6 +552,7 @@ impl BrowserSessionServer {
                 match d.chosen.as_str() {
                     "scroll_down" => scroll_viewport(&page, 0.8).await?,
                     "scroll_up" => scroll_viewport(&page, -0.8).await?,
+                    "back" => go_back(&page).await?,
                     "wait" => tokio::time::sleep(Duration::from_millis(500)).await,
                     other => bail!("Jev chose `{other}`, which is not one of the offered actions"),
                 }
@@ -544,12 +571,50 @@ impl BrowserSessionServer {
             };
             steps.push(record);
             recent.push(recent_line);
+            if switched {
+                recent
+                    .last_mut()
+                    .expect("just pushed")
+                    .push_str(" (next-best after the previous action had no effect)");
+            }
             // Give the page a beat to react before deciding again: a click
             // that navigates tears the document down mid-flight, and the
             // next extraction would run against a dying DOM (seen live on
             // Wikipedia right after a navigational click). The extraction
             // retries in jev.rs cover slower transitions.
             tokio::time::sleep(Duration::from_millis(ACT_SETTLE_MS)).await;
+            // Did that action do anything visible? URL/title deltas are the
+            // cheap signal (jev-ultrafast's page-changed fingerprint, minus
+            // the DOM hashing). Typing, scrolling and waiting count as
+            // effect by definition; only surprising no-ops are the problem.
+            let soft_action = matches!(
+                steps.last().map(|s| s.action.as_str()),
+                Some("type") | Some("scroll_down") | Some("scroll_up") | Some("wait")
+            );
+            let now = current_url_title(&page).await;
+            let had_effect = soft_action
+                || now.as_ref().map(|(u, _)| u != &url).unwrap_or(true)
+                || now.as_ref().map(|(_, t)| t != &title).unwrap_or(true);
+            if let Some((u, t)) = &now {
+                url = u.clone();
+                title = t.clone();
+            }
+            if d.is_element {
+                if had_effect {
+                    no_effect = 0;
+                } else {
+                    no_effect += 1;
+                    recent
+                        .last_mut()
+                        .expect("just pushed")
+                        .push_str(" (no visible effect)");
+                }
+                last_element = Some(chosen.clone());
+                last_had_effect = had_effect;
+                if no_effect >= ACT_NO_EFFECT_LIMIT {
+                    return Ok(act_done("no_progress", &goal, steps, url, title));
+                }
+            }
         }
         Ok(act_done("max_steps", &goal, steps, url, title))
     }
@@ -1526,6 +1591,16 @@ const ACT_GATE: f64 = 0.85;
 /// form submits) before the next extraction.
 const ACT_SETTLE_MS: u64 = 300;
 
+/// `act` wall gates: login walls and error pages usually read clearly off
+/// the visible text, so a coin-flip probability is enough to stop and
+/// report instead of clicking around a wall we can't pass.
+const ACT_WALL_GATE: f64 = 0.5;
+
+/// `act` gives up as `no_progress` after this many consecutive element
+/// actions with no visible effect (no url/title change). Before then the
+/// loop already retries with Jev's next-best option.
+const ACT_NO_EFFECT_LIMIT: usize = 3;
+
 /// Compact one-line step history for `act` error messages, so a mid-loop
 /// failure still tells the caller what already happened.
 fn trail(steps: &[ActStep]) -> String {
@@ -1552,14 +1627,48 @@ fn act_done(
     title: String,
 ) -> Structured<ActOut> {
     let n = steps.len();
-    let verdict = match status {
-        "completed" if n == 0 => "Goal was already met".to_string(),
-        "completed" => format!("Completed the goal in {n} step{}", plural(n)),
-        "stuck" => format!("Stuck after {n} step{}", plural(n)),
-        _ => format!("Stopped at maxSteps with {n} step{} taken", plural(n)),
+    let (verdict, hint) = match status {
+        "completed" if n == 0 => ("Goal was already met".to_string(), None),
+        "completed" => (
+            format!("Completed the goal in {n} step{}", plural(n)),
+            Some("Jev can be eager to call a goal met — verify the page."),
+        ),
+        "stuck" => (
+            format!("Stuck after {n} step{}", plural(n)),
+            Some("Nothing on the page looked able to make progress; take_snapshot and reconsider."),
+        ),
+        "needs_login" => (
+            format!(
+                "Stopped after {n} step{}: a sign-in wall is blocking the goal",
+                plural(n)
+            ),
+            Some("Call request_human_takeover, or load a saved login with load_browser_state."),
+        ),
+        "blocked" => (
+            format!(
+                "Stopped after {n} step{}: the page showed an error message",
+                plural(n)
+            ),
+            Some("Check list_console_messages / list_network_requests for what failed."),
+        ),
+        "no_progress" => (
+            format!(
+                "Stopped after {n} step{}: the last actions had no visible effect",
+                plural(n)
+            ),
+            Some("The page may need a scroll, a wait, or a different goal phrasing."),
+        ),
+        _ => (
+            format!("Stopped at maxSteps with {n} step{} taken", plural(n)),
+            Some("Increase maxSteps or continue the goal in a follow-up call."),
+        ),
+    };
+    let text = match hint {
+        Some(h) => format!("{verdict}. {h}"),
+        None => verdict,
     };
     ok_text_struct(
-        format!("{verdict}. Jev can be eager to call a goal met — verify the page."),
+        text,
         ActOut {
             status: status.to_string(),
             goal: goal.to_string(),
@@ -1580,23 +1689,46 @@ async fn scroll_viewport(page: &Page, fraction: f64) -> Result<()> {
     Ok(())
 }
 
-/// Set a `<select>` to the option with `label`, firing input/change so page
+/// Set a `<select>` to its option at `index`, firing input/change so page
 /// scripts observe it. The element is targeted by its just-stamped
-/// `data-jev-id`, i.e. still an id Jev was offered.
-async fn set_select_option(page: &Page, css: &str, label: &str) -> Result<()> {
+/// `data-jev-id`, and the option by index — labels are clamped to 60 chars
+/// for Jev, so matching on text could miss long ones.
+async fn set_select_option(page: &Page, css: &str, index: u64, label: &str) -> Result<()> {
     let decl = format!(
         "function() {{ const el = document.querySelector({css}); if (!el) return false; \
-         for (const o of el.options) {{ if (o.label === {label}) {{ el.value = o.value; \
+         const o = el.options[{index}]; if (!o) return false; el.value = o.value; \
          el.dispatchEvent(new Event('input', {{bubbles: true}})); \
-         el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }} }} return false; }}",
+         el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }}",
         css = serde_json::to_string(css).unwrap_or_else(|_| "''".to_string()),
-        label = serde_json::to_string(label).unwrap_or_else(|_| "''".to_string())
     );
     let v = iso_eval_function(page, &decl).await?;
     if v.as_bool() != Some(true) {
-        bail!("option {label:?} is not in the dropdown");
+        bail!("option {index} ({label:?}) is not in the dropdown");
     }
     Ok(())
+}
+
+/// Go back one entry in history — `act`'s `back` pseudo-action.
+async fn go_back(page: &Page) -> Result<()> {
+    iso_eval_function(page, "function() { history.back(); return true; }")
+        .await
+        .map(|_| ())
+        .context("going back in history")
+}
+
+/// Read the page's current url + title for `act`'s effect checks. `None`
+/// means the read itself failed (mid-navigation teardown) — callers treat
+/// that as "something changed".
+async fn current_url_title(page: &Page) -> Option<(String, String)> {
+    let v = iso_eval_function(
+        page,
+        "function() { return location.href + ' ~~ ' + document.title; }",
+    )
+    .await
+    .ok()?;
+    let s = v.as_str()?;
+    let (url, title) = s.split_once(" ~~ ")?;
+    Some((url.to_string(), title.to_string()))
 }
 
 /// Click an element's center through trusted CDP input, naming `label` in
@@ -1898,7 +2030,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "act",
-            "Act toward a goal on the session's active tab in one call: the server extracts the page's interactive elements, asks the Jev decision model for the next step, does it (click, type, select, scroll or wait), and repeats — until the goal reads achieved, nothing looks able to make progress, or the step budget runs out. Each step is one cheap Jev request (~150–500ms), not a driving-LLM round trip, so multi-step flows take seconds and fractions of a cent. Pass `values` (e.g. { query: \"Oolong\" }) for anything to type: Jev only sees the keys and picks which field each belongs to — the text goes straight to the page, so secrets never reach a model. Needs TYPESAFE_API_KEY; fails closed on any Jev problem, and every step lands on an element the extraction just offered. Returns a per-step trace with confidences; `status` is completed, stuck or max_steps. Jev can be eager to call a goal met — verify with take_snapshot or take_screenshot afterwards. For a single action, click/type with a plain-language selector is cheaper.",
+            "Act toward a goal on the session's active tab in one call: the server extracts the page's interactive elements and visible text, asks the Jev decision model for the next step, does it (click, type, select, scroll, back or wait), and repeats — until the goal reads achieved, nothing looks able to make progress, or the step budget runs out. Each step is one cheap Jev request (~150–500ms), not a driving-LLM round trip, so multi-step flows take seconds and fractions of a cent. Pass `values` (e.g. { query: \"Oolong\" }) for anything to type: Jev only sees the keys and picks which field each belongs to — the text goes straight to the page, so secrets never reach a model. Needs TYPESAFE_API_KEY; fails closed on any Jev problem, and every step lands on an element the extraction just offered. If a login wall or an error page appears, it stops early with a status saying so — pair `needs_login` with request_human_takeover or load_browser_state. Actions with no visible effect trigger a retry with Jev's next-best option before giving up as `no_progress`. Returns a per-step trace with confidences; `status` is completed, stuck, needs_login, blocked, no_progress or max_steps. Jev can be eager to call a goal met — verify with take_snapshot or take_screenshot afterwards. For a single action, click/type with a plain-language selector is cheaper.",
             object_schema(
                 &[
                     session_id,

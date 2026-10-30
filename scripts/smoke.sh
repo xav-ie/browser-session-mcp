@@ -105,13 +105,19 @@ fi
 # the act loop. Cues it reads from the state's first line (the element menu
 # below it mentions every marker too): "email" -> pick the input, otherwise
 # the "Log in" button; "bogus" -> answer with an unknown id (fail-closed
-# validation); "unsure" -> confidence 0.2 (the confidence floor). act
-# requests carry goal_met/stuck questions: it picks whichever element the
-# goal names ("name"/"color"/"next", or the "Do it" button once one thing is
-# typed), answers goal_met 0.97 once the title says act-done or the page is
-# the post-navigation "page-two", stuck 0.97 for "impossible" goals, and
-# second-stage value/option requests (criteria with __none__) pick "name"
-# or "Blue".
+# validation); "unsure" -> confidence 0.2 with no probabilities (the
+# confidence floor; distribution validation is skipped by design). act
+# requests carry goal_met/stuck/login/error questions: it picks whichever
+# element the goal names ("name"/"color"/"next"/"dead", the "back" pseudo
+# action for back/previous goals, or the "Do it" button once one thing is
+# typed), answers goal_met 0.97 once the Page title reads act-done /
+# page-two / empty-page (or page-one for a back goal — the title is parsed
+# out of the Page line so cue words can't leak in through element hrefs),
+# stuck 0.97 for "impossible" goals, login 0.97 on a "sign-in wall" title,
+# error 0.97 on an "error page" title, the speculative value_key question picks "name", and
+# second-stage <select> requests (criteria with __none__) pick the blue
+# option. Choice answers carry full probability distributions (sum 1) so
+# the server's validation and next-best ranking are exercised.
 
 JEV_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 python3 - "$JEV_PORT" >"$TMP/jev-stub.log" 2>&1 <<'PY' &
@@ -123,54 +129,100 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         state = body.get("state", "")
         first = state.split("\n")[0].lower()
-        criteria = body["questions"]["element"]["criteria"]
-        conf = 0.91
-        if "__none__" in criteria:
-            # second-stage act request: which value to type / option to pick
-            choice = "name" if "name" in criteria else "Blue"
-            answers = {"element": {"choice": choice, "confidence": conf,
-                                   "probabilities": {choice: conf}}}
-        elif "goal_met" in body["questions"]:
-            # act loop step: one Choice plus goal-met / stuck Nouls
-            order = sorted((k for k in criteria if k.startswith("e")),
-                           key=lambda k: int(k[1:]))
-            descs = {k: str(criteria[k]).lower() for k in order}
-            if "color" in first or "blue" in first:
-                marker = "color"
-            elif "1. type" in state:
-                marker = "do it"
-            elif "next" in first:
-                marker = "next"
+        low = state.lower()
+        questions = body["questions"]
+        answers = {}
+
+        # The element Choice, whenever the request carries one.
+        if "element" in questions:
+            criteria = questions["element"]["criteria"]
+            if "goal_met" not in questions and "__none__" in criteria:
+                # second-stage <select> pick: the option mentioning blue
+                keys = sorted((k for k in criteria if k.startswith("o")),
+                              key=lambda k: int(k[1:]))
+                choice = next((k for k in keys if "blue" in str(criteria[k]).lower()),
+                              keys[0])
+                answers["element"] = {"choice": choice, "confidence": 0.91,
+                                      "probabilities": {choice: 0.91,
+                                                        "__none__": 0.09}}
+            elif "goal_met" in questions:
+                # act loop step
+                order = sorted((k for k in criteria if k.startswith("e")),
+                               key=lambda k: int(k[1:]))
+                descs = {k: str(criteria[k]).lower() for k in order}
+                if "color" in first or "blue" in first:
+                    marker = "color"
+                elif "1. type" in state:
+                    marker = "do it"
+                elif "next" in first:
+                    marker = "next"
+                elif "back" in first or "previous" in first:
+                    marker = None
+                elif "dead" in first:
+                    marker = "dead"
+                else:
+                    marker = "name"
+                if marker is None:
+                    choice = "back"
+                else:
+                    choice = next((k for k in order if marker in descs[k]), order[0])
+                other = next((k for k in criteria if k != choice), None)
+                probs = {choice: 0.91}
+                if other:
+                    probs[other] = 0.09
+                answers["element"] = {"choice": choice, "confidence": 0.91,
+                                      "probabilities": probs}
             else:
-                marker = "name"
-            choice = next((k for k in order if marker in descs[k]), order[0])
-            # Parse the title out of the Page line so cue words can't leak in
-            # through element hrefs (the nav link's data: href mentions
-            # page-two while still on page one).
+                # plain jev:/fallback resolve; the unsure and bogus paths
+                # deliberately carry no probabilities so distribution
+                # validation is skipped and the floor/valid-id checks fire
+                goal = first
+                if "unsure" in goal:
+                    order = sorted(criteria, key=lambda k: int(k[1:]))
+                    answers["element"] = {"choice": order[0], "confidence": 0.2}
+                elif "bogus" in goal:
+                    answers["element"] = {"choice": "e999", "confidence": 0.91}
+                else:
+                    marker = "email" if "email" in goal else "log in"
+                    order = sorted(criteria, key=lambda k: int(k[1:]))
+                    choice = next((k for k in order if marker in criteria[k].lower()),
+                                  order[0])
+                    other = next((k for k in criteria if k != choice), None)
+                    probs = {choice: 0.91}
+                    if other:
+                        probs[other] = 0.09
+                    answers["element"] = {"choice": choice, "confidence": 0.91,
+                                          "probabilities": probs}
+
+        # The act loop's parallel questions. Cues read the Page line's
+        # TITLE only — matching against the whole state would fire on cue
+        # words that leak into element hrefs and the visible-text block.
+        if "goal_met" in questions:
             title = ""
             for line in state.split("\n"):
                 if line.startswith("Page: "):
                     title = line[6:].split(" — ", 1)[-1].lower()
                     break
-            done = "act-done" in title or title == "page-two"
-            stuck = "impossible" in first
-            answers = {
-                "element": {"choice": choice, "confidence": conf,
-                            "probabilities": {choice: conf}},
-                "goal_met": {"noul": 0.97 if done else 0.02},
-                "stuck": {"noul": 0.97 if stuck else 0.02},
-            }
-        else:
-            goal = first
-            conf = 0.2 if "unsure" in goal else 0.91
-            if "bogus" in goal:
-                choice = "e999"
+            if "back" in first or "previous" in first:
+                done = title == "page-one"
+            elif "confirm" in first:
+                done = "empty-page" in title
             else:
-                marker = "email" if "email" in goal else "log in"
-                order = sorted(criteria, key=lambda k: int(k[1:]))
-                choice = next((k for k in order if marker in criteria[k].lower()), order[0])
-            answers = {"element": {"choice": choice, "confidence": conf,
-                                   "probabilities": {choice: conf}}}
+                done = "act-done" in title or title == "page-two"
+            answers["goal_met"] = {"noul": 0.97 if done else 0.02}
+            answers["stuck"] = {"noul": 0.97 if "impossible" in first else 0.02}
+            answers["login"] = {"noul": 0.97 if "sign-in wall" in title else 0.02}
+            answers["error"] = {"noul": 0.97 if "error page" in title else 0.02}
+            if "value_key" in questions:
+                vkeys = questions["value_key"]["criteria"]
+                vchoice = "name" if "name" in vkeys else "__none__"
+                vother = next((k for k in vkeys if k != vchoice), None)
+                vprobs = {vchoice: 0.91}
+                if vother:
+                    vprobs[vother] = 0.09
+                answers["value_key"] = {"choice": vchoice, "confidence": 0.91,
+                                        "probabilities": vprobs}
+
         resp = json.dumps({
             "model": "jev-stub",
             "answers": answers,
@@ -466,6 +518,36 @@ check "act: wire a real navigation target" "$(call evaluate "$(printf '{"session
 ACT_NAV=$(call act "$(printf '{"sessionId":"%s","goal":"open the next page"}' "$SID")")
 check "act: survives a navigational click" "$ACT_NAV" 'Completed the goal in 1 step'
 check "act: really landed on page two" "$ACT_NAV" 'page-two'
+
+# The back pseudo-action: returning to page-one completes the back goal.
+ACT_BACK=$(call act "$(printf '{"sessionId":"%s","goal":"go back to the previous page"}' "$SID")")
+check "act: goes back a page" "$ACT_BACK" 'Completed the goal in 1 step'
+check "act: back really returned" "$ACT_BACK" 'page-one'
+
+# A sign-in wall stops the loop with needs_login + the takeover hint.
+LOGIN_URL="data:text/html,<title>sign-in%20wall</title><button id=lg>Sign%20in</button>"
+check "act: navigate to the login wall" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$LOGIN_URL")")" 'Navigated to'
+ACT_LOGIN=$(call act "$(printf '{"sessionId":"%s","goal":"open my account"}' "$SID")")
+check "act: needs_login on a sign-in wall" "$ACT_LOGIN" 'sign-in wall'
+check "act: needs_login points at takeover" "$ACT_LOGIN" 'request_human_takeover'
+
+# An error page stops the loop with blocked.
+ERR_URL="data:text/html,<title>error%20page</title><p>Something%20failed</p>"
+check "act: navigate to the error page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$ERR_URL")")" 'Navigated to'
+check "act: blocked on an error page" "$(call act "$(printf '{"sessionId":"%s","goal":"do the thing"}' "$SID")")" 'error message'
+
+# An element-free page: goal-met can still fire; otherwise it bails.
+EMPTY_URL="data:text/html,<title>empty-page</title><p>Nothing%20here</p>"
+check "act: navigate to the empty page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$EMPTY_URL")")" 'Navigated to'
+check "act: goal-met without elements" "$(call act "$(printf '{"sessionId":"%s","goal":"confirm we are on the empty page"}' "$SID")")" 'Goal was already met'
+check "act: bails when there is nothing to act on" "$(call act "$(printf '{"sessionId":"%s","goal":"click the thing"}' "$SID")")" 'no interactive elements'
+
+# Repeated no-effect clicks end in no_progress.
+DEAD_URL="data:text/html,<title>dead-page</title><button id=dead-btn>Poke</button>"
+check "act: navigate to the dead page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$DEAD_URL")")" 'Navigated to'
+ACT_DEAD=$(call act "$(printf '{"sessionId":"%s","goal":"poke the dead thing"}' "$SID")")
+check "act: no_progress after dead clicks" "$ACT_DEAD" 'no visible effect'
+check "act: no_progress status is reported" "$ACT_DEAD" 'no_progress'
 
 # ---- close ---------------------------------------------------------------
 
