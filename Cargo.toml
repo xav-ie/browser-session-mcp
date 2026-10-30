@@ -28,9 +28,8 @@ tokio = { version = "1", features = [
   "sync",
   "time",
 ] }
-# Random takeover tokens. Pinned to the 0.2 line already present in Cargo.lock
-# (transitively, via rustls) so adding it as a direct dep needs no lock regen.
-getrandom = "0.3"
+# Random takeover tokens.
+getrandom = "0.4"
 # Output schemas for tool results. The 1.x line rmcp's `server` feature already
 # pulls in, so the derive shares its version.
 schemars = "1"
