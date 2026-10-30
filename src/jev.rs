@@ -80,14 +80,30 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
       while (n && n.nodeType === 3 && !n.textContent.trim()) n = n.nextSibling;
       return n && n.nodeType === 3 ? n.textContent : '';
     };
+    // Fields a person types into. Their contents are user data (a typed card
+    // number, an autofilled email), so they never become the label sent to
+    // Jev; only whether they hold anything does. Button-type inputs keep
+    // their value: there it is the button's text.
+    var typed = tag === 'textarea' || el.isContentEditable || (tag === 'input' &&
+      ['button', 'submit', 'reset', 'image', 'file', 'checkbox', 'radio', 'hidden',
+        'range', 'color'].indexOf(el.type) < 0);
     if (el.type === 'password') {
       p.push('(value hidden)');
+    } else if (typed) {
+      var name = el.getAttribute('aria-label') || el.getAttribute('placeholder') ||
+        el.getAttribute('title') ||
+        (el.labels && el.labels[0] ? el.labels[0].innerText : '');
+      if (name) p.push('"' + clamp(name, 80) + '"');
     } else {
       var label = el.getAttribute('aria-label') || el.getAttribute('placeholder') ||
         el.getAttribute('title') ||
         (el.labels && el.labels[0] ? el.labels[0].innerText : '') ||
         el.innerText || (toggle ? adjacent() : el.value || el.getAttribute('value')) || '';
       if (label) p.push('"' + clamp(label, 80) + '"');
+    }
+    if (typed || el.type === 'password') {
+      var content = el.isContentEditable ? el.innerText : el.value;
+      p.push(String(content || '').trim() ? '(filled)' : '(empty)');
     }
     // Current state, so a goal like "check the box" can read as met and a
     // toggle isn't clicked again (and undone) on the next step.
@@ -1239,6 +1255,8 @@ mod tests {
     #[test]
     fn text_fields_are_recognized_from_descriptions() {
         assert!(is_text_field("input type=search \"Search\""));
+        assert!(is_text_field("input #card (filled)"));
+        assert!(is_text_field("input #em type=email \"Email\" (empty)"));
         assert!(is_text_field("input #email \"Email\"")); // no type= → text
         assert!(is_text_field("input type=password (value hidden)"));
         assert!(is_text_field("textarea #bio"));
