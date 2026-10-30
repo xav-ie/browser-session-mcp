@@ -71,14 +71,33 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
       var t = el.getAttribute('type');
       if (t) p.push('type=' + clamp(t, 16));
     }
+    // A checkbox or radio's `value` is form data ("on" by default), not a
+    // label; unlabeled ones often sit next to bare text instead
+    // (`<input type=checkbox> checkbox 1`).
+    var toggle = tag === 'input' && (el.type === 'checkbox' || el.type === 'radio');
+    var adjacent = function() {
+      var n = el.nextSibling;
+      while (n && n.nodeType === 3 && !n.textContent.trim()) n = n.nextSibling;
+      return n && n.nodeType === 3 ? n.textContent : '';
+    };
     if (el.type === 'password') {
       p.push('(value hidden)');
     } else {
       var label = el.getAttribute('aria-label') || el.getAttribute('placeholder') ||
         el.getAttribute('title') ||
         (el.labels && el.labels[0] ? el.labels[0].innerText : '') ||
-        el.innerText || el.value || el.getAttribute('value') || '';
+        el.innerText || (toggle ? adjacent() : el.value || el.getAttribute('value')) || '';
       if (label) p.push('"' + clamp(label, 80) + '"');
+    }
+    // Current state, so a goal like "check the box" can read as met and a
+    // toggle isn't clicked again (and undone) on the next step.
+    if (toggle) p.push(el.checked ? '(checked)' : '(unchecked)');
+    var aria = { 'aria-checked': 'checked', 'aria-pressed': 'pressed',
+      'aria-expanded': 'expanded', 'aria-selected': 'selected' };
+    for (var attr in aria) {
+      var v = el.getAttribute(attr);
+      if (v === 'true') p.push('(' + aria[attr] + ')');
+      else if (v === 'false') p.push('(not ' + aria[attr] + ')');
     }
     if (tag === 'select' && el.selectedOptions && el.selectedOptions[0]) {
       p.push('selected="' + clamp(el.selectedOptions[0].label, 40) + '"');
