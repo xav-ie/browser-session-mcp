@@ -6,7 +6,8 @@
 #
 # The flake exports this pre-wired as `nixosModules.default` with `package`
 # defaulted to the flake's build. Consumers set at least `chrome.package` (the
-# Chrome to run) and, if using takeover, `takeover.chromeWsBase`.
+# Chrome to run). Chrome's DevTools endpoint stays on loopback: the takeover
+# daemon relays the takeover page's CDP socket to it, gated on the link.
 {
   config,
   lib,
@@ -25,9 +26,6 @@ let
     "--user-data-dir=${cfg.chrome.dataDir}"
     "--remote-debugging-address=127.0.0.1"
     "--remote-debugging-port=${toString cfg.chrome.port}"
-    # Chrome rejects WebSocket upgrades whose Origin it doesn't recognise; a
-    # reverse proxy fronting CDP needs this.
-    "--remote-allow-origins=*"
     # Drop navigator.webdriver + the automation blink features bot-detectors key
     # on.
     "--disable-blink-features=AutomationControlled"
@@ -53,6 +51,14 @@ let
   };
 in
 {
+  imports = [
+    (lib.mkRemovedOptionModule [ "services" "browser-session" "takeover" "chromeWsBase" ] ''
+      The takeover daemon now relays the takeover page's CDP socket to Chrome
+      (at `browserUrl`), so Chrome needs no public route. Drop the option and
+      the reverse-proxy route to Chrome's DevTools port.
+    '')
+  ];
+
   options.services.browser-session = {
     enable = lib.mkEnableOption "the browser-session stack (isolated browser sessions over a shared Chrome)";
 
@@ -215,15 +221,6 @@ in
         default = 9223;
         description = "Port the takeover daemon binds.";
       };
-      chromeWsBase = lib.mkOption {
-        type = lib.types.str;
-        default = "";
-        example = "wss://chrome.example.com";
-        description = ''
-          Public base URL of the CDP WebSocket the takeover page's browser
-          connects to directly. Required when takeover is enabled.
-        '';
-      };
     };
   };
 
@@ -335,13 +332,6 @@ in
 
       # Human-takeover page server.
       (lib.mkIf cfg.takeover.enable {
-        assertions = [
-          {
-            assertion = cfg.takeover.chromeWsBase != "";
-            message = "services.browser-session.takeover.chromeWsBase must be set (e.g. wss://chrome.example.com) when takeover is enabled.";
-          }
-        ];
-
         systemd.services.browser-session-takeover = {
           description = "browser-session human-takeover page server";
           after = [ "network.target" ];
@@ -349,7 +339,8 @@ in
           environment = {
             TAKEOVER_BIND = "${cfg.takeover.address}:${toString cfg.takeover.port}";
             STATE_DIR = cfg.stateDir;
-            CHROME_WS_BASE = cfg.takeover.chromeWsBase;
+            # The relay's upstream: the takeover page never reaches Chrome itself.
+            BROWSER_URL = cfg.browserUrl;
           };
           serviceConfig = {
             Type = "simple";

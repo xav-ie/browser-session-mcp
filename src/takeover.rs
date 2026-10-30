@@ -11,15 +11,17 @@
 //!      blocks on a sentinel (`done/<token>`).
 //!   2. This daemon (`browser-session-takeover`, host-side systemd unit) serves
 //!      the takeover UI — the static Astro build under `TAKEOVER_WEBROOT` (see
-//!      ../frontend). The page's JavaScript POSTs `.../claim` to receive the
-//!      DevTools WS base (from `CHROME_WS_BASE`) + target, opens a WebSocket
-//!      straight to Chrome, runs `Page.startScreencast`, renders frames to a
-//!      canvas, and forwards mouse/keyboard as `Input.dispatch*`. A "Done"
-//!      button POSTs back here, dropping the sentinel and unblocking the agent.
+//!      ../frontend). The page's JavaScript POSTs `.../claim` to receive its
+//!      relay base + target, opens a WebSocket back to this daemon, runs
+//!      `Page.startScreencast`, renders frames to a canvas, and forwards
+//!      mouse/keyboard as `Input.dispatch*`. A "Done" button POSTs back here,
+//!      dropping the sentinel and unblocking the agent.
 //!
-//! The daemon never touches Chrome itself — all CDP traffic is browser↔Chrome.
-//! It's a dependency-free tokio HTTP shim: serve the built assets, mint/check
-//! claims, and signal done. The UI lives in ../frontend (built separately).
+//! Chrome's DevTools endpoint has no authentication, so it stays on loopback:
+//! this daemon relays the page's WebSocket to it, gated on the claim and
+//! filtered to the session (see [`crate::takeover_relay`]). Otherwise it is a
+//! small tokio HTTP shim: serve the built assets, mint/check claims, and
+//! signal done. The UI lives in ../frontend (built separately).
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -66,7 +68,7 @@ pub fn base_url() -> Option<String> {
         .map(|s| s.trim_end_matches('/').to_string())
 }
 
-fn now_ms() -> u128 {
+pub(crate) fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -351,15 +353,15 @@ async fn sweep_expired() {
 /// Run the takeover HTTP daemon until killed. Env:
 ///   TAKEOVER_BIND     (default 127.0.0.1:9223) — where to listen
 ///   STATE_DIR         (required) — takeover IPC lives in $STATE_DIR/takeover
-///   CHROME_WS_BASE    (required) — e.g. wss://chrome.lalala.casa
+///   BROWSER_URL       (default http://127.0.0.1:9222) — Chrome's DevTools
+///                     endpoint, which the relay connects to
 pub async fn run() -> Result<()> {
     crate::init_tracing("browser_session_mcp=info");
     let bind = std::env::var("TAKEOVER_BIND").unwrap_or_else(|_| "127.0.0.1:9223".to_string());
-    let chrome_ws_base = std::env::var("CHROME_WS_BASE")
+    let browser_url = std::env::var("BROWSER_URL")
         .ok()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("CHROME_WS_BASE is required (e.g. wss://chrome.<base>)"))?;
-    let chrome_ws_base = chrome_ws_base.trim_end_matches('/').to_string();
+        .unwrap_or_else(|| "http://127.0.0.1:9222".to_string());
 
     tokio::fs::create_dir_all(tokens_dir()).await.ok();
     tokio::fs::create_dir_all(done_dir()).await.ok();
@@ -386,9 +388,9 @@ pub async fn run() -> Result<()> {
                 continue;
             }
         };
-        let base = chrome_ws_base.clone();
+        let browser_url = browser_url.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_conn(stream, &base).await {
+            if let Err(err) = handle_conn(stream, &browser_url).await {
                 tracing::debug!(error = %err, %peer, "connection error");
             }
         });
@@ -398,7 +400,7 @@ pub async fn run() -> Result<()> {
 /// Minimal HTTP/1.1: read the request line + headers, route, respond with
 /// `Connection: close`. We serve at most a small HTML page and a 200, so a
 /// single-shot handler is plenty — no keep-alive, no body streaming.
-async fn handle_conn(mut stream: TcpStream, chrome_ws_base: &str) -> Result<()> {
+async fn handle_conn(mut stream: TcpStream, browser_url: &str) -> Result<()> {
     const MAX_HEADER: usize = 16 * 1024;
     let mut buf = Vec::with_capacity(2048);
     let mut tmp = [0u8; 1024];
@@ -433,7 +435,23 @@ async fn handle_conn(mut stream: TcpStream, chrome_ws_base: &str) -> Result<()> 
         let method = parts.next().unwrap_or("");
         let path = parts.next().unwrap_or("/");
         let cookie = extract_cookie(&head, "tk_claim");
-        route(method, path, chrome_ws_base, cookie.as_deref()).await
+        // GET /takeover/<token>/devtools/page/<targetId> with an Upgrade is
+        // the page's CDP socket: hand the connection to the relay.
+        if method == "GET" {
+            if let Some((token, target)) = relay_path(path) {
+                let head = head.into_owned();
+                return crate::takeover_relay::serve(
+                    stream,
+                    &head,
+                    &token,
+                    &target,
+                    cookie,
+                    browser_url,
+                )
+                .await;
+            }
+        }
+        route(method, path, cookie.as_deref()).await
     };
     // Mark the claim cookie Secure whenever the browser reached us over a
     // secure origin: https via the reverse proxy, or loopback (an SSH tunnel to
@@ -481,8 +499,16 @@ impl Resp {
     }
 }
 
+/// `(token, targetId)` from a relay path, `/takeover/<token>/devtools/page/<id>`.
+fn relay_path(path: &str) -> Option<(String, String)> {
+    let rest = path.split('?').next()?.strip_prefix("/takeover/")?;
+    let (token, target) = rest.split_once("/devtools/page/")?;
+    (valid_token(token) && !target.is_empty() && target.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .then(|| (token.to_string(), target.to_string()))
+}
+
 /// Value of the first header called `name` (case-insensitive).
-fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+pub(crate) fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
     head.lines().skip(1).find_map(|l| {
         let (k, v) = l.split_once(':')?;
         k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
@@ -519,7 +545,7 @@ fn extract_cookie(head: &str, name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn route(method: &str, path: &str, chrome_ws_base: &str, cookie: Option<&str>) -> Resp {
+async fn route(method: &str, path: &str, cookie: Option<&str>) -> Resp {
     // Strip a query string if any.
     let path = path.split('?').next().unwrap_or(path);
 
@@ -533,7 +559,7 @@ async fn route(method: &str, path: &str, chrome_ws_base: &str, cookie: Option<&s
             // page load. Unfurl bots / prefetchers issue GETs and don't run JS,
             // so they never reach this and never learn the targetId.
             if let Some(token) = rest.strip_suffix("/claim") {
-                return claim_response(token, chrome_ws_base, cookie).await;
+                return claim_response(token, cookie).await;
             }
             // POST /takeover/<token>/done — only the claimant (matching cookie).
             if let Some(token) = rest.strip_suffix("/done") {
@@ -614,22 +640,22 @@ async fn serve_file(rel: &str) -> Resp {
 }
 
 /// First-come-first-serve claim, triggered by the page's on-load POST. Returns
-/// the DevTools WS URL (the only sensitive bit) only to the winning claimant or
-/// a matching reload; a different client gets 409.
-async fn claim_response(token: &str, chrome_ws_base: &str, cookie: Option<&str>) -> Resp {
+/// the target and the relay base (a path on this daemon) only to the winning
+/// claimant or a matching reload; a different client gets 409.
+async fn claim_response(token: &str, cookie: Option<&str>) -> Resp {
     if !valid_token(token) {
         return Resp::new("400 Bad Request", "text/plain", "bad token");
     }
     match read_ticket(token).await {
         Ok(t) if t.expires_at_ms > now_ms() => match claim(token, cookie).await {
             Ok(maybe_secret) => {
-                // Hand back the WS base + this session's context id so the page
+                // Hand back the relay base + this session's context id so the page
                 // can enumerate the session's tabs (Target.getTargets filtered by
                 // browserContextId) and switch between them, plus the session
                 // viewport every tab is rendered at.
                 let body = format!(
                     "{{\"wsBase\":{},\"targetId\":{},\"ctxId\":{},\"viewport\":{{\"width\":{},\"height\":{}}}}}",
-                    js_str(chrome_ws_base),
+                    js_str(&format!("/takeover/{token}")),
                     js_str(&t.target_id),
                     js_str(&t.session_id),
                     t.viewport.width,
@@ -663,7 +689,38 @@ async fn claim_response(token: &str, chrome_ws_base: &str, cookie: Option<&str>)
 async fn mark_done(token: &str) -> Result<()> {
     tokio::fs::create_dir_all(done_dir()).await.ok();
     tokio::fs::write(done_path(token), b"done").await?;
+    // Close this token's open relay sockets; nobody listening is fine.
+    let _ = DONE.send(token.to_string());
     Ok(())
+}
+
+/// Tokens marked done, broadcast to open relays (see [`done_events`]).
+static DONE: once_cell::sync::Lazy<tokio::sync::broadcast::Sender<String>> =
+    once_cell::sync::Lazy::new(|| tokio::sync::broadcast::channel(64).0);
+
+/// Subscribe to Done clicks, so a relay closes the moment its takeover ends.
+pub(crate) fn done_events() -> tokio::sync::broadcast::Receiver<String> {
+    DONE.subscribe()
+}
+
+/// Whether a relay socket for `token` may run: the ticket exists and hasn't
+/// expired, Done hasn't been clicked, and `presented` is the claim cookie.
+/// Returns the session's browserContextId and the ticket's expiry.
+pub(crate) async fn relay_gate(token: &str, presented: Option<&str>) -> Option<(String, u128)> {
+    let ticket = read_ticket(token).await.ok()?;
+    if ticket.expires_at_ms <= now_ms() {
+        return None;
+    }
+    if tokio::fs::try_exists(done_path(token))
+        .await
+        .unwrap_or(true)
+    {
+        return None;
+    }
+    if !claim_matches(token, presented).await {
+        return None;
+    }
+    Some((ticket.session_id, ticket.expires_at_ms))
 }
 
 /// Tokens are 32 lowercase hex chars (see `mint_token`). Reject anything else

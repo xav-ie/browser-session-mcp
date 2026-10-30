@@ -45,9 +45,6 @@ let
           # Match packaging/systemd/browser-session.env so the baked-in defaults
           # and the shipped env file agree.
           stateDir = "/var/lib/browser-session";
-          # The module asserts this is non-empty when takeover is enabled; the
-          # real value is operator-specific and comes from the env file.
-          takeover.chromeWsBase = "wss://chrome.example.com";
         };
       })
     ];

@@ -34,7 +34,7 @@ Without the Nix wrapper, point the takeover daemon at the bundled `webroot/`
 yourself:
 
 ```sh
-TAKEOVER_WEBROOT=$PWD/webroot CHROME_WS_BASE=ws://localhost:9222 \
+TAKEOVER_WEBROOT=$PWD/webroot BROWSER_URL=http://localhost:9222 \
   ./browser-session takeover
 ```
 
@@ -58,9 +58,6 @@ not manage it — point it at the same `stateDir` and `browserUrl`.)
     chrome.package = pkgs.google-chrome; # unfree; or chrome-headless-shell
     chrome.executable = "google-chrome-stable";
     chrome.extraArgs = [ "--headless" ];
-    # Required once takeover is enabled — the public CDP WebSocket base the
-    # takeover page connects to directly:
-    takeover.chromeWsBase = "wss://chrome.example.com";
     # Optional: real-GPU WebGL, idle policy, external Chrome, etc.
     # chrome.extraArgs = [ "--headless" "--use-gl=angle" "--use-angle=vulkan" ];
     # reaper.maxIdleHours = 2;
@@ -113,7 +110,8 @@ MCP. Only do this on a dedicated automation Chrome, never one a human browses).
 Run on a timer (e.g. every 30min).
 
 `browser-session takeover` — `TAKEOVER_BIND` (default `127.0.0.1:9223`),
-`STATE_DIR`, `CHROME_WS_BASE` (**required**, e.g. `wss://chrome.<domain>`),
+`STATE_DIR`, `BROWSER_URL` (default `http://127.0.0.1:9222`; the Chrome it
+relays the takeover page's CDP socket to),
 `TAKEOVER_WEBROOT` (set automatically by the Nix wrapper). Run as a systemd
 service.
 
