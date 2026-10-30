@@ -144,7 +144,15 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 marker = "name"
             choice = next((k for k in order if marker in descs[k]), order[0])
-            done = "act-done" in state.lower() or "page-two" in state.lower()
+            # Parse the title out of the Page line so cue words can't leak in
+            # through element hrefs (the nav link's data: href mentions
+            # page-two while still on page one).
+            title = ""
+            for line in state.split("\n"):
+                if line.startswith("Page: "):
+                    title = line[6:].split(" — ", 1)[-1].lower()
+                    break
+            done = "act-done" in title or title == "page-two"
             stuck = "impossible" in first
             answers = {
                 "element": {"choice": choice, "confidence": conf,
@@ -450,8 +458,11 @@ check "act: a stuck goal stops without acting" "$(call act "$(printf '{"sessionI
 
 # A click that navigates: the loop must survive the document teardown
 # between step 1's click and step 2's extraction (settle pause + retries).
-NAV_URL="data:text/html,<title>page-one</title><a id=next-link href=data:text/html,%3Ctitle%3Epage-two%3C/title%3E%3Cbutton%3EDone%3C/button%3E>Next%20page</a>"
+# Chrome blocks top-level data: navigation, so the link's real target is a
+# blob: URL (those may navigate top frames) wired up from JS first.
+NAV_URL="data:text/html,<title>page-one</title><a id=next-link href=%23>Next%20page</a>"
 check "act: navigate to the link page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$NAV_URL")")" 'Navigated to'
+check "act: wire a real navigation target" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).href = URL.createObjectURL(new Blob([%s], {type: %s})); return 1 })()"}' "$SID" "'next-link'" "'<title>page-two</title><button>Done</button>'" "'text/html'")")" '"result":1'
 ACT_NAV=$(call act "$(printf '{"sessionId":"%s","goal":"open the next page"}' "$SID")")
 check "act: survives a navigational click" "$ACT_NAV" 'Completed the goal in 1 step'
 check "act: really landed on page two" "$ACT_NAV" 'page-two'
