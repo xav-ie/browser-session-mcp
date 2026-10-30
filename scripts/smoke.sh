@@ -99,13 +99,18 @@ if ! curl -fs "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1; then
 fi
 
 # ---- stub Jev API ----------------------------------------------------------
-# A tiny /v1/systemone that "picks" the element matching the goal, so both
-# jev paths run end-to-end without a real TypeSafe key: explicit `jev:`
-# goals and the automatic fallback for selectors that match nothing as CSS.
-# Cues it reads from the goal (the state's first line — the element menu
+# A tiny /v1/systemone that "picks" the element matching the goal, so every
+# jev path runs end-to-end without a real TypeSafe key: explicit `jev:`
+# goals, the automatic fallback for selectors that match nothing as CSS, and
+# the act loop. Cues it reads from the state's first line (the element menu
 # below it mentions every marker too): "email" -> pick the input, otherwise
 # the "Log in" button; "bogus" -> answer with an unknown id (fail-closed
-# validation); "unsure" -> confidence 0.2 (the confidence floor).
+# validation); "unsure" -> confidence 0.2 (the confidence floor). act
+# requests carry goal_met/stuck questions: it picks whichever element the
+# goal names ("name"/"color", or the "Do it" button once one thing is typed),
+# answers goal_met 0.97 once the title says act-done, stuck 0.97 for
+# "impossible" goals, and second-stage value/option requests (criteria with
+# __none__) pick "name" or "Blue".
 
 JEV_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 python3 - "$JEV_PORT" >"$TMP/jev-stub.log" 2>&1 <<'PY' &
@@ -115,22 +120,49 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        goal = body.get("state", "").split("\n")[0].lower()
+        state = body.get("state", "")
+        first = state.split("\n")[0].lower()
         criteria = body["questions"]["element"]["criteria"]
-        confidence = 0.2 if "unsure" in goal else 0.91
-        if "bogus" in goal:
-            choice = "e999"
+        conf = 0.91
+        if "__none__" in criteria:
+            # second-stage act request: which value to type / option to pick
+            choice = "name" if "name" in criteria else "Blue"
+            answers = {"element": {"choice": choice, "confidence": conf,
+                                   "probabilities": {choice: conf}}}
+        elif "goal_met" in body["questions"]:
+            # act loop step: one Choice plus goal-met / stuck Nouls
+            order = sorted((k for k in criteria if k.startswith("e")),
+                           key=lambda k: int(k[1:]))
+            descs = {k: str(criteria[k]).lower() for k in order}
+            if "color" in first or "blue" in first:
+                marker = "color"
+            elif "1. type" in state:
+                marker = "do it"
+            else:
+                marker = "name"
+            choice = next((k for k in order if marker in descs[k]), order[0])
+            done = "act-done" in state.lower()
+            stuck = "impossible" in first
+            answers = {
+                "element": {"choice": choice, "confidence": conf,
+                            "probabilities": {choice: conf}},
+                "goal_met": {"noul": 0.97 if done else 0.02},
+                "stuck": {"noul": 0.97 if stuck else 0.02},
+            }
         else:
-            marker = "email" if "email" in goal else "log in"
-            order = sorted(criteria, key=lambda k: int(k[1:]))
-            choice = next((k for k in order if marker in criteria[k].lower()), order[0])
+            goal = first
+            conf = 0.2 if "unsure" in goal else 0.91
+            if "bogus" in goal:
+                choice = "e999"
+            else:
+                marker = "email" if "email" in goal else "log in"
+                order = sorted(criteria, key=lambda k: int(k[1:]))
+                choice = next((k for k in order if marker in criteria[k].lower()), order[0])
+            answers = {"element": {"choice": choice, "confidence": conf,
+                                   "probabilities": {choice: conf}}}
         resp = json.dumps({
             "model": "jev-stub",
-            "answers": {"element": {
-                "choice": choice,
-                "confidence": confidence,
-                "probabilities": {choice: confidence},
-            }},
+            "answers": answers,
             "usage": {"input_tokens": 1234},
         }).encode()
         self.send_response(200)
@@ -393,6 +425,25 @@ check "auto: names the picked element" "$AUTO_CLICK" '#jev-b'
 check "auto: click really clicked it" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'clicked-jev'
 check "auto: type falls back too" "$(call type "$(printf '{"sessionId":"%s","selector":"the Email field","text":"auto@x.io","timeout":250}' "$SID")")" 'Typed 9 chars into input #jev-in'
 check "auto: fail-closed when jev is unsure" "$(call click "$(printf '{"sessionId":"%s","selector":"the unsure control","timeout":250}' "$SID")")" 'below the 0.85 floor'
+
+# ---- act: the goal loop (against the stub API above) ------------------------
+# One page, three goals: type+submit with `values`, set a <select> via a
+# second-stage option Choice, and a stuck goal that must stop without acting.
+ACT_URL="data:text/html,<title>act</title><button id=act-btn>Do%20it</button><input id=act-name placeholder=Your%20name><select id=color-sel><option>Red</option><option selected>Green</option><option>Blue</option></select>"
+check "act: navigate to the loop page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$ACT_URL")")" 'Navigated to'
+check "act: wire page handlers" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).addEventListener(%s, () => { document.title = %s; window.__name = document.getElementById(%s).value }); document.getElementById(%s).addEventListener(%s, () => { document.title = %s }); return 1 })()"}' "$SID" "'act-btn'" "'click'" "'act-done'" "'act-name'" "'color-sel'" "'change'" "'act-done2'")")" '"result":1'
+
+ACT_OUT=$(call act "$(printf '{"sessionId":"%s","goal":"type the name and submit","values":{"name":"Ada"}}' "$SID")")
+check "act: completes with values in two steps" "$ACT_OUT" 'Completed the goal in 2 steps'
+check "act: typed the provided value into the field" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"window.__name"}' "$SID")")" '"Ada"'
+check "act: the button really fired" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'act-done'
+
+check "act: reset title between goals" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title = %s"}' "$SID" "'reset'")")" 'reset'
+check "act: sets a select option via a second choice" "$(call act "$(printf '{"sessionId":"%s","goal":"choose the blue color"}' "$SID")")" 'Completed the goal in 1 step'
+check "act: the select really changed" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'act-done2'
+check "act: reset title before the stuck goal" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title = %s"}' "$SID" "'reset'")")" 'reset'
+
+check "act: a stuck goal stops without acting" "$(call act "$(printf '{"sessionId":"%s","goal":"do an impossible thing"}' "$SID")")" 'Stuck after 0 steps'
 
 # ---- close ---------------------------------------------------------------
 

@@ -35,7 +35,7 @@ credentials.
 - **Gets past bot checks.** No `Runtime.enable` tell, a consistent User-Agent
   and Client Hints, no injected scripts, and real mouse and keyboard input.
   Stealth can be switched on and off per session.
-- **[30 tools](#all-30-tools)** for tabs, navigation, clicks and typing,
+- **[31 tools](#all-31-tools)** for tabs, navigation, clicks and typing,
   screenshots, accessibility snapshots, logs and CPU profiles.
 
 ## Quick start
@@ -181,12 +181,23 @@ chosen from the page as it is when the call runs; `wait_for` content first on
 pages that are still loading (`wait_for` itself takes CSS selectors and text
 only).
 
+`act` runs the same machinery as a server-side loop for a whole goal: each
+step is one Jev request that picks the next element — or a scroll/wait
+action — and simultaneously judges whether the goal is met or the page is a
+dead end (both gates at 0.85), so a multi-step flow costs seconds and
+fractions of a cent instead of a driving-LLM round trip per click. Pass
+`values` for anything to type: Jev sees only their keys and picks which
+field each belongs to; the text goes straight through CDP, never to a
+model. It returns a per-step trace, stops at `maxSteps` (default 8), and
+still fails closed — but Jev can be eager to call a goal met, so verify the
+final page yourself.
+
 Set `TYPESAFE_API_KEY` (from [console.typesafe.ai](https://console.typesafe.ai))
 to enable it. `JEV_MODEL`, `JEV_BASE_URL`, `JEV_TIMEOUT_MS`,
 `JEV_MIN_CONFIDENCE` and `JEV_FALLBACK_MIN_CONFIDENCE` tune it — see
 [Deployment](docs/deployment.md#environment).
 
-## All 30 tools
+## All 31 tools
 
 Most tools take a `sessionId` first. Tools marked ⚙ need one of the optional
 background roles from [Deployment](docs/deployment.md).
@@ -199,7 +210,7 @@ can type their results.
 | Tabs | `new_page`, `list_pages`, `switch_tab`, `close_tab` |
 | Navigation | `navigate` |
 | Seeing the page | `take_screenshot`, `take_snapshot` (the accessibility tree as text) |
-| Acting on it | `click`, `type`, `press_key`, `scroll`, `move_mouse`, `wait_for`, `evaluate` |
+| Acting on it | `act`, `click`, `type`, `press_key`, `scroll`, `move_mouse`, `wait_for`, `evaluate` |
 | Logs ⚙ | `list_visits`, `list_console_messages`, `list_network_requests` |
 | Profiling | `start_profiling`, `stop_profiling` |
 | Stealth | `set_stealth`, `get_stealth` |
@@ -228,6 +239,7 @@ can type their results.
 - `take_snapshot({ sessionId })`: the accessibility tree as indented text
 
 **Acting on it** (real CDP input, not synthetic JavaScript events)
+- `act({ sessionId, goal, values?, maxSteps? })` → `{ status, goal, steps, url, title }`: a Jev-driven loop toward a goal — click, type (from `values`), select, scroll or wait per step until the goal reads met, stuck or out of budget
 - `click({ sessionId, selector | x,y, timeout? })`: `selector` may be plain language or a `jev:<goal>` — the Jev decision model picks the element (see [Picking elements with Jev](#picking-elements-with-jev))
 - `type({ sessionId, selector, text, delay?, clear?, timeout? })`: `selector` may be plain language or a `jev:` goal; the text itself always comes from you
 - `press_key({ sessionId, key, selector?, timeout? })`: `key` is a name (Enter, Tab, ArrowDown…) or a character; `selector` may be plain language or a `jev:` goal and is optional

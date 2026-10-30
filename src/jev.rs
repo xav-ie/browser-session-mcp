@@ -59,6 +59,7 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     if (el.id) p.push('#' + clamp(el.id, 40));
     var role = el.getAttribute('role');
     if (role) p.push('role=' + clamp(role, 24));
+    if (el.isContentEditable) p.push('[contenteditable]');
     if (tag === 'input') {
       var t = el.getAttribute('type');
       if (t) p.push('type=' + clamp(t, 16));
@@ -99,7 +100,15 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   for (var j = 0; j < chosen.length; j++) {
     var id = 'e' + (j + 1);
     chosen[j].setAttribute('data-jev-id', id);
-    elements.push({ id: id, desc: describe(chosen[j]) });
+    var rec = { id: id, desc: describe(chosen[j]) };
+    if (chosen[j].tagName === 'SELECT' && chosen[j].options) {
+      var opts = [];
+      for (var q = 0; q < chosen[j].options.length && q < 25; q++) {
+        opts.push(clamp(chosen[j].options[q].label, 60));
+      }
+      rec.options = opts;
+    }
+    elements.push(rec);
   }
   return {
     url: String(location.href),
@@ -186,13 +195,24 @@ pub fn available() -> bool {
         .is_empty()
 }
 
-struct PageInfo {
-    url: String,
-    title: String,
-    /// (id, description) in offer order.
-    elements: Vec<(String, String)>,
+/// One extracted interactive element.
+pub struct Element {
+    /// Its `data-jev-id` value, e.g. "e17".
+    pub id: String,
+    /// Compact description, as offered to Jev.
+    pub desc: String,
+    /// For `<select>` elements: the option labels (capped), in order.
+    pub options: Vec<String>,
+}
+
+/// A page extraction: what a Jev decision was offered.
+pub struct PageInfo {
+    pub url: String,
+    pub title: String,
+    /// Elements in offer order.
+    pub elements: Vec<Element>,
     /// Interactive elements beyond [`MAX_ELEMENTS`], not offered.
-    omitted: usize,
+    pub omitted: usize,
 }
 
 /// The `state` string sent to Jev: the goal, the page's identity, and the
@@ -209,7 +229,7 @@ fn build_state(goal: &str, page: &PageInfo) -> String {
     lines.extend(
         page.elements
             .iter()
-            .map(|(id, desc)| format!("{id}: {desc}")),
+            .map(|e| format!("{}: {}", e.id, e.desc)),
     );
     if page.omitted > 0 {
         lines.push(format!(
@@ -220,17 +240,17 @@ fn build_state(goal: &str, page: &PageInfo) -> String {
     lines.join("\n")
 }
 
-/// Pull the chosen option out of a `/v1/systemone` response and validate it
-/// against the ids actually offered. An answer naming anything else — or a
-/// response without one — is an error, never a guess.
-fn parse_answer(body: &Value, valid: &[&str]) -> Result<(String, f64)> {
+/// Pull a Choice answer for `question` out of a `/v1/systemone` response and
+/// validate it against the options actually offered. An answer naming anything
+/// else — or a response without one — is an error, never a guess.
+fn parse_choice(body: &Value, question: &str, valid: &[&str]) -> Result<(String, f64)> {
     let answer = body
-        .pointer("/answers/element")
-        .ok_or_else(|| anyhow!("Jev response has no answers.element"))?;
+        .pointer(&format!("/answers/{question}"))
+        .ok_or_else(|| anyhow!("Jev response has no answers.{question}"))?;
     let chosen = answer
         .get("choice")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("Jev answer has no choice"))?;
+        .ok_or_else(|| anyhow!("Jev answer for {question} has no choice"))?;
     if !valid.contains(&chosen) {
         bail!("Jev chose `{chosen}`, which is not one of the offered elements");
     }
@@ -247,6 +267,13 @@ fn parse_answer(body: &Value, valid: &[&str]) -> Result<(String, f64)> {
         })
         .unwrap_or(0.0);
     Ok((chosen.to_string(), confidence))
+}
+
+/// Pull a Noul (yes-probability) answer for `question` from a response.
+fn parse_noul(body: &Value, question: &str) -> Result<f64> {
+    body.pointer(&format!("/answers/{question}/noul"))
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| anyhow!("Jev response has no answers.{question}.noul"))
 }
 
 /// The shared HTTP client. TLS is rustls (the only TLS feature enabled), the
@@ -286,8 +313,8 @@ async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resol
 
     let state = build_state(goal, &page_info);
     let mut criteria = Map::new();
-    for (id, desc) in &page_info.elements {
-        criteria.insert(id.clone(), Value::String(desc.clone()));
+    for e in &page_info.elements {
+        criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
     }
 
     let started = Instant::now();
@@ -303,8 +330,8 @@ async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resol
     let description = page_info
         .elements
         .iter()
-        .find(|(id, _)| *id == element_id)
-        .map(|(_, desc)| desc.clone())
+        .find(|e| e.id == element_id)
+        .map(|e| e.desc.clone())
         .unwrap_or_default();
     tracing::debug!(
         model,
@@ -321,6 +348,322 @@ async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resol
         offered: page_info.elements.len(),
         element_id,
     })
+}
+
+/// Extra actions offered to `act` alongside the elements. Together with
+/// [`MAX_ELEMENTS`] they stay under Jev's 255-option Choice limit.
+pub const PSEUDO_ACTIONS: &[(&str, &str)] = &[
+    (
+        "scroll_down",
+        "Scroll the page down by most of a viewport to reveal more elements.",
+    ),
+    ("scroll_up", "Scroll the page up by most of a viewport."),
+    (
+        "wait",
+        "Wait briefly for the page to settle (loading, animation) before deciding again.",
+    ),
+];
+
+/// The `state` string for an `act` step: the goal, the page's identity, what
+/// was already done, and the numbered element menu. Recent actions keep the
+/// loop from re-picking something that had no effect.
+fn build_act_state(
+    goal: &str,
+    page: &PageInfo,
+    recent: &[String],
+    value_keys: &[String],
+) -> String {
+    let mut lines = vec![format!("Goal: \"{goal}\".")];
+    if page.title.is_empty() {
+        lines.push(format!("Page: {}", page.url));
+    } else {
+        lines.push(format!("Page: {} — {}", page.url, page.title));
+    }
+    if !recent.is_empty() {
+        lines.push("Actions already taken:".to_string());
+        lines.extend(recent.iter().map(|r| format!("- {r}")));
+    }
+    if !value_keys.is_empty() {
+        lines.push(format!(
+            "Values the caller can type, by key: {}.",
+            value_keys.join(", ")
+        ));
+    }
+    lines.push("Interactive elements and actions:".to_string());
+    lines.extend(
+        page.elements
+            .iter()
+            .map(|e| format!("{}: {}", e.id, e.desc)),
+    );
+    lines.extend(
+        PSEUDO_ACTIONS
+            .iter()
+            .map(|(id, desc)| format!("{id}: {desc}")),
+    );
+    if page.omitted > 0 {
+        lines.push(format!(
+            "({} further elements not listed; scroll if the target may be among them)",
+            page.omitted
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Criteria for an `act` step Choice: every element plus the pseudo-actions.
+fn act_criteria(page: &PageInfo) -> Map<String, Value> {
+    let mut criteria = Map::new();
+    for e in &page.elements {
+        criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
+    }
+    for (id, desc) in PSEUDO_ACTIONS {
+        criteria.insert((*id).to_string(), Value::String((*desc).to_string()));
+    }
+    criteria
+}
+
+/// One `act` step decision: what to do next, plus the goal/stuck judgments.
+pub struct StepDecision {
+    /// The chosen id: an element's `data-jev-id`, or a pseudo-action name.
+    pub chosen: String,
+    /// True when `chosen` names an extracted element.
+    pub is_element: bool,
+    /// The chosen element's description, or the pseudo-action's.
+    pub description: String,
+    /// Jev's calibrated confidence in the choice.
+    pub confidence: f64,
+    /// Jev's probability that the goal is already achieved.
+    pub goal_met: f64,
+    /// Jev's probability that no available action can make progress.
+    pub stuck: f64,
+    /// The extraction this decision was based on — the caller executes
+    /// against these stamped elements without re-extracting.
+    pub page: PageInfo,
+}
+
+/// Ask Jev for the next `act` step. One fan-out request carries the element
+/// Choice plus goal-met and stuck Nouls — three decisions, one round trip.
+pub async fn decide_step(
+    page: &Page,
+    goal: &str,
+    recent: &[String],
+    value_keys: &[String],
+) -> Result<StepDecision> {
+    let cfg = config()?;
+    let raw = iso_eval_function(page, EXTRACT_FN.as_str())
+        .await
+        .map_err(|e| anyhow!("extracting interactive elements: {e:#}"))?;
+    let page_info = parse_extraction(&raw)?;
+    if page_info.elements.is_empty() {
+        bail!("no interactive elements found on the page — navigate or wait_for content first");
+    }
+
+    let state = build_act_state(goal, &page_info, recent, value_keys);
+    let criteria = act_criteria(&page_info);
+    let body = json!({
+        "model": cfg.model,
+        "state": state,
+        "questions": {
+            "element": {
+                "type": "choice",
+                "instructions": "Which single listed element or action is the best next step toward the goal?",
+                "criteria": criteria
+            },
+            "goal_met": {
+                "type": "noul",
+                "instructions": "The goal has already been fully achieved on the current page."
+            },
+            "stuck": {
+                "type": "noul",
+                "instructions": "None of the listed elements or actions can make any progress toward the goal."
+            }
+        }
+    });
+    let json = post_systemone(&cfg, &body).await?;
+    let ids: Vec<&str> = criteria.keys().map(|k| k.as_str()).collect();
+    let (chosen, confidence) = parse_choice(&json, "element", &ids)?;
+    let goal_met = parse_noul(&json, "goal_met")?;
+    let stuck = parse_noul(&json, "stuck")?;
+    let is_element = chosen.starts_with('e') && page_info.elements.iter().any(|e| e.id == chosen);
+    let description = if is_element {
+        page_info
+            .elements
+            .iter()
+            .find(|e| e.id == chosen)
+            .map(|e| e.desc.clone())
+            .unwrap_or_default()
+    } else {
+        PSEUDO_ACTIONS
+            .iter()
+            .find(|(id, _)| *id == chosen)
+            .map(|(_, desc)| (*desc).to_string())
+            .unwrap_or_else(|| chosen.clone())
+    };
+    tracing::debug!(
+        model = %json.get("model").and_then(|m| m.as_str()).unwrap_or(""),
+        confidence,
+        goal_met,
+        stuck,
+        element = %chosen,
+        "jev act step decision"
+    );
+    Ok(StepDecision {
+        chosen,
+        is_element,
+        description,
+        confidence,
+        goal_met,
+        stuck,
+        page: page_info,
+    })
+}
+
+/// Ask Jev which caller-provided value belongs in the chosen field. `None`
+/// means "none of them — don't type here". Only the keys are ever sent; the
+/// values themselves go straight from the caller to CDP.
+pub async fn decide_value_key(
+    goal: &str,
+    field_desc: &str,
+    keys: &[String],
+) -> Result<Option<(String, f64)>> {
+    let cfg = config()?;
+    let mut state = format!(
+        "Goal: \"{goal}\".\nThe agent is about to interact with this field: {field_desc}\n\
+         The caller provided values to type, keyed by what they are:"
+    );
+    state.push('\n');
+    state.push_str(
+        &keys
+            .iter()
+            .map(|k| format!("- {k}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let mut criteria = Map::new();
+    for k in keys {
+        criteria.insert(
+            k.clone(),
+            Value::String(format!("the provided value keyed \"{k}\"")),
+        );
+    }
+    criteria.insert(
+        "__none__".to_string(),
+        Value::String(
+            "None of these values belong in this field; just click it instead.".to_string(),
+        ),
+    );
+    let body = json!({
+        "model": cfg.model,
+        "state": state,
+        "questions": {
+            "element": {
+                "type": "choice",
+                "instructions": "Which provided value belongs in this field?",
+                "criteria": criteria
+            }
+        }
+    });
+    let json = post_systemone(&cfg, &body).await?;
+    let ids: Vec<&str> = criteria.keys().map(|k| k.as_str()).collect();
+    let (chosen, confidence) = parse_choice(&json, "element", &ids)?;
+    if chosen == "__none__" {
+        return Ok(None);
+    }
+    if confidence < cfg.min_confidence {
+        bail!(
+            "Jev's confidence for the value choice was only {confidence:.2} (below the \
+             {:.2} floor), so nothing was typed",
+            cfg.min_confidence
+        );
+    }
+    Ok(Some((chosen, confidence)))
+}
+
+/// Ask Jev which option of a `<select>` to pick. `None` means leave the field
+/// as it is (the caller falls back to a plain click).
+pub async fn decide_select_option(
+    goal: &str,
+    field_desc: &str,
+    options: &[String],
+) -> Result<Option<(String, f64)>> {
+    let cfg = config()?;
+    let state = format!(
+        "Goal: \"{goal}\".\nThe agent is about to set this dropdown: {field_desc}\n\
+         Choose the option to select."
+    );
+    let mut criteria = Map::new();
+    for o in options {
+        criteria.insert(o.clone(), Value::String(format!("option \"{o}\"")));
+    }
+    criteria.insert(
+        "__none__".to_string(),
+        Value::String("None of these options fit; leave the dropdown as it is.".to_string()),
+    );
+    let body = json!({
+        "model": cfg.model,
+        "state": state,
+        "questions": {
+            "element": {
+                "type": "choice",
+                "instructions": "Which dropdown option best serves the goal?",
+                "criteria": criteria
+            }
+        }
+    });
+    let json = post_systemone(&cfg, &body).await?;
+    let ids: Vec<&str> = criteria.keys().map(|k| k.as_str()).collect();
+    let (chosen, confidence) = parse_choice(&json, "element", &ids)?;
+    if chosen == "__none__" {
+        return Ok(None);
+    }
+    if confidence < cfg.min_confidence {
+        bail!(
+            "Jev's confidence for the option was only {confidence:.2} (below the \
+             {:.2} floor), so the dropdown was left unchanged",
+            cfg.min_confidence
+        );
+    }
+    Ok(Some((chosen, confidence)))
+}
+
+/// Whether an extracted element description names a field the agent can type
+/// into (a text-ish input, a textarea, contenteditable) rather than click.
+pub fn is_text_field(desc: &str) -> bool {
+    let tag = desc.split_whitespace().next().unwrap_or_default();
+    match tag {
+        "textarea" => true,
+        "input" => {
+            let t = desc
+                .split("type=")
+                .nth(1)
+                .and_then(|s| s.split([' ', '"']).next())
+                .unwrap_or("text");
+            !matches!(
+                t,
+                "button" | "submit" | "reset" | "image" | "file" | "checkbox" | "radio" | "hidden"
+            )
+        }
+        _ => desc.contains("[contenteditable]"),
+    }
+}
+
+/// The floor applied to `act` element choices (the explicit-goal,
+/// best-guess `JEV_MIN_CONFIDENCE` — `act` is only called on purpose).
+pub fn min_confidence() -> f64 {
+    env_f64("JEV_MIN_CONFIDENCE", 0.5).clamp(0.0, 1.0)
+}
+
+/// Read back the effective model and input-token count from a response.
+fn usage_of(body: &Value, cfg: &Config) -> (String, u64) {
+    let model = body
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or(&cfg.model)
+        .to_string();
+    let input_tokens = body
+        .pointer("/usage/input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    (model, input_tokens)
 }
 
 /// One Choice call to `/v1/systemone`, retrying what the API asks to retry
@@ -342,6 +685,17 @@ async fn decide(
             }
         }
     });
+    let json = post_systemone(cfg, &body).await?;
+    let ids: Vec<&str> = criteria.keys().map(|k| k.as_str()).collect();
+    let (chosen, confidence) = parse_choice(&json, "element", &ids)?;
+    let (model, input_tokens) = usage_of(&json, cfg);
+    Ok((chosen, confidence, input_tokens, model))
+}
+
+/// POST a fully-built `/v1/systemone` request and return the parsed response,
+/// with the shared retry policy. Building the question set is the caller's
+/// job — single Choices and act fan-outs use the same wire path.
+async fn post_systemone(cfg: &Config, body: &Value) -> Result<Value> {
     let url = format!("{}/v1/systemone", cfg.base_url.trim_end_matches('/'));
     let mut attempt = 0u32;
     loop {
@@ -357,19 +711,7 @@ async fn decide(
         };
         let status = resp.status();
         if status.is_success() {
-            let json: Value = resp.json().await.context("parsing the Jev API response")?;
-            let ids: Vec<&str> = criteria.keys().map(|k| k.as_str()).collect();
-            let (chosen, confidence) = parse_answer(&json, &ids)?;
-            let model = json
-                .get("model")
-                .and_then(|m| m.as_str())
-                .unwrap_or(&cfg.model)
-                .to_string();
-            let input_tokens = json
-                .pointer("/usage/input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            return Ok((chosen, confidence, input_tokens, model));
+            return resp.json().await.context("parsing the Jev API response");
         }
         let retry_after = resp
             .headers()
@@ -418,7 +760,16 @@ fn parse_extraction(v: &Value) -> Result<PageInfo> {
                         .and_then(|d| d.as_str())
                         .unwrap_or_default()
                         .to_string();
-                    Some((id, desc))
+                    let options = e
+                        .get("options")
+                        .and_then(|o| o.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|o| o.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some(Element { id, desc, options })
                 })
                 .collect::<Vec<_>>()
         })
@@ -446,8 +797,16 @@ mod tests {
             url: "https://example.com/login".to_string(),
             title: "Example Login".to_string(),
             elements: vec![
-                ("e1".to_string(), "input type=text \"Email\"".to_string()),
-                ("e2".to_string(), "button \"Log in\"".to_string()),
+                Element {
+                    id: "e1".to_string(),
+                    desc: "input type=text \"Email\"".to_string(),
+                    options: vec![],
+                },
+                Element {
+                    id: "e2".to_string(),
+                    desc: "button \"Log in\"".to_string(),
+                    options: vec![],
+                },
             ],
             omitted: 3,
         };
@@ -461,21 +820,80 @@ mod tests {
     }
 
     #[test]
+    fn act_state_lists_recent_actions_values_and_pseudo_actions() {
+        let page = PageInfo {
+            url: "https://example.com/search".to_string(),
+            title: "Search".to_string(),
+            elements: vec![Element {
+                id: "e1".to_string(),
+                desc: "input type=search \"Search\"".to_string(),
+                options: vec![],
+            }],
+            omitted: 0,
+        };
+        let state = build_act_state(
+            "search for oolong tea",
+            &page,
+            &["typed into the search box".to_string()],
+            &["query".to_string()],
+        );
+        assert!(state.starts_with("Goal: \"search for oolong tea\"."));
+        assert!(state.contains("Actions already taken:\n- typed into the search box"));
+        assert!(state.contains("Values the caller can type, by key: query."));
+        assert!(state.contains("e1: input type=search \"Search\""));
+        assert!(state.contains("scroll_down: Scroll the page down"));
+        assert!(state.contains("wait: Wait briefly"));
+    }
+
+    #[test]
+    fn act_criteria_stay_under_the_choice_limit() {
+        let page = PageInfo {
+            url: "https://example.com".to_string(),
+            title: String::new(),
+            elements: (1..=MAX_ELEMENTS)
+                .map(|i| Element {
+                    id: format!("e{i}"),
+                    desc: format!("button {i}"),
+                    options: vec![],
+                })
+                .collect(),
+            omitted: 0,
+        };
+        let criteria = act_criteria(&page);
+        assert_eq!(criteria.len(), MAX_ELEMENTS + PSEUDO_ACTIONS.len());
+        assert!(criteria.len() <= 255);
+        assert!(criteria.contains_key("scroll_down"));
+    }
+
+    #[test]
     fn answer_must_name_an_offered_element() {
         let body = json!({
             "answers": { "element": { "choice": "e2", "confidence": 0.93 } },
             "model": "jev-1.14.0",
             "usage": { "input_tokens": 1712 }
         });
-        let (chosen, confidence) = parse_answer(&body, &["e1", "e2"]).unwrap();
+        let (chosen, confidence) = parse_choice(&body, "element", &["e1", "e2"]).unwrap();
         assert_eq!(chosen, "e2");
         assert!((confidence - 0.93).abs() < f64::EPSILON);
 
         let bogus = json!({ "answers": { "element": { "choice": "e99", "confidence": 1.0 } } });
-        assert!(parse_answer(&bogus, &["e1", "e2"]).is_err());
+        assert!(parse_choice(&bogus, "element", &["e1", "e2"]).is_err());
 
         let missing = json!({ "answers": {} });
-        assert!(parse_answer(&missing, &["e1", "e2"]).is_err());
+        assert!(parse_choice(&missing, "element", &["e1", "e2"]).is_err());
+    }
+
+    #[test]
+    fn noul_answers_are_read_per_question() {
+        let body = json!({
+            "answers": {
+                "goal_met": { "noul": 0.91 },
+                "stuck": { "noul": 0.03 }
+            }
+        });
+        assert!((parse_noul(&body, "goal_met").unwrap() - 0.91).abs() < f64::EPSILON);
+        assert!((parse_noul(&body, "stuck").unwrap() - 0.03).abs() < f64::EPSILON);
+        assert!(parse_noul(&body, "missing").is_err());
     }
 
     #[test]
@@ -488,8 +906,23 @@ mod tests {
                 }
             }
         });
-        let (_, confidence) = parse_answer(&body, &["e1", "e2"]).unwrap();
+        let (_, confidence) = parse_choice(&body, "element", &["e1", "e2"]).unwrap();
         assert!((confidence - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn text_fields_are_recognized_from_descriptions() {
+        assert!(is_text_field("input type=search \"Search\""));
+        assert!(is_text_field("input #email \"Email\"")); // no type= → text
+        assert!(is_text_field("input type=password (value hidden)"));
+        assert!(is_text_field("textarea #bio"));
+        assert!(is_text_field(
+            "div #editor [contenteditable] \"Write here\""
+        ));
+        assert!(!is_text_field("input type=submit \"Log in\""));
+        assert!(!is_text_field("input type=checkbox \"Accept\""));
+        assert!(!is_text_field("button \"Go\""));
+        assert!(!is_text_field("a \"Home\" -> /"));
     }
 
     #[test]
@@ -499,13 +932,16 @@ mod tests {
             "title": "Example",
             "elements": [
                 { "id": "e1", "desc": "a \"More information...\" -> https://example.com" },
-                { "id": "e2", "desc": "input type=password (value hidden)" }
+                { "id": "e2", "desc": "select #color selected=\"Red\"", "options": ["Red", "Green", "Blue"] },
+                { "id": "e3", "desc": "input type=password (value hidden)" }
             ],
             "omitted": 12
         });
         let page = parse_extraction(&raw).unwrap();
-        assert_eq!(page.elements.len(), 2);
-        assert_eq!(page.elements[0].0, "e1");
+        assert_eq!(page.elements.len(), 3);
+        assert_eq!(page.elements[0].id, "e1");
+        assert_eq!(page.elements[1].options, vec!["Red", "Green", "Blue"]);
+        assert!(page.elements[2].options.is_empty());
         assert_eq!(page.omitted, 12);
         assert!(parse_extraction(&json!({})).is_err());
     }

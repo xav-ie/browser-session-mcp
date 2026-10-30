@@ -409,6 +409,145 @@ impl BrowserSessionServer {
         )))
     }
 
+    async fn act(&self, args: JsonObject) -> Result<Structured<ActOut>> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let goal = required_str(&args, "goal")?.to_string();
+        let max_steps = optional_u64(&args, "maxSteps").unwrap_or(8).clamp(1, 32);
+        let mut values: Vec<(String, String)> = Vec::new();
+        if let Some(v) = args.get("values") {
+            let map = v.as_object().ok_or_else(|| {
+                anyhow!("`values` must be an object like {{ query: \"Oolong\" }}")
+            })?;
+            for (k, val) in map {
+                let text = val
+                    .as_str()
+                    .ok_or_else(|| anyhow!("values.{k} must be a string"))?
+                    .to_string();
+                values.push((k.clone(), text));
+            }
+        }
+        let keys: Vec<String> = values.iter().map(|(k, _)| k.clone()).collect();
+        let page = sessions.active_page(&session_id).await?;
+        if !jev::available() {
+            bail!(
+                "act needs a Jev key: set TYPESAFE_API_KEY on the server (keys: console.typesafe.ai)"
+            );
+        }
+        let floor = jev::min_confidence();
+        let mut steps: Vec<ActStep> = Vec::new();
+        let mut recent: Vec<String> = Vec::new();
+        let mut url = String::new();
+        let mut title = String::new();
+        for step in 1..=max_steps {
+            let d = match jev::decide_step(&page, &goal, &recent, &keys).await {
+                Ok(d) => d,
+                Err(e) => bail!("act failed at step {step}: {e:#}; {}", trail(&steps)),
+            };
+            url = d.page.url.clone();
+            title = d.page.title.clone();
+            // Gates run before executing anything this step: if the goal
+            // already reads met — or nothing can help — don't act at all.
+            if d.goal_met >= ACT_GATE {
+                return Ok(act_done("completed", &goal, steps, url, title));
+            }
+            if d.stuck >= ACT_GATE {
+                return Ok(act_done("stuck", &goal, steps, url, title));
+            }
+            if d.confidence < floor {
+                bail!(
+                    "act stopped at step {step}: confidence for `{}` was only {:.2} \
+                     (below the {:.2} floor); {}",
+                    d.description,
+                    d.confidence,
+                    floor,
+                    trail(&steps)
+                );
+            }
+            let el = if d.is_element {
+                d.page.elements.iter().find(|e| e.id == d.chosen)
+            } else {
+                None
+            };
+            let (record, recent_line) = if let Some(el) = el {
+                let css = format!("[data-jev-id=\"{}\"]", el.id);
+                let (action, typed) = if !el.options.is_empty() {
+                    match jev::decide_select_option(&goal, &el.desc, &el.options).await {
+                        Ok(Some((opt, _))) => {
+                            set_select_option(&page, &css, &opt).await?;
+                            ("select".to_string(), None)
+                        }
+                        Ok(None) => {
+                            click_label(&page, &css, &el.desc).await?;
+                            ("click".to_string(), None)
+                        }
+                        Err(e) => bail!(
+                            "act failed choosing an option at step {step}: {e:#}; {}",
+                            trail(&steps)
+                        ),
+                    }
+                } else if jev::is_text_field(&el.desc) && !values.is_empty() {
+                    match jev::decide_value_key(&goal, &el.desc, &keys).await {
+                        Ok(Some((key, _))) => {
+                            let text = values
+                                .iter()
+                                .find(|(k, _)| *k == key)
+                                .map(|(_, v)| v.clone())
+                                .unwrap_or_default();
+                            type_into(&page, &css, &text).await?;
+                            ("type".to_string(), Some(key))
+                        }
+                        Ok(None) => {
+                            click_label(&page, &css, &el.desc).await?;
+                            ("click".to_string(), None)
+                        }
+                        Err(e) => bail!(
+                            "act failed choosing a value at step {step}: {e:#}; {}",
+                            trail(&steps)
+                        ),
+                    }
+                } else {
+                    click_label(&page, &css, &el.desc).await?;
+                    ("click".to_string(), None)
+                };
+                (
+                    ActStep {
+                        step: step as usize,
+                        action: action.clone(),
+                        target: Some(el.desc.clone()),
+                        typed,
+                        confidence: d.confidence,
+                        goal: d.goal_met,
+                        stuck: d.stuck,
+                    },
+                    format!("{step}. {action} {}", el.desc),
+                )
+            } else {
+                match d.chosen.as_str() {
+                    "scroll_down" => scroll_viewport(&page, 0.8).await?,
+                    "scroll_up" => scroll_viewport(&page, -0.8).await?,
+                    "wait" => tokio::time::sleep(Duration::from_millis(500)).await,
+                    other => bail!("Jev chose `{other}`, which is not one of the offered actions"),
+                }
+                (
+                    ActStep {
+                        step: step as usize,
+                        action: d.chosen.clone(),
+                        target: None,
+                        typed: None,
+                        confidence: d.confidence,
+                        goal: d.goal_met,
+                        stuck: d.stuck,
+                    },
+                    format!("{step}. {}", d.chosen),
+                )
+            };
+            steps.push(record);
+            recent.push(recent_line);
+        }
+        Ok(act_done("max_steps", &goal, steps, url, title))
+    }
+
     async fn wait_for(&self, args: JsonObject) -> Result<Text> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
@@ -984,6 +1123,7 @@ tools! {
     "navigate" => navigate,
     "take_screenshot" => take_screenshot,
     "take_snapshot" => take_snapshot,
+    "act" => act,
     "click" => click,
     "type" => type_text,
     "press_key" => press_key,
@@ -1027,6 +1167,40 @@ struct PagesOut {
 struct NavigateOut {
     /// The page's URL after any redirects.
     url: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ActStep {
+    /// 1-based step number.
+    step: usize,
+    /// "click", "type", "select", "scroll_down", "scroll_up" or "wait".
+    action: String,
+    /// The element acted on, as it was offered to Jev.
+    target: Option<String>,
+    /// The `values` key that was typed, when this step typed one.
+    typed: Option<String>,
+    /// Jev's confidence in this step's choice.
+    confidence: f64,
+    /// Jev's probability the goal was met, as judged this step.
+    goal: f64,
+    /// Jev's probability of being stuck, as judged this step.
+    stuck: f64,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ActOut {
+    /// "completed", "stuck" or "max_steps".
+    status: String,
+    /// The goal as given.
+    goal: String,
+    /// What was done, in order.
+    steps: Vec<ActStep>,
+    /// The page's URL at the final decision.
+    url: String,
+    /// The page's title at the final decision.
+    title: String,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -1337,6 +1511,115 @@ async fn resolve_and_wait(
     Ok((selector.to_string(), None))
 }
 
+/// `act` stop gates: Jev's probability that the goal is already met — or
+/// that no action can make progress — must cross this before the loop stops
+/// on it. 0.85 matches what the jev-browser reference uses for both gates.
+const ACT_GATE: f64 = 0.85;
+
+/// Compact one-line step history for `act` error messages, so a mid-loop
+/// failure still tells the caller what already happened.
+fn trail(steps: &[ActStep]) -> String {
+    if steps.is_empty() {
+        return "no steps had run yet".to_string();
+    }
+    steps
+        .iter()
+        .map(|s| format!("{}:{}", s.step, s.action))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Final `act` output: a one-line verdict plus the structured trace.
+fn act_done(
+    status: &str,
+    goal: &str,
+    steps: Vec<ActStep>,
+    url: String,
+    title: String,
+) -> Structured<ActOut> {
+    let n = steps.len();
+    let verdict = match status {
+        "completed" if n == 0 => "Goal was already met".to_string(),
+        "completed" => format!("Completed the goal in {n} step{}", plural(n)),
+        "stuck" => format!("Stuck after {n} step{}", plural(n)),
+        _ => format!("Stopped at maxSteps with {n} step{} taken", plural(n)),
+    };
+    ok_text_struct(
+        format!("{verdict}. Jev can be eager to call a goal met — verify the page."),
+        ActOut {
+            status: status.to_string(),
+            goal: goal.to_string(),
+            steps,
+            url,
+            title,
+        },
+    )
+}
+
+/// Scroll by a fraction of the viewport (positive = down). Used by `act`'s
+/// scroll pseudo-actions.
+async fn scroll_viewport(page: &Page, fraction: f64) -> Result<()> {
+    let decl = format!(
+        "function() {{ window.scrollBy(0, Math.round(window.innerHeight * ({fraction}))); return true; }}"
+    );
+    iso_eval_function(page, &decl).await?;
+    Ok(())
+}
+
+/// Set a `<select>` to the option with `label`, firing input/change so page
+/// scripts observe it. The element is targeted by its just-stamped
+/// `data-jev-id`, i.e. still an id Jev was offered.
+async fn set_select_option(page: &Page, css: &str, label: &str) -> Result<()> {
+    let decl = format!(
+        "function() {{ const el = document.querySelector({css}); if (!el) return false; \
+         for (const o of el.options) {{ if (o.label === {label}) {{ el.value = o.value; \
+         el.dispatchEvent(new Event('input', {{bubbles: true}})); \
+         el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }} }} return false; }}",
+        css = serde_json::to_string(css).unwrap_or_else(|_| "''".to_string()),
+        label = serde_json::to_string(label).unwrap_or_else(|_| "''".to_string())
+    );
+    let v = iso_eval_function(page, &decl).await?;
+    if v.as_bool() != Some(true) {
+        bail!("option {label:?} is not in the dropdown");
+    }
+    Ok(())
+}
+
+/// Click an element's center through trusted CDP input, naming `label` in
+/// errors — the shared path of `act`'s element clicks.
+async fn click_label(page: &Page, css: &str, label: &str) -> Result<()> {
+    let (x, y) = element_center(page, css).await?;
+    page.click(Point::new(x, y))
+        .await
+        .with_context(|| format!("clicking {label}"))?;
+    Ok(())
+}
+
+/// Clear a field, click it to focus, and type `text` via CDP keyboard — the
+/// same sequence as the `type` tool. Used by `act` for value typing.
+async fn type_into(page: &Page, css: &str, text: &str) -> Result<()> {
+    let element = page
+        .find_element(css.to_string())
+        .await
+        .with_context(|| format!("locating {css}"))?;
+    let _ = element
+        .call_js_fn(
+            "function() { if (this.value !== undefined) this.value = ''; }",
+            false,
+        )
+        .await;
+    element.click().await.ok();
+    element
+        .type_str(text)
+        .await
+        .with_context(|| format!("typing into {css}"))?;
+    Ok(())
+}
+
 /// Center of an element in viewport CSS pixels, after scrolling it into view.
 /// Evaluated in an isolated world so it works regardless of stealth.
 async fn element_center(page: &Page, selector: &str) -> Result<(f64, f64)> {
@@ -1458,6 +1741,10 @@ fn tool_defs() -> Vec<Tool> {
         ),
         ("required", json!(["width", "height"])),
         ("additionalProperties", Value::Bool(false)),
+    ]);
+    let values_t = obj(&[
+        ("type", Value::String("object".into())),
+        ("additionalProperties", str_t.clone()),
     ]);
     let session_id = (
         "sessionId",
@@ -1598,6 +1885,32 @@ fn tool_defs() -> Vec<Tool> {
             "Return the accessibility tree of the session's active tab as indented text: each node's role and name (links, buttons, headings, form fields and their labels, and current values), nested by structure. Use it to find what's on the page and what to click or type into, far more cheaply than take_screenshot; use take_screenshot when visual layout matters, and evaluate for data not shown as text. It reads the page without changing it and returns the whole tree, so a large page gives long output.",
             object_schema(&[session_id], &["sessionId"]),
             read_only(),
+        ),
+        tool(
+            "act",
+            "Act toward a goal on the session's active tab in one call: the server extracts the page's interactive elements, asks the Jev decision model for the next step, does it (click, type, select, scroll or wait), and repeats — until the goal reads achieved, nothing looks able to make progress, or the step budget runs out. Each step is one cheap Jev request (~150–500ms), not a driving-LLM round trip, so multi-step flows take seconds and fractions of a cent. Pass `values` (e.g. { query: \"Oolong\" }) for anything to type: Jev only sees the keys and picks which field each belongs to — the text goes straight to the page, so secrets never reach a model. Needs TYPESAFE_API_KEY; fails closed on any Jev problem, and every step lands on an element the extraction just offered. Returns a per-step trace with confidences; `status` is completed, stuck or max_steps. Jev can be eager to call a goal met — verify with take_snapshot or take_screenshot afterwards. For a single action, click/type with a plain-language selector is cheaper.",
+            object_schema(
+                &[
+                    session_id,
+                    (
+                        "goal",
+                        &str_t,
+                        "What to achieve on the active tab, e.g. \"open the article about espresso\". Re-decided after every step against the page as it is.",
+                    ),
+                    (
+                        "values",
+                        &values_t,
+                        "Text the loop may type, keyed by role, e.g. { query: \"Oolong\", password: \"hunter2\" }. Only the keys are sent to Jev; the values are typed via CDP.",
+                    ),
+                    (
+                        "maxSteps",
+                        &pos_int_t,
+                        "Step budget before stopping with status max_steps. Default 8, capped at 32.",
+                    ),
+                ],
+                &["sessionId", "goal"],
+            ),
+            writes(true, true),
         ),
         tool(
             "click",
