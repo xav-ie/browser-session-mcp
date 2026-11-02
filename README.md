@@ -261,7 +261,7 @@ can type their results.
 **Logs** ⚙ (written by the `listener` role)
 - `list_visits({ sessionId })`: one entry per page visit, oldest first
 - `list_console_messages({ sessionId, visit?, limit? })`: `limit` defaults to 500
-- `list_network_requests({ sessionId, visit?, limit? })`: `limit` defaults to 500
+- `list_network_requests({ sessionId, visit?, limit? })`: `limit` defaults to 500. Includes requests from cross-site iframes and workers (sandboxed third-party code such as Shopify checkout pixels), logged under the tab's visit
 
 **Profiling** (find the JavaScript behind a slow or hung page)
 - `start_profiling({ sessionId, tabIndex?, samplingIntervalUs? })`: starts the V8 CPU profiler

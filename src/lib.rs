@@ -1,4 +1,5 @@
 pub mod attach_guard;
+pub mod child_capture;
 pub mod chrome;
 pub mod chrome_ctx;
 pub mod jev;
