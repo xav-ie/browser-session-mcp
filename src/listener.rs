@@ -129,6 +129,23 @@ async fn run_once(browser_url: String, writer: LogWriter) -> Result<()> {
     }
     let _guard = AbortOnDrop(guard);
 
+    let pages: Pages = Arc::new(Mutex::new(HashMap::new()));
+    let child_url = browser_url.clone();
+    let child_writer = writer.clone();
+    let child_pages = pages.clone();
+    let child = tokio::spawn(async move {
+        loop {
+            let res =
+                crate::child_capture::run(&child_url, child_writer.clone(), child_pages.clone())
+                    .await;
+            if let Err(err) = res {
+                tracing::warn!(error = %err, "child capture stopped; restarting");
+            }
+            tokio::time::sleep(RECONNECT_BACKOFF).await;
+        }
+    });
+    let _child = AbortOnDrop(child);
+
     let wired: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
     // Wire every page we know about so far.
@@ -141,7 +158,14 @@ async fn run_once(browser_url: String, writer: LogWriter) -> Result<()> {
             }
             g.insert(target_id.clone());
         }
-        spawn_target_loop(page, writer.clone(), wired.clone(), ua.clone()).await;
+        spawn_target_loop(
+            page,
+            writer.clone(),
+            wired.clone(),
+            pages.clone(),
+            ua.clone(),
+        )
+        .await;
     }
 
     // Watch for new attachments.
@@ -178,7 +202,7 @@ async fn run_once(browser_url: String, writer: LogWriter) -> Result<()> {
                     g.insert(target_id.clone());
                 }
                 match browser.get_page(TargetId::new(&target_id)).await {
-                    Ok(page) => spawn_target_loop(page, writer.clone(), wired.clone(), ua.clone()).await,
+                    Ok(page) => spawn_target_loop(page, writer.clone(), wired.clone(), pages.clone(), ua.clone()).await,
                     Err(err) => tracing::warn!(target = %target_id, error = %err, "failed to attach"),
                 }
             }
@@ -194,23 +218,27 @@ async fn run_once(browser_url: String, writer: LogWriter) -> Result<()> {
 }
 
 #[derive(Debug, Default)]
-struct InflightRequest {
-    method: String,
-    url: String,
-    t: String,
-    seq: u32,
-    frame_id: Option<String>,
-    resource_type: Option<ResourceType>,
-    status: Option<i64>,
-    post_data: Option<String>,
-    redirected_to: Option<String>,
+pub(crate) struct InflightRequest {
+    pub(crate) method: String,
+    pub(crate) url: String,
+    pub(crate) t: String,
+    pub(crate) seq: u32,
+    pub(crate) frame_id: Option<String>,
+    pub(crate) resource_type: Option<ResourceType>,
+    pub(crate) status: Option<i64>,
+    pub(crate) post_data: Option<String>,
+    pub(crate) redirected_to: Option<String>,
 }
 
+/// Wired tabs by target id, so `child_capture` can log a tab's iframe and
+/// worker requests into the tab's current visit.
+pub(crate) type Pages = Arc<Mutex<HashMap<String, Arc<Mutex<TargetState>>>>>;
+
 #[derive(Debug)]
-struct TargetState {
-    ctx_id: String,
+pub(crate) struct TargetState {
+    pub(crate) ctx_id: String,
     target_id: String,
-    current_seq: u32,
+    pub(crate) current_seq: u32,
     inflight: HashMap<String, InflightRequest>,
     /// Keys of recently logged one-shot events (navigations, console messages,
     /// exceptions), so a duplicate delivery isn't logged twice. Tabs that were
@@ -237,18 +265,25 @@ async fn spawn_target_loop(
     page: Page,
     writer: LogWriter,
     wired: Arc<Mutex<HashSet<String>>>,
+    pages: Pages,
     ua: Option<UaOverride>,
 ) {
     let target_id = page.target_id().inner().to_string();
     tokio::spawn(async move {
-        if let Err(err) = target_loop(page.clone(), writer, ua).await {
+        if let Err(err) = target_loop(page.clone(), writer, pages.clone(), ua).await {
             tracing::warn!(target = %target_id, error = %err, "target loop exited with error");
         }
         wired.lock().await.remove(&target_id);
+        pages.lock().await.remove(&target_id);
     });
 }
 
-async fn target_loop(page: Page, writer: LogWriter, ua: Option<UaOverride>) -> Result<()> {
+async fn target_loop(
+    page: Page,
+    writer: LogWriter,
+    pages: Pages,
+    ua: Option<UaOverride>,
+) -> Result<()> {
     // Per-target setup. Network + Page are enabled unconditionally. Runtime is
     // enabled LATER (just below, once we know the BrowserContext), and only when
     // the session is NOT in stealth — enabling it here would briefly turn Runtime
@@ -338,6 +373,7 @@ async fn target_loop(page: Page, writer: LogWriter, ua: Option<UaOverride>) -> R
         inflight: HashMap::new(),
         recent: VecDeque::new(),
     }));
+    pages.lock().await.insert(target_id.clone(), state.clone());
 
     let mut frame_navs = page.event_listener::<EventFrameNavigated>().await?;
     let mut req_sent = page.event_listener::<EventRequestWillBeSent>().await?;
@@ -493,21 +529,27 @@ async fn on_request_will_be_sent(
             // small bodies; decode + concat so callers see e.g. analytics POST
             // payloads. Larger bodies only set `has_post_data` (not fetched here).
             post_data: e.request.post_data_entries.as_ref().and_then(|entries| {
-                let mut buf: Vec<u8> = Vec::new();
-                for ent in entries {
-                    if let Some(b) = ent.bytes.as_ref() {
-                        match base64::engine::general_purpose::STANDARD
-                            .decode(String::from(b.clone()).as_bytes())
-                        {
-                            Ok(bytes) => buf.extend_from_slice(&bytes),
-                            Err(_) => return None,
-                        }
-                    }
-                }
-                (!buf.is_empty()).then(|| String::from_utf8_lossy(&buf).into_owned())
+                decode_post_data(
+                    entries
+                        .iter()
+                        .filter_map(|ent| ent.bytes.clone().map(String::from)),
+                )
             }),
         },
     );
+}
+
+/// Chrome inlines small request bodies as base64 `postDataEntries`; decode and
+/// concatenate them. `None` if there is no body or a chunk isn't base64.
+pub(crate) fn decode_post_data(chunks: impl IntoIterator<Item = String>) -> Option<String> {
+    let mut buf: Vec<u8> = Vec::new();
+    for chunk in chunks {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(chunk.as_bytes())
+            .ok()?;
+        buf.extend_from_slice(&bytes);
+    }
+    (!buf.is_empty()).then(|| String::from_utf8_lossy(&buf).into_owned())
 }
 
 async fn on_response_received(state: &Arc<Mutex<TargetState>>, e: &EventResponseReceived) {
@@ -550,13 +592,24 @@ async fn write_network(
     inf: InflightRequest,
     failure: Option<String>,
 ) {
-    if inf.seq == 0 {
-        return;
-    }
     let (ctx_id, target_id) = {
         let s = state.lock().await;
         (s.ctx_id.clone(), s.target_id.clone())
     };
+    write_network_entry(writer, &ctx_id, &target_id, inf, failure).await;
+}
+
+/// Append a finished request to the visit file `inf.seq` of tab `target_id`.
+pub(crate) async fn write_network_entry(
+    writer: &LogWriter,
+    ctx_id: &str,
+    target_id: &str,
+    inf: InflightRequest,
+    failure: Option<String>,
+) {
+    if inf.seq == 0 {
+        return;
+    }
     let mut entry = NetworkEntry {
         t: inf.t,
         method: inf.method,
@@ -566,9 +619,9 @@ async fn write_network(
         post_data: inf.post_data,
         redirected_to: inf.redirected_to,
     };
-    crate::redact::network_entry(&mut entry, takeover::active(&ctx_id).await);
+    crate::redact::network_entry(&mut entry, takeover::active(ctx_id).await);
     if let Err(err) = writer
-        .append_network(&ctx_id, inf.seq, &target_id, entry)
+        .append_network(ctx_id, inf.seq, target_id, entry)
         .await
     {
         tracing::warn!(error = %err, "append network failed");
@@ -670,7 +723,7 @@ fn value_to_str(v: &serde_json::Value) -> String {
     }
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_default()
