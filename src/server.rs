@@ -30,12 +30,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::chrome_ctx::ChromeContext;
+use crate::emulation::{self, Emulation, InitScript, NetworkConditions};
 use crate::jev;
 use crate::logs::{self, LogKind, ReadOpts, SessionLogEntry};
 use crate::profiler;
 use crate::saved_states::{SavedStateStore, StateSummary};
 use crate::sessions::{SessionInfo, Viewport};
 use crate::snapshot;
+use crate::state::SessionRecord;
 use crate::takeover;
 
 #[derive(Clone)]
@@ -967,6 +969,95 @@ impl BrowserSessionServer {
         ))
     }
 
+    // --- emulation ---
+
+    async fn set_emulation(&self, args: JsonObject) -> Result<Structured<EmulationOut>> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let rate = match args.get("cpuThrottlingRate") {
+            None => None,
+            Some(v) => Some(
+                v.as_f64()
+                    .filter(|r| r.is_finite() && (1.0..=100.0).contains(r))
+                    .ok_or_else(|| anyhow!("cpuThrottlingRate must be a number from 1 to 100"))?,
+            ),
+        };
+        let network = args
+            .get("network")
+            .map(emulation::parse_network)
+            .transpose()?;
+        if rate.is_none() && network.is_none() {
+            bail!("pass cpuThrottlingRate, network or both");
+        }
+        let rec = sessions
+            .update_emulation(&session_id, |em, _| {
+                let em = em.get_or_insert_with(Emulation::default);
+                if let Some(rate) = rate {
+                    em.cpu_throttling_rate = rate;
+                }
+                if let Some(network) = network {
+                    em.network = network;
+                }
+            })
+            .await?;
+        let out = EmulationOut::from(rec);
+        Ok(ok_text_struct(out.describe(), out))
+    }
+
+    async fn get_emulation(&self, args: JsonObject) -> Result<Structured<EmulationOut>> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let out = EmulationOut::from(sessions.record(&session_id).await?);
+        Ok(ok_text_struct(out.describe(), out))
+    }
+
+    async fn add_init_script(&self, args: JsonObject) -> Result<Structured<InitScriptOut>> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let source = required_str(&args, "source")?.to_string();
+        let mut buf = [0u8; 4];
+        getrandom::fill(&mut buf).map_err(|e| anyhow!("getrandom: {e}"))?;
+        let id: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+        let rec = sessions
+            .update_emulation(&session_id, |_, scripts| {
+                scripts.push(InitScript {
+                    id: id.clone(),
+                    source,
+                })
+            })
+            .await?;
+        Ok(ok_text_struct(
+            format!("Added init script {id}; it runs from each tab's next page load."),
+            InitScriptOut {
+                id,
+                session: EmulationOut::from(rec),
+            },
+        ))
+    }
+
+    async fn remove_init_script(&self, args: JsonObject) -> Result<Structured<EmulationOut>> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let id = required_str(&args, "id")?.to_string();
+        if !sessions
+            .record(&session_id)
+            .await?
+            .init_scripts
+            .iter()
+            .any(|s| s.id == id)
+        {
+            bail!("no init script {id:?} in this session; get_emulation lists them");
+        }
+        let rec = sessions
+            .update_emulation(&session_id, |_, scripts| scripts.retain(|s| s.id != id))
+            .await?;
+        let out = EmulationOut::from(rec);
+        Ok(ok_text_struct(
+            format!("Removed init script {id}. {}", out.describe()),
+            out,
+        ))
+    }
+
     // --- saved browser states ---
 
     async fn save_state(&self, args: JsonObject) -> Result<Structured<SavedOut>> {
@@ -1219,6 +1310,10 @@ tools! {
     "list_network_requests" => list_network_requests,
     "set_stealth" => set_stealth,
     "get_stealth" => get_stealth,
+    "set_emulation" => set_emulation,
+    "get_emulation" => get_emulation,
+    "add_init_script" => add_init_script,
+    "remove_init_script" => remove_init_script,
     "request_human_takeover" => request_human_takeover,
     "await_human_takeover" => await_human_takeover,
     "save_browser_state" => save_state,
@@ -1336,6 +1431,60 @@ struct NetworkOut {
 #[derive(Serialize, JsonSchema)]
 struct StealthOut {
     stealth: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct EmulationOut {
+    /// CPU slowdown factor; 1 means none.
+    cpu_throttling_rate: f64,
+    /// Network throttling; null means none.
+    network: Option<NetworkConditions>,
+    init_scripts: Vec<InitScript>,
+}
+
+impl From<SessionRecord> for EmulationOut {
+    fn from(rec: SessionRecord) -> Self {
+        let em = rec.emulation.unwrap_or_default();
+        Self {
+            cpu_throttling_rate: em.cpu_throttling_rate.max(1.0),
+            network: em.network,
+            init_scripts: rec.init_scripts,
+        }
+    }
+}
+
+impl EmulationOut {
+    fn describe(&self) -> String {
+        let cpu = if self.cpu_throttling_rate > 1.0 {
+            format!("CPU {}x slower", self.cpu_throttling_rate)
+        } else {
+            "CPU unthrottled".into()
+        };
+        let net = match &self.network {
+            None => "network unthrottled".into(),
+            Some(n) if n.offline => "network offline".into(),
+            Some(n) => format!(
+                "network {}{}ms latency, {} kbps down, {} kbps up",
+                n.preset
+                    .as_deref()
+                    .map(|p| format!("{p}: "))
+                    .unwrap_or_default(),
+                n.latency_ms,
+                n.download_kbps,
+                n.upload_kbps
+            ),
+        };
+        format!("{cpu}, {net}, {} init script(s).", self.init_scripts.len())
+    }
+}
+
+#[derive(Serialize, JsonSchema)]
+struct InitScriptOut {
+    /// Pass to remove_init_script.
+    id: String,
+    #[serde(flatten)]
+    session: EmulationOut,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -2024,6 +2173,21 @@ fn tool_defs() -> Vec<Tool> {
         ("type", Value::String("object".into())),
         ("additionalProperties", str_t.clone()),
     ]);
+    let network_t = json!({
+        "oneOf": [
+            { "type": "string", "enum": ["off", "offline", "slow3g", "slow4g", "fast4g"] },
+            {
+                "type": "object",
+                "properties": {
+                    "latencyMs": { "type": "number", "minimum": 0 },
+                    "downloadKbps": { "type": "number", "exclusiveMinimum": 0 },
+                    "uploadKbps": { "type": "number", "exclusiveMinimum": 0 },
+                },
+                "required": ["latencyMs", "downloadKbps", "uploadKbps"],
+                "additionalProperties": false,
+            },
+        ],
+    });
     let session_id = (
         "sessionId",
         &str_t,
@@ -2507,6 +2671,69 @@ fn tool_defs() -> Vec<Tool> {
             "Return whether stealth is on for a session; it changes nothing. Check it before evaluate or list_console_messages, whose behavior it changes; use set_stealth to change it. A new session starts with stealth off.",
             object_schema(&[session_id], &["sessionId"]),
             read_only(),
+        ),
+        tool(
+            "set_emulation",
+            "Throttle the session's CPU and/or network to measure a page as a slow phone or connection sees it (load time, hydration, layout shift, flaky taps). Applies to every tab of the session, open now or opened later (popups included), and lasts until changed or the session closes; it is in place when this returns, so navigate right after. Omitted fields keep their current value. Typical mid-range phone: cpuThrottlingRate 4 with network \"slow4g\" and useMobileUA on open_browser_session. Pass cpuThrottlingRate 1 and network \"off\" to stop throttling. Needs the listener role; fails if no tab confirms within 5s.",
+            object_schema(
+                &[
+                    session_id,
+                    (
+                        "cpuThrottlingRate",
+                        &num_t,
+                        "CPU slowdown factor from 1 (none) to 100. 4 is a mid-range phone, 6 a low-end one.",
+                    ),
+                    (
+                        "network",
+                        &network_t,
+                        "A preset (\"slow3g\", \"slow4g\", \"fast4g\" as in Chrome DevTools, \"offline\", or \"off\" for none) or custom {latencyMs, downloadKbps, uploadKbps}.",
+                    ),
+                ],
+                &["sessionId"],
+            ),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(false),
+        ),
+        tool(
+            "get_emulation",
+            "Return the session's throttling and init scripts; it changes nothing. A new session has none.",
+            object_schema(&[session_id], &["sessionId"]),
+            read_only(),
+        ),
+        tool(
+            "add_init_script",
+            "Run JavaScript at the start of every page load in every tab of the session, before any of the page's own scripts, until removed or the session closes. Use it to record timings or DOM changes from the very first moment of a load (a MutationObserver, PerformanceObserver or console hook writing to a window global you read later with evaluate), or to stub an API before the page uses it. Takes effect from each tab's next navigation, not the page already loaded. It runs in the page's main world, so the page can see what it defines. Returns an id for remove_init_script. Needs the listener role.",
+            object_schema(
+                &[
+                    session_id,
+                    (
+                        "source",
+                        &str_t,
+                        "The JavaScript to run, as a script body (not a function).",
+                    ),
+                ],
+                &["sessionId", "source"],
+            ),
+            writes(false, false),
+        ),
+        tool(
+            "remove_init_script",
+            "Stop running an init script added by add_init_script; pages already loaded keep what it did. Fails on an id the session doesn't have; get_emulation lists them.",
+            object_schema(
+                &[
+                    session_id,
+                    ("id", &str_t, "The id add_init_script returned."),
+                ],
+                &["sessionId", "id"],
+            ),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
         ),
         tool(
             "request_human_takeover",

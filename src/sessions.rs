@@ -23,10 +23,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
-use crate::state::StateStore;
+use crate::emulation::{self, Emulation, InitScript};
+use crate::state::{SessionRecord, StateStore};
 use crate::user_agent::{self, UaOverride};
+
+const EMULATION_APPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SessionInfo {
@@ -354,6 +358,43 @@ impl SessionManager {
             reg.active.remove(session_id);
         }
         Ok(())
+    }
+
+    /// Change the session's emulation or init scripts and wait for the attach
+    /// guard to apply the change to every open tab. A session with no tab has
+    /// nothing to wait for: its next tab gets the change when it attaches.
+    pub async fn update_emulation(
+        &self,
+        session_id: &str,
+        f: impl FnOnce(&mut Option<Emulation>, &mut Vec<InitScript>),
+    ) -> Result<SessionRecord> {
+        let _ctx = self.context_id_for(session_id).await?;
+        let rec = self.state.update_emulation(session_id, f).await?;
+        let (tabs, _) = self.reconcile_tabs(session_id).await?;
+        if tabs.is_empty() {
+            return Ok(rec);
+        }
+        let deadline = tokio::time::Instant::now() + EMULATION_APPLY_TIMEOUT;
+        loop {
+            if emulation::applied_revision(session_id)
+                .await
+                .is_some_and(|r| r >= rec.emulation_rev)
+            {
+                return Ok(rec);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!(
+                    "saved, but no tab confirmed it within {}s: the listener role applies emulation and init scripts, so check that it is running",
+                    EMULATION_APPLY_TIMEOUT.as_secs()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    pub async fn record(&self, session_id: &str) -> Result<SessionRecord> {
+        let _ctx = self.context_id_for(session_id).await?;
+        Ok(self.state.record(session_id).await.unwrap_or_default())
     }
 
     /// The viewport chosen at `open` (or its default for older sessions).

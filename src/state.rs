@@ -22,6 +22,7 @@ use tokio::{
     sync::{Mutex, Notify},
 };
 
+use crate::emulation::{Emulation, InitScript};
 use crate::sessions::Viewport;
 use crate::user_agent::UaOverride;
 
@@ -45,13 +46,28 @@ pub struct SessionRecord {
     /// session (not just the first) so screenshots and coordinates agree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewport: Option<Viewport>,
+    /// Throttling the attach guard applies to every tab of the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emulation: Option<Emulation>,
+    /// Scripts the attach guard runs at the start of every document.
+    #[serde(rename = "initScripts", default, skip_serializing_if = "Vec::is_empty")]
+    pub init_scripts: Vec<InitScript>,
+    /// Bumped on every emulation or init script change, so the guard can
+    /// report which version it has applied.
+    #[serde(rename = "emulationRev", default, skip_serializing_if = "is_zero")]
+    pub emulation_rev: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Default)]
 struct Inner {
     /// Sessions this process has read or written. Another process's session
-    /// is read from disk on first use; only `lastUsedAt` ever changes after a
-    /// session opens, so a cached record can't go meaningfully stale.
+    /// is read from disk on first use. After a session opens only `lastUsedAt`
+    /// and the emulation fields change, and `flush_now` keeps whichever
+    /// process's emulation is newer, so a cached record can't undo them.
     cache: HashMap<String, SessionRecord>,
     dirty: HashSet<String>,
 }
@@ -156,6 +172,36 @@ impl StateStore {
         })
     }
 
+    /// Change the session's emulation or init scripts, bump its revision and
+    /// write it to disk at once. Reads the file first: another MCP process
+    /// may have changed these since this one cached the record.
+    pub async fn update_emulation(
+        &self,
+        session_id: &str,
+        f: impl FnOnce(&mut Option<Emulation>, &mut Vec<InitScript>),
+    ) -> Result<SessionRecord> {
+        let fresh = read_session(&self.dir, session_id).await;
+        {
+            let mut guard = self.inner.lock().await;
+            if let Some(rec) = fresh {
+                guard.cache.insert(session_id.to_string(), rec);
+            }
+        }
+        self.update(session_id, |rec| {
+            f(&mut rec.emulation, &mut rec.init_scripts);
+            rec.emulation_rev += 1;
+        })
+        .await;
+        self.flush_now().await?;
+        self.get(session_id)
+            .await
+            .context("session record vanished after update")
+    }
+
+    pub async fn record(&self, session_id: &str) -> Option<SessionRecord> {
+        read_session(&self.dir, session_id).await
+    }
+
     pub async fn forget(&self, session_id: &str) {
         let _w = self.write_lock.lock().await;
         {
@@ -166,6 +212,7 @@ impl StateStore {
         if let Err(err) = remove_session(&self.dir, session_id).await {
             tracing::warn!(session = session_id, error = %err, "removing session file failed");
         }
+        crate::emulation::remove_applied(&self.dir, session_id).await;
     }
 
     pub async fn flush_now(&self) -> Result<()> {
@@ -178,7 +225,19 @@ impl StateStore {
                 .collect()
         };
         let mut first_err = None;
-        for (id, rec) in batch {
+        for (id, mut rec) in batch {
+            if let Some(disk) = read_session(&self.dir, &id).await {
+                if disk.emulation_rev > rec.emulation_rev {
+                    rec.emulation = disk.emulation;
+                    rec.init_scripts = disk.init_scripts;
+                    rec.emulation_rev = disk.emulation_rev;
+                    if let Some(cached) = self.inner.lock().await.cache.get_mut(&id) {
+                        cached.emulation.clone_from(&rec.emulation);
+                        cached.init_scripts.clone_from(&rec.init_scripts);
+                        cached.emulation_rev = rec.emulation_rev;
+                    }
+                }
+            }
             if let Err(err) = write_session(&self.dir, &id, &rec).await {
                 // Retry on the next flush.
                 self.inner.lock().await.dirty.insert(id);
@@ -345,6 +404,32 @@ mod tests {
         assert_eq!(b.viewport("AAA111").await.unwrap().width, 800);
         b.forget("AAA111").await;
         assert!(!read_sessions(&dir).await.unwrap().contains_key("AAA111"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    // A process whose cached record predates another's emulation change must
+    // not erase it when it next writes lastUsedAt.
+    #[tokio::test]
+    async fn stale_cache_keeps_newer_emulation() {
+        let root = tmpdir();
+        let dir = root.join("sessions");
+        let a = StateStore::load(dir.clone()).await.unwrap();
+        let b = StateStore::load(dir.clone()).await.unwrap();
+        a.touch("CCC333").await;
+        a.flush_now().await.unwrap();
+        b.update_emulation("CCC333", |em, _| {
+            *em = Some(Emulation {
+                cpu_throttling_rate: 4.0,
+                network: None,
+            })
+        })
+        .await
+        .unwrap();
+        a.touch("CCC333").await;
+        a.flush_now().await.unwrap();
+        let rec = read_session(&dir, "CCC333").await.unwrap();
+        assert_eq!(rec.emulation_rev, 1);
+        assert_eq!(rec.emulation.unwrap().cpu_throttling_rate, 4.0);
         std::fs::remove_dir_all(root).ok();
     }
 
