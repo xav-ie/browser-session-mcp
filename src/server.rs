@@ -417,7 +417,7 @@ impl BrowserSessionServer {
         }
         let confirm_irreversible = optional_bool(&args, "confirmIrreversible").unwrap_or(false);
         let mut page = page;
-        let floor = jev::min_confidence();
+        let floor = jev::ACT_MIN_CONFIDENCE;
         let mut steps: Vec<ActStep> = Vec::new();
         let mut recent: Vec<String> = Vec::new();
         let mut url = String::new();
@@ -428,6 +428,7 @@ impl BrowserSessionServer {
         let mut last_had_effect = false;
         let mut last_goal_met = 0.0f64;
         let mut typed_keys: Vec<String> = Vec::new();
+        clear_typed_marks(&page).await;
         let dialogs = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let mut guards = vec![DialogGuard::watch(&page, dialogs.clone()).await?];
         let extra = |candidates: Vec<ActCandidate>, pending: Option<String>| ActExtra {
@@ -460,6 +461,19 @@ impl BrowserSessionServer {
                     extra(vec![], None),
                 ));
             }
+            // Once something was done, a goal that reads probably met is a
+            // stop: Jev rarely calls an achieved goal certain, and acting on
+            // past it (a further click, going back) tends to undo it.
+            if !steps.is_empty() && d.goal_met >= ACT_LIKELY_GATE {
+                return Ok(act_done(
+                    "likely_completed",
+                    &goal,
+                    steps,
+                    url,
+                    title,
+                    extra(vec![], None),
+                ));
+            }
             if d.bot_check >= ACT_WALL_GATE {
                 return Ok(act_done(
                     "needs_human",
@@ -471,8 +485,13 @@ impl BrowserSessionServer {
                 ));
             }
             if d.stuck >= ACT_GATE {
+                let status = if d.goal_met >= ACT_LIKELY_GATE {
+                    "likely_completed"
+                } else {
+                    "stuck"
+                };
                 return Ok(act_done(
-                    "stuck",
+                    status,
                     &goal,
                     steps,
                     url,
@@ -589,64 +608,83 @@ impl BrowserSessionServer {
                 .unwrap_or_default();
             let (record, recent_line) = if let Some(el) = el {
                 let css = d.page.css(&el.id);
-                let mut typed = None;
-                let action = if !el.options.is_empty() {
-                    match jev::decide_select_option(&goal, &el.desc, &el.options).await {
-                        Ok(Some((i, label, _))) => {
-                            set_select_option(&page, &css, i, &label).await?;
-                            "select".to_string()
-                        }
-                        Ok(None) => {
-                            click_label(&page, &css, &el.desc).await?;
-                            "click".to_string()
-                        }
-                        Err(e) => bail!(
-                            "act failed choosing an option at step {step}: {e:#}; {}",
-                            trail(&steps)
-                        ),
+                let attempt: Result<(String, Option<String>)> = async {
+                    if !el.options.is_empty() {
+                        return match jev::decide_select_option(&goal, &el.desc, &el.options).await {
+                            Ok(Some((i, label, _))) => {
+                                set_select_option(&page, &css, i, &label).await?;
+                                Ok(("select".to_string(), None))
+                            }
+                            Ok(None) => {
+                                click_label(&page, &css, &el.desc).await?;
+                                Ok(("click".to_string(), None))
+                            }
+                            Err(e) => bail!(
+                                "act failed choosing an option at step {step}: {e:#}; {}",
+                                trail(&steps)
+                            ),
+                        };
                     }
-                } else if jev::is_text_field(&el.desc) {
-                    // The step's value guess was made before the field was
-                    // known; when it found nothing, ask again about this
-                    // field. A field no value fits just gets clicked.
-                    let mut key = d.value_key.clone().filter(|k| untyped.contains(k));
-                    if key.is_none() && !untyped.is_empty() {
-                        key = jev::decide_value_for_field(&goal, &el.desc, &untyped)
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "act failed choosing a value at step {step}; {}",
-                                    trail(&steps)
-                                )
-                            })?;
-                    }
-                    match key.and_then(|k| values.iter().find(|(vk, _)| *vk == k)) {
-                        Some((k, text)) => {
+                    if jev::is_text_field(&el.desc) {
+                        // The step's value guess was made before the field
+                        // was known; when it found nothing, ask again about
+                        // this field. A field no value fits just gets clicked.
+                        let mut key = d.value_key.clone().filter(|k| untyped.contains(k));
+                        if key.is_none() && !untyped.is_empty() {
+                            key = jev::decide_value_for_field(&goal, &el.desc, &untyped)
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "act failed choosing a value at step {step}; {}",
+                                        trail(&steps)
+                                    )
+                                })?;
+                        }
+                        if let Some((k, text)) =
+                            key.and_then(|k| values.iter().find(|(vk, _)| *vk == k))
+                        {
                             type_into(&page, &css, text, true, 0).await?;
-                            typed = Some(k.clone());
-                            typed_keys.push(k.clone());
-                            "type".to_string()
-                        }
-                        None => {
-                            click_label(&page, &css, &el.desc).await?;
-                            "click".to_string()
+                            mark_typed(&page, &css).await;
+                            return Ok(("type".to_string(), Some(k.clone())));
                         }
                     }
-                } else {
                     click_label(&page, &css, &el.desc).await?;
-                    "click".to_string()
+                    Ok(("click".to_string(), None))
+                }
+                .await;
+                // A page that re-rendered between the pick and the action
+                // has dropped the stamped element; decide again on the new
+                // page rather than failing the whole run.
+                let (action, typed) = match attempt {
+                    Ok(done) => done,
+                    Err(e) if format!("{e:#}").contains("not found") => {
+                        ("missed".to_string(), None)
+                    }
+                    Err(e) => return Err(e),
                 };
+                if let Some(k) = &typed {
+                    typed_keys.push(k.clone());
+                }
                 (
                     ActStep {
                         step: step as usize,
                         action: action.clone(),
                         target: Some(el.desc.clone()),
-                        typed,
+                        typed: typed.clone(),
                         confidence: d.confidence,
                         goal: d.goal_met,
                         stuck: d.stuck,
                     },
-                    format!("{step}. {action} {}", el.desc),
+                    // Typing is reported by key and without the field's
+                    // "(empty)", which the history would otherwise keep
+                    // saying after the field was filled.
+                    match &typed {
+                        Some(k) => format!(
+                            "{step}. typed the value for {k} into {}",
+                            el.desc.trim_end_matches(" (empty)")
+                        ),
+                        None => format!("{step}. {action} {}", el.desc),
+                    },
                 )
             } else {
                 match d.chosen.as_str() {
@@ -1493,7 +1531,8 @@ struct ActStep {
     /// 1-based step number.
     step: usize,
     /// "click", "type", "select", "scroll_down", "scroll_up", "wait",
-    /// "back", "press_enter" or "press_escape".
+    /// "back", "press_enter", "press_escape", or "missed" when the element
+    /// was gone before it could be acted on.
     action: String,
     /// The element acted on, as it was offered to Jev.
     target: Option<String>,
@@ -2034,8 +2073,10 @@ async fn resolve_and_wait(
 /// on it. 0.85 matches what the jev-browser reference uses for both gates.
 const ACT_GATE: f64 = 0.85;
 
-/// `act` reports "likely_completed" instead of a plain stop when Jev's
-/// goal-met probability is at least this.
+/// `act` stops as "likely_completed" once Jev's goal-met probability reaches
+/// this after at least one step, and reports it instead of a plain stop.
+/// Achieved goals measured 0.52 to 0.83 in the benchmark, under
+/// [`ACT_GATE`], and the loop then acted past them and undid them.
 const ACT_LIKELY_GATE: f64 = 0.5;
 
 /// With `confirmIrreversible`, `act` stops before a click Jev judges at
@@ -2259,6 +2300,25 @@ async fn type_into(page: &Page, css: &str, text: &str, clear: bool, delay_ms: u6
     type_chars(page, text, delay_ms)
         .await
         .with_context(|| format!("typing into {css}"))
+}
+
+/// Mark a field `act` typed into, so the rest of the run doesn't offer it
+/// again while it holds text (see the extraction's `SKIP_TYPED`).
+async fn mark_typed(page: &Page, css: &str) {
+    let decl = format!(
+        "function() {{ {deep} const h = __bsDeep({sel}); \
+         if (h) h.el.setAttribute('data-bs-typed', ''); return !!h; }}",
+        deep = jev::DEEP_FIND_JS,
+        sel = serde_json::to_string(css).unwrap_or_else(|_| "''".to_string()),
+    );
+    let _ = iso_eval_function(page, &decl).await;
+}
+
+/// Drop the marks an earlier `act` run left, at the start of a new one.
+async fn clear_typed_marks(page: &Page) {
+    let decl = "function() { document.querySelectorAll('[data-bs-typed]')\
+         .forEach(function(el) { el.removeAttribute('data-bs-typed'); }); return true; }";
+    let _ = iso_eval_function(page, decl).await;
 }
 
 /// Empty a field's value before typing, wherever [`jev::DEEP_FIND_JS`]

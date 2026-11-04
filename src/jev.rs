@@ -54,6 +54,7 @@ const MAX_ELEMENTS: usize = 240;
 const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   var MAX = __MAX_ELEMENTS__;
   var STAMP = '__STAMP__';
+  var SKIP_TYPED = __SKIP_TYPED__;
   var SEL = 'a[href], button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="option"], [role="checkbox"], [role="radio"], [role="switch"], [onclick]';
   var clamp = function(s, n) {
     s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
@@ -150,6 +151,9 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   var consider = function(el, ox, oy) {
     if (seen.has(el) || el.disabled) return;
     seen.add(el);
+    // A field this act run already filled stays out of the offer while it
+    // holds text, so the loop moves on instead of re-picking it.
+    if (SKIP_TYPED && el.hasAttribute('data-bs-typed') && String(el.value || el.innerText || '').trim()) return;
     if (!el.getClientRects().length) return;
     var st = styleOf(el);
     if (st.visibility === 'hidden' || st.display === 'none') return;
@@ -217,8 +221,10 @@ static EXTRACT_FN: Lazy<String> =
 
 /// The extraction script for one call, stamping with `stamp` (hex only, so
 /// it is safe inside the JS string literal).
-fn extract_fn(stamp: &str) -> String {
-    EXTRACT_FN.replace("__STAMP__", stamp)
+fn extract_fn(stamp: &str, skip_typed: bool) -> String {
+    EXTRACT_FN
+        .replace("__STAMP__", stamp)
+        .replace("__SKIP_TYPED__", if skip_typed { "true" } else { "false" })
 }
 
 /// A fresh random stamp token for one extraction.
@@ -560,12 +566,12 @@ pub async fn resolve_fallback(page: &Page, goal: &str) -> Result<Resolution> {
 /// rides those races out; only a page that stays broken errors. An empty
 /// (but parsed) result is returned as-is: "nothing interactive" is a real
 /// answer the callers handle themselves.
-async fn extract_with_retry(page: &Page) -> Result<PageInfo> {
+async fn extract_with_retry(page: &Page, skip_typed: bool) -> Result<PageInfo> {
     const ATTEMPTS: usize = 3;
     const PAUSE_MS: u64 = 400;
     let mut last: Option<anyhow::Error> = None;
     let stamp = new_stamp()?;
-    let script = extract_fn(&stamp);
+    let script = extract_fn(&stamp, skip_typed);
     for attempt in 1..=ATTEMPTS {
         match iso_eval_function(page, &script).await {
             Ok(raw) => match parse_extraction(&raw, &stamp) {
@@ -583,7 +589,7 @@ async fn extract_with_retry(page: &Page) -> Result<PageInfo> {
 
 async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resolution> {
     let cfg = config()?;
-    let page_info = extract_with_retry(page).await?;
+    let page_info = extract_with_retry(page, false).await?;
     if page_info.elements.is_empty() {
         bail!("no interactive elements found on the page — navigate or wait_for content first");
     }
@@ -787,7 +793,7 @@ pub async fn decide_step(
     value_keys: &[String],
 ) -> Result<StepDecision> {
     let cfg = config()?;
-    let page_info = extract_with_retry(page).await?;
+    let page_info = extract_with_retry(page, true).await?;
     let has_elements = !page_info.elements.is_empty();
 
     let state = build_act_state(goal, &page_info, recent, value_keys);
@@ -848,7 +854,10 @@ pub async fn decide_step(
     let mut value_criteria = Map::new();
     if has_elements && !value_keys.is_empty() {
         for k in value_keys {
-            value_criteria.insert(k.clone(), Value::String(format!("the value for {k}")));
+            value_criteria.insert(
+                k.clone(),
+                Value::String(format!("the {}", k.replace(['_', '-'], " "))),
+            );
         }
         value_criteria.insert(
             "__none__".to_string(),
@@ -912,7 +921,7 @@ pub async fn decide_step(
     if !value_criteria.is_empty() {
         let ids: Vec<&str> = value_criteria.keys().map(|k| k.as_str()).collect();
         let answer = parse_choice(&json, "value_key", &ids)?;
-        if answer.chosen != "__none__" && answer.confidence >= cfg.min_confidence {
+        if answer.chosen != "__none__" && answer.confidence >= ACT_MIN_CONFIDENCE {
             value_key = Some(answer.chosen);
         }
     }
@@ -961,7 +970,10 @@ pub async fn decide_value_for_field(
     );
     let mut criteria = Map::new();
     for k in keys {
-        criteria.insert(k.clone(), Value::String(format!("the value for {k}")));
+        criteria.insert(
+            k.clone(),
+            Value::String(format!("the {}", k.replace(['_', '-'], " "))),
+        );
     }
     criteria.insert(
         "__none__".to_string(),
@@ -981,7 +993,7 @@ pub async fn decide_value_for_field(
     let json = post_systemone(&cfg, &body).await?;
     let ids: Vec<&str> = criteria.keys().map(|k| k.as_str()).collect();
     let answer = parse_choice(&json, "value_key", &ids)?;
-    if answer.chosen == "__none__" || answer.confidence < cfg.min_confidence {
+    if answer.chosen == "__none__" || answer.confidence < ACT_MIN_CONFIDENCE {
         return Ok(None);
     }
     Ok(Some(answer.chosen))
@@ -1029,12 +1041,12 @@ pub async fn decide_select_option(
     if answer.chosen == "__none__" {
         return Ok(None);
     }
-    if answer.confidence < cfg.min_confidence {
+    if answer.confidence < ACT_MIN_CONFIDENCE {
         bail!(
             "Jev's confidence for the option was only {:.2} (below the \
              {:.2} floor), so the dropdown was left unchanged",
             answer.confidence,
-            cfg.min_confidence
+            ACT_MIN_CONFIDENCE
         );
     }
     let i = answer.chosen[1..]
@@ -1069,11 +1081,12 @@ pub fn is_text_field(desc: &str) -> bool {
     }
 }
 
-/// The floor applied to `act` element choices (the explicit-goal,
-/// best-guess `JEV_MIN_CONFIDENCE` — `act` is only called on purpose).
-pub fn min_confidence() -> f64 {
-    env_f64("JEV_MIN_CONFIDENCE", 0.5).clamp(0.0, 1.0)
-}
+/// The confidence floor for `act`'s decisions (element, value and option).
+/// Lower than `JEV_MIN_CONFIDENCE`'s single picks: on real pages Jev's top
+/// pick was usually right at 0.35 to 0.5 when close options split the
+/// probability, and `act` checks every action's effect and retries with the
+/// next-best pick, which a single `jev:` click can't.
+pub const ACT_MIN_CONFIDENCE: f64 = 0.3;
 
 /// Read back the effective model and input-token count from a response.
 fn usage_of(body: &Value, cfg: &Config) -> (String, u64) {

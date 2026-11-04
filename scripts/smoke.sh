@@ -174,7 +174,7 @@ class Handler(BaseHTTPRequestHandler):
                                       "probabilities": probs}
                 if "unsure" in first:
                     # no distribution, so only the floor decides
-                    answers["element"] = {"choice": choice, "confidence": 0.3}
+                    answers["element"] = {"choice": choice, "confidence": 0.2}
             else:
                 # plain jev:/fallback resolve; the unsure and bogus paths
                 # deliberately carry no probabilities so distribution

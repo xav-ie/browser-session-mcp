@@ -93,7 +93,7 @@ async function runTask(t) {
         r = { status: "error", error: e.message.slice(0, 200), steps: [] };
       }
       const step = { goal: s.goal, status: r.status, ms: Date.now() - t0, actions: r.steps.length, error: r.error };
-      step.trace = r.steps.map((x) => `${x.action}${x.typed ? `(${x.typed})` : ""} ${String(x.target ?? "").slice(0, 40)} ${x.confidence.toFixed(2)}`);
+      step.trace = r.steps.map((x) => `${x.action}${x.typed ? `(${x.typed})` : ""} ${String(x.target ?? "").slice(0, 40)} ${x.confidence.toFixed(2)} goal=${x.goal.toFixed(2)}`);
       if (r.candidates) step.candidates = r.candidates;
       if (s.assert) step.truth = await check(sessionId, s.assert);
       const want = s.expectStatus ?? "completed";
