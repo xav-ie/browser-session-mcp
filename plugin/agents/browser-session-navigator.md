@@ -82,6 +82,18 @@ so the profile still comes back.
 **Stealth** — `set_stealth({ sessionId, enabled })`, `get_stealth({ sessionId })`.
 Leave stealth as-is unless a site is tripping bot gates.
 
+**Slow devices** (needs the `listener` daemon) —
+`set_emulation({ sessionId, cpuThrottlingRate?, network? })` throttles every
+tab of the session, including ones opened later, until changed. For a typical
+mid-range phone open the session with `useMobileUA: true`, then use
+`cpuThrottlingRate: 4, network: "slow4g"`; `cpuThrottlingRate: 1, network: "off"`
+stops it. `add_init_script({ sessionId, source })` runs your JS before the
+page's own scripts on every later navigation; use it to record timings from the
+very first moment of a load (a MutationObserver or PerformanceObserver writing
+to a `window` global), then read the global with `evaluate`.
+`remove_init_script({ sessionId, id })` and `get_emulation({ sessionId })`
+manage them. Turn throttling off and remove scripts when you're done measuring.
+
 **Human takeover** (needs the `takeover` daemon) — see below.
 
 **Saved cookie states** — `save_browser_state`, `load_browser_state`,

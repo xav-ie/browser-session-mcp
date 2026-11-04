@@ -79,13 +79,15 @@ removes the common headless/automation tells:
   consistent, and the GREASE brand is derived from it the way Chrome does.
 - **New tabs are masked before their first request.** The listener holds a
   browser-wide auto-attach that creates every new tab paused, applies its
-  session's UA override and init script, then resumes it, so popups and
+  session's UA override (and any throttling and init scripts), then resumes
+  it, so popups and
   `target=_blank` links never send `HeadlessChrome`. (A `target=_blank`
   link's first client hints are computed before the tab exists, so that one
   request's `Sec-CH-UA*` headers are rewritten via `Fetch` interception.) If the
   listener dies, Chrome releases held tabs; only a listener that hangs while
   alive would stall new tabs.
-- **No JS patching.** Nothing is injected into pages: redefined `navigator`
+- **No JS patching.** Nothing is injected into pages unless the agent adds
+  its own init script: redefined `navigator`
   getters and fake plugin arrays are themselves what bot managers (e.g.
   Akamai) flag. The JS-visible surface comes from the browser itself, so run
   branded Google Chrome in `--headless` mode: it has the real PDF plugins,
@@ -111,6 +113,21 @@ removes the common headless/automation tells:
 Typical flow for a bot-gated page: `set_stealth(true)` → `navigate` past the
 gate → `set_stealth(false)` → `evaluate` to read page globals.
 
+## Throttling and init scripts
+
+`set_emulation` and `add_init_script` save to the session's record, and the
+listener's attach guard applies them, because Chrome drops these overrides
+when the CDP session that set them detaches and the guard is the one holding
+a session to every tab for its lifetime. It applies them while a new tab is
+paused, so throttling covers the first request and an init script runs before
+any page script, and it checks the record every 250ms for tabs already open.
+After every open tab has acknowledged a change it writes the record's
+revision to `emulation-applied/<sessionId>`, and the tool returns once that
+revision is reached, so a `navigate` right after it is already throttled.
+CPU throttling and network conditions take effect at once; an init script
+runs from the tab's next document. Without the listener both tools save the
+change and then fail after 5 seconds, since nothing would apply it.
+
 ## Storage layout
 
 All daemons share one state dir (default `/var/lib/browser-session-mcp`),
@@ -119,9 +136,11 @@ daemons — the processes coordinate purely through files in it.
 
 ```
 /var/lib/browser-session-mcp/
-├── sessions/<sessionId>.json         # per session: lastUsedAt, UA, viewport
-│                                     #   (reaper, listener; one file each so
-│                                     #   concurrent MCP processes can't clobber)
+├── sessions/<sessionId>.json         # per session: lastUsedAt, UA, viewport,
+│                                     #   throttling, init scripts (reaper,
+│                                     #   listener; one file each so concurrent
+│                                     #   MCP processes can't clobber)
+├── emulation-applied/<sessionId>     # last throttling revision every tab has
 ├── logs/
 │   └── <sessionId>/
 │       ├── 00001-<targetId>.ndjson   # per-visit event log

@@ -33,10 +33,12 @@ credentials.
 - **Everything recorded.** Every console message and network request is kept on
   disk, grouped by page visit, for the agent to read back while debugging.
 - **Gets past bot checks.** No `Runtime.enable` tell, a consistent User-Agent
-  and Client Hints, no injected scripts, and real mouse and keyboard input.
-  Stealth can be switched on and off per session.
-- **[31 tools](#all-31-tools)** for tabs, navigation, clicks and typing,
-  screenshots, accessibility snapshots, logs and CPU profiles.
+  and Client Hints, no injected scripts unless you add one, and real mouse and
+  keyboard input. Stealth can be switched on and off per session.
+- **Test like a slow phone.** Throttle a session's CPU and network, and run
+  your own script before the page's to time what happens from the first byte.
+- **[35 tools](#all-35-tools)** for tabs, navigation, clicks and typing,
+  screenshots, accessibility snapshots, logs, CPU profiles and throttling.
 
 ## Quick start
 
@@ -207,7 +209,7 @@ to enable it. `JEV_MODEL`, `JEV_BASE_URL`, `JEV_TIMEOUT_MS`,
 `JEV_MIN_CONFIDENCE` and `JEV_FALLBACK_MIN_CONFIDENCE` tune it — see
 [Deployment](docs/deployment.md#environment).
 
-## All 31 tools
+## All 35 tools
 
 Most tools take a `sessionId` first. Tools marked ⚙ need one of the optional
 background roles from [Deployment](docs/deployment.md).
@@ -224,6 +226,7 @@ can type their results.
 | Logs ⚙ | `list_visits`, `list_console_messages`, `list_network_requests` |
 | Profiling | `start_profiling`, `stop_profiling` |
 | Stealth | `set_stealth`, `get_stealth` |
+| Slow devices ⚙ | `set_emulation`, `get_emulation`, `add_init_script`, `remove_init_script` |
 | Human takeover ⚙ | `request_human_takeover`, `await_human_takeover` |
 | Saved logins | `save_browser_state`, `load_browser_state`, `list_browser_states`, `delete_browser_state` |
 
@@ -270,6 +273,12 @@ can type their results.
 **Stealth**
 - `set_stealth({ sessionId, enabled })`
 - `get_stealth({ sessionId })` → `{ stealth }`
+
+**Slow devices** ⚙ (applied by the `listener` role to every tab of the session, including ones opened later)
+- `set_emulation({ sessionId, cpuThrottlingRate?, network? })` → `{ cpuThrottlingRate, network, initScripts }`: CPU slowdown (1 to 100) and network throttling, a DevTools preset (`slow3g`, `slow4g`, `fast4g`, `offline`, `off`) or `{ latencyMs, downloadKbps, uploadKbps }`; in place on every open tab when it returns
+- `get_emulation({ sessionId })` → `{ cpuThrottlingRate, network, initScripts }`
+- `add_init_script({ sessionId, source })` → `{ id, ... }`: runs `source` in the main world at the start of every page load, before the page's own scripts, from each tab's next navigation
+- `remove_init_script({ sessionId, id })`
 
 **Human takeover** ⚙ (needs the `takeover` role and `TAKEOVER_BASE_URL`)
 - `request_human_takeover({ sessionId, ttlMinutes? })` → `{ url, token, expiresAtMs }`: returns right away with a link
