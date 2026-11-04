@@ -45,23 +45,22 @@ machine with `jev-1.14.0` on 2026-11-04:
 
 | | tasks right, per run | false "done" | median time per passing task |
 |---|---|---|---|
-| `act` | 29, 30, 31 of 40 | 0, 0, 1 | 2.2 s |
+| `act` | 34, 34, 35 of 40 | 0, 0, 1 | 1.6 s |
 | `act` before this release | 11, 12, 12 of 40 | 0 | 2.1 s |
 | jev-browser itself | 32, 33 of 40 | 1, 1 | 1.9 s |
 
 The suite is vendored in [`bench/`](../bench); `node bench/run.mjs` reruns it.
-`act` misses hover, drag and right-click tasks it has no action for, and
-gets tasks Jev can't judge, like counting to exactly three or reading a sort
-order, wrong as jev-browser does.
+Like jev-browser, `act` gets tasks Jev can't judge wrong, such as counting
+to exactly three or reading a table's sort order.
 
 Single tasks other Jev browsers publish times for, as `act` ran them:
 
 | task | `act` | published |
 |---|---|---|
-| Wikipedia, Coffee → Espresso | 1.2 to 1.6 s | about 4 s ([jkudish/jev-browser](https://github.com/jkudish/jev-browser)) |
-| Wikipedia, search Ristretto | 1.5 to 2.7 s | 3.6 s (jkudish/jev-browser) |
-| Wikipedia, search Gödel's incompleteness theorems | 1.8 to 2.9 s | 2.8 s ([jev-ultrafast](https://github.com/browser-use/jev-ultrafast/blob/main/docs/performance.md)) |
-| Google Flights, Zurich → London | fails at the date picker | 7.07 s (jev-ultrafast) |
+| Wikipedia, Coffee → Espresso | 1.0 to 1.2 s | about 4 s ([jkudish/jev-browser](https://github.com/jkudish/jev-browser)) |
+| Wikipedia, search Ristretto | 1.4 s | 3.6 s (jkudish/jev-browser) |
+| Wikipedia, search Gödel's incompleteness theorems | 1.5 to 1.6 s | 2.8 s ([jev-ultrafast](https://github.com/browser-use/jev-ultrafast/blob/main/docs/performance.md)) |
+| Google Flights, Zurich → London | 5.7 s in 1 of 3 runs; the others stop at the date picker | 7.07 s (jev-ultrafast) |
 
 ### Published
 
@@ -141,8 +140,10 @@ act({
 })
 ```
 
-A step clicks a button or link, types into a field, picks a `<select>`
-option, scrolls, waits, goes back, or presses Enter or Escape. After each one
+A step clicks, hovers, right-clicks or drags an element (asking Jev where
+to drop it), types into a field, picks a `<select>` option, scrolls, waits,
+goes back, or presses Enter or Escape. Drags use real mouse input, and HTML5
+drag-and-drop is replayed onto the target the way Playwright does it. After each one
 the loop checks that something changed (URL, title, visible text, open
 dialogs, checked and expanded states, form values). If nothing did, it tries
 Jev's next best choice, and after three dead actions in a row it stops.
@@ -283,8 +284,8 @@ an agent already drives with ordinary tools, so the two mix in one flow.
 | stops on | goal met (or likely), uncertain, stuck, login wall, bot check, confirmation needed, error, no effect, budget | done, blocked | goal met, stuck | done (or likely), login, confirmation needed, ambiguous, error, blocked |
 | page checks | `ask`: yes/no, or which option fits | no | no | `browser_check`, `browser_choose` |
 | page reads | `take_snapshot` (whole page) | no | page as text, markdown or aria | `browser_read`: only the parts relevant to a question |
-| hover, drag, right-click | not yet | no | no | yes |
-| task suite above | 29 to 31 of 40 | | | 32 to 33 of 40 |
+| hover, drag, right-click | yes | no | no | yes |
+| task suite above | 34 to 35 of 40 | | | 32 to 33 of 40 |
 
 ## Tuning
 
