@@ -1,0 +1,11 @@
+<svg role="img" aria-label="Jev-enabled sticker: now with 85% confidence, verify the final page yourself" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 150" width="340" height="150">
+  <g transform="rotate(-4 170 75)" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <rect x="22" y="22" width="296" height="106" rx="22" fill="#000" opacity=".18" transform="translate(3 4)"/>
+    <rect x="22" y="22" width="296" height="106" rx="22" fill="#ffffff"/>
+    <rect x="30" y="30" width="280" height="90" rx="16" fill="#1b0e28"/>
+    <rect x="36" y="36" width="268" height="78" rx="12" fill="none" stroke="#fff17b" stroke-width="2" stroke-dasharray="6 5"/>
+    <text x="170" y="74" text-anchor="middle" font-size="34" font-weight="800" letter-spacing="1" fill="#fff17b">JEV-ENABLED</text>
+    <text x="170" y="95" text-anchor="middle" font-size="13" font-weight="600" fill="#e7dcc0">now with 85% confidence*</text>
+    <text x="170" y="109" text-anchor="middle" font-size="8.5" fill="#9d8fb5">*verify the final page yourself</text>
+  </g>
+</svg>
