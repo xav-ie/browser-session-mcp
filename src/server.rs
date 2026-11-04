@@ -4,8 +4,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use chromiumoxide::Page;
 use chromiumoxide::cdp::browser_protocol::input::{
-    DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
-    InsertTextParams,
+    DispatchDragEventParams, DispatchDragEventType, DispatchKeyEventParams, DispatchKeyEventType,
+    DispatchMouseEventParams, DispatchMouseEventType, EventDragIntercepted, InsertTextParams,
+    MouseButton, SetInterceptDragsParams,
 };
 use chromiumoxide::cdp::browser_protocol::{
     network::CookieParam,
@@ -601,6 +602,7 @@ impl BrowserSessionServer {
             // Snapshot what the action could change, for the effect check,
             // and the open tabs, to follow a link that opens a new one.
             let before = page_fingerprint(&page).await;
+            let dialogs_before = dialogs.lock().map(|d| d.len()).unwrap_or(0);
             let tabs_before: Vec<String> = sessions
                 .tabs(&session_id)
                 .await
@@ -608,16 +610,16 @@ impl BrowserSessionServer {
                 .unwrap_or_default();
             let (record, recent_line) = if let Some(el) = el {
                 let css = d.page.css(&el.id);
-                let attempt: Result<(String, Option<String>)> = async {
+                let attempt: Result<(String, Option<String>, Option<String>)> = async {
                     if !el.options.is_empty() {
                         return match jev::decide_select_option(&goal, &el.desc, &el.options).await {
                             Ok(Some((i, label, _))) => {
                                 set_select_option(&page, &css, i, &label).await?;
-                                Ok(("select".to_string(), None))
+                                Ok(("select".to_string(), None, None))
                             }
                             Ok(None) => {
                                 click_label(&page, &css, &el.desc).await?;
-                                Ok(("click".to_string(), None))
+                                Ok(("click".to_string(), None, None))
                             }
                             Err(e) => bail!(
                                 "act failed choosing an option at step {step}: {e:#}; {}",
@@ -645,20 +647,51 @@ impl BrowserSessionServer {
                         {
                             type_into(&page, &css, text, true, 0).await?;
                             mark_typed(&page, &css).await;
-                            return Ok(("type".to_string(), Some(k.clone())));
+                            return Ok(("type".to_string(), Some(k.clone()), None));
                         }
                     }
+                    match d.operation.as_str() {
+                        "hover" => {
+                            let (x, y) = element_center(&page, &css).await?;
+                            page.move_mouse(Point::new(x, y))
+                                .await
+                                .context("Input.dispatchMouseEvent (move)")?;
+                            return Ok(("hover".to_string(), None, None));
+                        }
+                        "right_click" => {
+                            let at = element_center(&page, &css).await?;
+                            right_click(&page, at).await?;
+                            return Ok(("right_click".to_string(), None, None));
+                        }
+                        "drag" => {
+                            let target = jev::decide_drop_target(&goal, &d.page, &el.id)
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "act failed choosing where to drop at step {step}; {}",
+                                        trail(&steps)
+                                    )
+                                })?;
+                            if let Some(target) = target {
+                                let from = element_center(&page, &css).await?;
+                                let to = element_center(&page, &d.page.css(&target)).await?;
+                                drag(&page, from, to).await?;
+                                return Ok(("drag".to_string(), None, Some(d.describe(&target))));
+                            }
+                        }
+                        _ => {}
+                    }
                     click_label(&page, &css, &el.desc).await?;
-                    Ok(("click".to_string(), None))
+                    Ok(("click".to_string(), None, None))
                 }
                 .await;
                 // A page that re-rendered between the pick and the action
                 // has dropped the stamped element; decide again on the new
                 // page rather than failing the whole run.
-                let (action, typed) = match attempt {
+                let (action, typed, dropped_on) = match attempt {
                     Ok(done) => done,
                     Err(e) if format!("{e:#}").contains("not found") => {
-                        ("missed".to_string(), None)
+                        ("missed".to_string(), None, None)
                     }
                     Err(e) => return Err(e),
                 };
@@ -683,7 +716,10 @@ impl BrowserSessionServer {
                             "{step}. typed the value for {k} into {}",
                             el.desc.trim_end_matches(" (empty)")
                         ),
-                        None => format!("{step}. {action} {}", el.desc),
+                        None => match &dropped_on {
+                            Some(t) => format!("{step}. dragged {} onto {t}", el.desc),
+                            None => format!("{step}. {action} {}", el.desc),
+                        },
                     },
                 )
             } else {
@@ -757,7 +793,20 @@ impl BrowserSessionServer {
                     | Some("press_escape")
             );
             let after = page_fingerprint(&page).await;
-            let had_effect = soft_action
+            // A dialog the action opened is an effect too, and the next
+            // decision should know what it said.
+            let new_dialogs: Vec<String> = dialogs
+                .lock()
+                .map(|d| d.iter().skip(dialogs_before).cloned().collect())
+                .unwrap_or_default();
+            for msg in &new_dialogs {
+                recent
+                    .last_mut()
+                    .expect("just pushed")
+                    .push_str(&format!(" (the page showed a dialog: {msg}, accepted)"));
+            }
+            let had_effect = !new_dialogs.is_empty()
+                || soft_action
                 || match (&before, &after) {
                     (Some(b), Some(a)) => b != a,
                     _ => true,
@@ -1531,8 +1580,9 @@ struct ActStep {
     /// 1-based step number.
     step: usize,
     /// "click", "type", "select", "scroll_down", "scroll_up", "wait",
-    /// "back", "press_enter", "press_escape", or "missed" when the element
-    /// was gone before it could be acted on.
+    /// "back", "press_enter", "press_escape", "hover", "right_click",
+    /// "drag", or "missed" when the element was gone before it could be
+    /// acted on.
     action: String,
     /// The element acted on, as it was offered to Jev.
     target: Option<String>,
@@ -2413,6 +2463,133 @@ async fn element_center(page: &Page, selector: &str) -> Result<(f64, f64)> {
     Ok((x, y))
 }
 
+/// One CDP mouse event at a viewport point.
+async fn mouse_event(
+    page: &Page,
+    kind: DispatchMouseEventType,
+    (x, y): (f64, f64),
+    button: MouseButton,
+    buttons: i64,
+) -> Result<()> {
+    let params = DispatchMouseEventParams::builder()
+        .r#type(kind)
+        .x(x)
+        .y(y)
+        .button(button)
+        .buttons(buttons)
+        .click_count(1)
+        .build()
+        .map_err(|e| anyhow!("mouse event: {e}"))?;
+    page.execute(params)
+        .await
+        .context("Input.dispatchMouseEvent")?;
+    Ok(())
+}
+
+/// Right-click a point with trusted input, opening the page's context menu
+/// handler (`act`'s right_click).
+async fn right_click(page: &Page, at: (f64, f64)) -> Result<()> {
+    mouse_event(
+        page,
+        DispatchMouseEventType::MouseMoved,
+        at,
+        MouseButton::None,
+        0,
+    )
+    .await?;
+    mouse_event(
+        page,
+        DispatchMouseEventType::MousePressed,
+        at,
+        MouseButton::Right,
+        2,
+    )
+    .await?;
+    mouse_event(
+        page,
+        DispatchMouseEventType::MouseReleased,
+        at,
+        MouseButton::Right,
+        0,
+    )
+    .await
+}
+
+/// Drag from one point to another with trusted input (`act`'s drag). Mouse
+/// down, a few moves and mouse up cover pointer-driven drag libraries; an
+/// HTML5 drag-and-drop is intercepted by Chrome and replayed onto the target
+/// as drag events, the way Playwright's dragTo does it.
+async fn drag(page: &Page, from: (f64, f64), to: (f64, f64)) -> Result<()> {
+    page.execute(SetInterceptDragsParams::new(true))
+        .await
+        .context("Input.setInterceptDrags")?;
+    let mut intercepted = page
+        .event_listener::<EventDragIntercepted>()
+        .await
+        .context("listening for drags")?;
+    let result = async {
+        mouse_event(
+            page,
+            DispatchMouseEventType::MouseMoved,
+            from,
+            MouseButton::None,
+            0,
+        )
+        .await?;
+        mouse_event(
+            page,
+            DispatchMouseEventType::MousePressed,
+            from,
+            MouseButton::Left,
+            1,
+        )
+        .await?;
+        for i in 1..=5 {
+            let t = f64::from(i) / 5.0;
+            let at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+            mouse_event(
+                page,
+                DispatchMouseEventType::MouseMoved,
+                at,
+                MouseButton::Left,
+                1,
+            )
+            .await?;
+        }
+        let html5 = tokio::time::timeout(Duration::from_millis(250), intercepted.next())
+            .await
+            .ok()
+            .flatten();
+        if let Some(ev) = html5 {
+            for kind in [
+                DispatchDragEventType::DragEnter,
+                DispatchDragEventType::DragOver,
+                DispatchDragEventType::Drop,
+            ] {
+                page.execute(DispatchDragEventParams::new(
+                    kind,
+                    to.0,
+                    to.1,
+                    ev.data.clone(),
+                ))
+                .await
+                .context("Input.dispatchDragEvent")?;
+            }
+        }
+        mouse_event(
+            page,
+            DispatchMouseEventType::MouseReleased,
+            to,
+            MouseButton::Left,
+            0,
+        )
+        .await
+    }
+    .await;
+    let _ = page.execute(SetInterceptDragsParams::new(false)).await;
+    result
+}
+
 /// Focus an element found by [`jev::DEEP_FIND_JS`], for key presses aimed at it.
 async fn focus_element(page: &Page, selector: &str) -> Result<()> {
     let decl = format!(
@@ -2700,7 +2877,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "act",
-            "Act toward a goal on the session's active tab in one call: the server extracts the page's interactive elements (including open shadow roots and same-origin iframes) and visible text, asks the Jev decision model for the next step, does it (click, type, select, scroll, back, wait, or press Enter or Escape), and repeats until the goal reads achieved, nothing looks able to make progress, or the step budget runs out. Each step is one cheap Jev request (~150 to 500 ms), not a driving-LLM round trip, so multi-step flows take seconds and fractions of a cent. Pass `values` (e.g. { query: \"Oolong\" }) for anything to type: Jev only sees the keys and picks which field each belongs to; the text goes straight to the page, so secrets never reach a model. JavaScript dialogs are accepted and listed in `dialogs`, and a link that opens a new tab is followed there. Needs TYPESAFE_API_KEY; every step lands on an element the extraction just offered, and when Jev isn't sure of a step it stops with status `uncertain` and the `candidates` it was weighing instead of guessing. `status` is completed, likely_completed (Jev leaned toward done but wasn't sure), uncertain, stuck, needs_login (pair with request_human_takeover or load_browser_state; a run with `values` keeps going at a login form), needs_human (a CAPTCHA or bot check; use request_human_takeover), needs_confirmation (only with confirmIrreversible; `pending` names the click it held back), blocked (an error page), no_progress or max_steps. Returns a per-step trace with confidences. Jev can be eager to call a goal met: verify with take_snapshot or take_screenshot afterwards. For a single action, click/type with a plain-language selector is cheaper.",
+            "Act toward a goal on the session's active tab in one call: the server extracts the page's interactive elements (including open shadow roots and same-origin iframes) and visible text, asks the Jev decision model for the next step, does it (click, type, select, hover, right-click, drag, scroll, back, wait, or press Enter or Escape), and repeats until the goal reads achieved, nothing looks able to make progress, or the step budget runs out. Each step is one cheap Jev request (~150 to 500 ms), not a driving-LLM round trip, so multi-step flows take seconds and fractions of a cent. Pass `values` (e.g. { query: \"Oolong\" }) for anything to type: Jev only sees the keys and picks which field each belongs to; the text goes straight to the page, so secrets never reach a model. JavaScript dialogs are accepted and listed in `dialogs`, and a link that opens a new tab is followed there. Needs TYPESAFE_API_KEY; every step lands on an element the extraction just offered, and when Jev isn't sure of a step it stops with status `uncertain` and the `candidates` it was weighing instead of guessing. `status` is completed, likely_completed (Jev leaned toward done but wasn't sure), uncertain, stuck, needs_login (pair with request_human_takeover or load_browser_state; a run with `values` keeps going at a login form), needs_human (a CAPTCHA or bot check; use request_human_takeover), needs_confirmation (only with confirmIrreversible; `pending` names the click it held back), blocked (an error page), no_progress or max_steps. Returns a per-step trace with confidences. Jev can be eager to call a goal met: verify with take_snapshot or take_screenshot afterwards. For a single action, click/type with a plain-language selector is cheaper.",
             object_schema(
                 &[
                     session_id,

@@ -217,6 +217,10 @@ class Handler(BaseHTTPRequestHandler):
             answers["login"] = {"noul": 0.97 if "sign-in wall" in title else 0.02}
             answers["error"] = {"noul": 0.97 if "error page" in title else 0.02}
             answers["irreversible"] = {"noul": 0.97 if "checkout" in title else 0.02}
+            if "operation" in questions:
+                op = ("hover" if "hover" in first else "right_click" if "right-click" in first
+                      else "drag" if "drag" in first else "click")
+                answers["operation"] = {"choice": op, "confidence": 0.9}
             answers["bot_check"] = {"noul": 0.97 if "bot check" in title else 0.02}
             if "value_key" in questions:
                 vkeys = questions["value_key"]["criteria"]
@@ -227,6 +231,12 @@ class Handler(BaseHTTPRequestHandler):
                     vprobs[vother] = 0.09
                 answers["value_key"] = {"choice": vchoice, "confidence": 0.91,
                                         "probabilities": vprobs}
+
+        # act's follow-up drop target for a drag.
+        if "target" in questions:
+            tcrit = questions["target"]["criteria"]
+            tpick = next((k for k in tcrit if "drop" in str(tcrit[k]).lower()), next(iter(tcrit)))
+            answers["target"] = {"choice": tpick, "confidence": 0.9}
 
         # act's follow-up value question about one chosen field.
         if "value_key" in questions and "goal_met" not in questions:
@@ -587,6 +597,25 @@ check "act: wire a confirm dialog" "$(call evaluate "$(printf '{"sessionId":"%s"
 ACT_DLG=$(call act "$(printf '{"sessionId":"%s","goal":"type the name and submit"}' "$SID")")
 check "act: accepts a confirm dialog" "$ACT_DLG" 'Completed the goal in 1 step'
 check "act: reports the dialog" "$ACT_DLG" 'sure?'
+
+# Hover, right-click and drag, each on its own page so the stub's default
+# pick (the first element) is the one to act on.
+HOVER_URL="data:text/html,<title>hover</title><button id=hv>Card</button>"
+check "act: navigate to the hover page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$HOVER_URL")")" 'Navigated to'
+check "act: wire a hover handler" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).addEventListener(%s, () => { document.title = %s }); return 1 })()"}' "$SID" "'hv'" "'mouseover'" "'act-done'")")" '"result":1'
+check "act: hovers when the goal calls for it" "$(call act "$(printf '{"sessionId":"%s","goal":"hover over the card"}' "$SID")")" '"action":"hover"'
+
+RC_URL="data:text/html,<title>menu</title><button id=rc>Box</button>"
+check "act: navigate to the context menu page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$RC_URL")")" 'Navigated to'
+check "act: wire a context menu handler" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).addEventListener(%s, (e) => { e.preventDefault(); document.title = %s }); return 1 })()"}' "$SID" "'rc'" "'contextmenu'" "'act-done'")")" '"result":1'
+check "act: right-clicks when the goal calls for it" "$(call act "$(printf '{"sessionId":"%s","goal":"right-click the box"}' "$SID")")" '"action":"right_click"'
+
+DRAG_URL="data:text/html,<title>drag</title><div id=src draggable=true>Box%20A</div><p>gap</p><div id=dst tabindex=0 style=height:60px>Drop%20zone</div>"
+check "act: navigate to the drag page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$DRAG_URL")")" 'Navigated to'
+check "act: wire an HTML5 drop zone" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { const d = document.getElementById(%s); d.addEventListener(%s, (e) => e.preventDefault()); d.addEventListener(%s, (e) => { e.preventDefault(); document.title = %s }); document.getElementById(%s).addEventListener(%s, (e) => e.dataTransfer.setData(%s, %s)); return 1 })()"}' "$SID" "'dst'" "'dragover'" "'drop'" "'act-done'" "'src'" "'dragstart'" "'text/plain'" "'a'")")" '"result":1'
+ACT_DRAG=$(call act "$(printf '{"sessionId":"%s","goal":"drag box A onto the drop zone"}' "$SID")")
+check "act: drags onto the chosen target" "$ACT_DRAG" '"action":"drag"'
+check "act: the HTML5 drop fired" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'act-done'
 
 # Typing text with no key on a US keyboard, and picking inside a shadow root.
 SHADOW_URL="data:text/html,<title>shadow</title><button>Cancel</button><div id=host></div>"

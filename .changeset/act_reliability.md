@@ -15,7 +15,8 @@ even odds met, instead of acting past it. When Jev isn't sure of a step, `act` s
 and the `candidates` it was weighing instead of erroring, and reports
 `likely_completed` when the goal probably is met. It accepts JavaScript
 dialogs (listed in `dialogs`) instead of hanging on them, follows links that
-open a new tab, can press Enter and Escape, waits on a page that is still
+open a new tab, can press Enter and Escape, hover, right-click and drag (HTML5 drag-and-drop
+included), waits on a page that is still
 loading, and picks elements inside open shadow roots, same-origin iframes and
 script-only click targets such as sortable table headers. A bot check stops
 it with `needs_human`, and the new `confirmIrreversible` option stops before

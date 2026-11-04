@@ -55,7 +55,7 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   var MAX = __MAX_ELEMENTS__;
   var STAMP = '__STAMP__';
   var SKIP_TYPED = __SKIP_TYPED__;
-  var SEL = 'a[href], button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="option"], [role="checkbox"], [role="radio"], [role="switch"], [onclick]';
+  var SEL = 'a[href], button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="option"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="slider"], [onclick], [oncontextmenu], [ondblclick], [draggable="true"], [tabindex]:not([tabindex="-1"])';
   var clamp = function(s, n) {
     s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
     var a = Array.from(s);
@@ -68,6 +68,8 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     var role = el.getAttribute('role');
     if (role) p.push('role=' + clamp(role, 24));
     if (el.isContentEditable) p.push('[contenteditable]');
+    if (el.getAttribute('draggable') === 'true') p.push('[draggable]');
+    if (el.hasAttribute('oncontextmenu')) p.push('[has context menu]');
     if (tag === 'input') {
       var t = el.getAttribute('type');
       if (t) p.push('type=' + clamp(t, 16));
@@ -172,6 +174,17 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     for (var k = 0; k < stale.length; k++) stale[k].removeAttribute('data-jev-id');
     var nodes = R.root.querySelectorAll(SEL);
     for (var i = 0; i < nodes.length; i++) consider(nodes[i], R.ox, R.oy);
+    // Table headers (often sortable) and sizeable images (hover targets).
+    var extra = R.root.querySelectorAll('thead th, img');
+    for (var x = 0; x < extra.length && x < 3000; x++) {
+      var xe = extra[x];
+      if (xe.tagName === 'IMG') {
+        if (xe.closest('a, button')) continue;
+        var xr = xe.getBoundingClientRect();
+        if (xr.width < 24 || xr.height < 24) continue;
+      }
+      consider(xe, R.ox, R.oy);
+    }
     var maybe = R.root.querySelectorAll(POINTER);
     for (var m = 0; m < maybe.length && m < 3000; m++) {
       var c = maybe[m];
@@ -633,6 +646,66 @@ async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resol
     })
 }
 
+/// Ways `act` can act on a chosen element besides typing and selecting,
+/// asked speculatively in each step's request.
+pub const OPERATIONS: &[(&str, &str)] = &[
+    (
+        "click",
+        "Click it. The usual way to use a button, link or control.",
+    ),
+    (
+        "hover",
+        "Move the mouse over it without clicking, to reveal hidden content such as a caption, tooltip or menu.",
+    ),
+    ("right_click", "Right-click it to open its context menu."),
+    ("drag", "Drag it and drop it onto another element."),
+];
+
+/// Ask Jev where to drop an element `act` is dragging, among the elements
+/// the step's extraction offered (except the dragged one). `None` means no
+/// target fit well enough.
+pub async fn decide_drop_target(
+    goal: &str,
+    page: &PageInfo,
+    dragging: &str,
+) -> Result<Option<String>> {
+    let cfg = config()?;
+    let dragged = page
+        .elements
+        .iter()
+        .find(|e| e.id == dragging)
+        .map(|e| e.desc.clone())
+        .unwrap_or_default();
+    let mut criteria = Map::new();
+    for e in page.elements.iter().filter(|e| e.id != dragging) {
+        criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
+    }
+    if criteria.is_empty() {
+        return Ok(None);
+    }
+    let state = format!(
+        "Goal: \"{goal}\".\nThe agent is dragging this element: {dragged}\nChoose where to drop it."
+    );
+    let body = json!({
+        "model": cfg.model,
+        "state": state,
+        "questions": {
+            "target": {
+                "type": "choice",
+                "instructions": "Onto which element should the dragged element be dropped for the goal?",
+                "criteria": criteria
+            }
+        }
+    });
+    let json = post_systemone(&cfg, &body).await?;
+    let ids: Vec<&str> = criteria.keys().map(|k| k.as_str()).collect();
+    let answer = parse_choice(&json, "target", &ids)?;
+    if answer.confidence < ACT_MIN_CONFIDENCE {
+        return Ok(None);
+    }
+    Ok(Some(answer.chosen))
+}
+
 /// Extra actions offered to `act` alongside the elements. Together with
 /// [`MAX_ELEMENTS`] they stay under Jev's 255-option Choice limit.
 pub const PSEUDO_ACTIONS: &[(&str, &str)] = &[
@@ -747,6 +820,9 @@ pub struct StepDecision {
     /// The top options with their probabilities, chosen first, for an
     /// `uncertain` stop.
     pub candidates: Vec<(String, f64)>,
+    /// How to act on a chosen element: one of [`OPERATIONS`]' ids, "click"
+    /// unless Jev was sure of another.
+    pub operation: String,
     /// Speculative answer from the same request: which caller-provided
     /// value belongs in the field to fill next, if any.
     pub value_key: Option<String>,
@@ -837,6 +913,20 @@ pub async fn decide_step(
             "instructions": "The page shows an error, rejection, or failure message relevant to the goal."
         }),
     );
+    if has_elements {
+        let mut ops = Map::new();
+        for (id, desc) in OPERATIONS {
+            ops.insert((*id).to_string(), Value::String((*desc).to_string()));
+        }
+        questions.insert(
+            "operation".to_string(),
+            json!({
+                "type": "choice",
+                "instructions": "If the best next step acts on one of the listed elements, which way of acting on it does the goal call for?",
+                "criteria": ops
+            }),
+        );
+    }
     questions.insert(
         "irreversible".to_string(),
         json!({
@@ -917,6 +1007,14 @@ pub async fn decide_step(
             .into_iter()
             .find(|(id, _)| id.starts_with('e') && page_info.elements.iter().any(|e| e.id == *id));
     }
+    let mut operation = "click".to_string();
+    if has_elements {
+        let ids: Vec<&str> = OPERATIONS.iter().map(|(id, _)| *id).collect();
+        let answer = parse_choice(&json, "operation", &ids)?;
+        if answer.confidence >= ACT_MIN_CONFIDENCE {
+            operation = answer.chosen;
+        }
+    }
     let mut value_key = None;
     if !value_criteria.is_empty() {
         let ids: Vec<&str> = value_criteria.keys().map(|k| k.as_str()).collect();
@@ -947,6 +1045,7 @@ pub async fn decide_step(
         irreversible,
         bot_check,
         candidates,
+        operation,
         value_key,
         next_best,
         has_elements,
