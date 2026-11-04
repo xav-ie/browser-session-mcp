@@ -158,11 +158,13 @@ large model reading the whole page to name a selector.
 click({ sessionId, selector: "the login button" })
 type({ sessionId, selector: "the email field", text: "me@example.com" })
 act({ sessionId, goal: "add the cheapest oolong to the cart" })
+ask({ sessionId, question: "Is the oolong in the cart?" })
 ```
 
 A selector is tried as CSS first, so nothing changes for agents that already
 write CSS. `act` runs a whole multi step goal on the server, one Jev call per
-step, and reports whether it finished, got stuck or hit a login wall. Text to
+step, and reports whether it finished, got stuck or hit a login wall. `ask`
+answers a yes/no or multiple choice question about the page. Text to
 type stays out of the model, and every miss is an error, never a guess.
 [Picking elements with Jev](docs/jev.md) covers the benefits, what Jev sees,
 and tuning.
