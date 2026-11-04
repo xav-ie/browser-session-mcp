@@ -5,8 +5,8 @@ default: minor
 # act finishes far more tasks
 
 On Ying-Kai Liao's jev-browser task suite (40 live tasks), `act` went from
-11 or 12 right to 29 to 31, within two of jev-browser itself on the same
-machine and model.
+11 or 12 right to 34 or 35, ahead of jev-browser itself (32 or 33) on the
+same machine and model.
 
 `act` now types every value in a form, not just the first: keys already typed
 are no longer offered again, and a field with no matching guess gets its own
