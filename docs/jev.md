@@ -163,6 +163,13 @@ values never leave it either.
 
 ## How a pick works
 
+<!-- diagram:jev-pick -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/jev-pick-dark.svg">
+  <img src="diagrams/jev-pick.svg" alt="Sequence: the agent calls click with the plain-language selector the login button. The mcp server collects the page's interactive elements, up to 240 with the ones in the viewport first, and stamps each with a data-jev-id attribute. It sends Jev one Choice request with the goal, the page's text and the element list, and Jev answers e17 with confidence 0.97. Under the confidence floor, 0.5 or 0.85 on the fallback, it errors instead of guessing. The server clicks e17 with trusted CDP input and tells the agent it clicked the Sign in button">
+</picture>
+<!-- /diagram:jev-pick -->
+
 1. Collect the page's interactive elements from the DOM (links, buttons,
    inputs, selects, editable regions and their ARIA roles), skipping hidden
    and disabled ones. Elements in the viewport go first, so a long page can't

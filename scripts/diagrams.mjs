@@ -14,7 +14,7 @@ const read = (file) => readFileSync(path.join(root, file), "utf8");
 const write = (file, text) => writeFileSync(path.join(root, file), text);
 const DIR = "docs/diagrams";
 const palette = JSON.parse(read(`${DIR}/palette.json`));
-const DOCS = ["README.md", "docs/how-it-works.md", "docs/workflows.md", "docs/development.md"];
+const DOCS = ["README.md", "docs/how-it-works.md", "docs/workflows.md", "docs/development.md", "docs/jev.md"];
 
 // --- primitives -------------------------------------------------------------------
 const W = 1062;
@@ -273,6 +273,32 @@ const diagrams = {
     return {
       ...d,
       alt: "Sequence: the agent calls request_human_takeover and gets a one-time link back, which it shows to a person. The person opens the link; the takeover page streams the live Chrome tab and forwards their input. They log in with their password, passkey or 2FA straight into Chrome, and the agent never sees it. They click Done, and the agent's await_human_takeover call returns completed: true",
+    };
+  },
+
+  "jev-pick"() {
+    const d = sequence(
+      [
+        { id: "agent", text: ["Your agent"] },
+        { id: "mcp", kind: "key", text: ["browser-session mcp"] },
+        { id: "page", text: ["The page, in Chrome"] },
+        { id: "jev", text: ["Jev", "TypeSafe's API"] },
+      ],
+      [
+        { from: "agent", to: "mcp", label: "click(\"the login button\")" },
+        { from: "mcp", to: "page", label: "collect interactive elements" },
+        { from: "page", to: "mcp", label: "up to 240, viewport first", ret: true },
+        { from: "mcp", to: "page", label: "stamp each with data-jev-id" },
+        { from: "mcp", to: "jev", label: "one Choice: goal, page text, element list" },
+        { from: "jev", to: "mcp", label: "e17, confidence 0.97", ret: true },
+        { note: "Under the floor (0.5, or 0.85 on the fallback) it errors instead of guessing.", over: ["mcp", "jev"] },
+        { from: "mcp", to: "page", label: "trusted CDP click on e17" },
+        { from: "mcp", to: "agent", label: "Clicked button \"Sign in\"", ret: true },
+      ],
+    );
+    return {
+      ...d,
+      alt: "Sequence: the agent calls click with the plain-language selector the login button. The mcp server collects the page's interactive elements, up to 240 with the ones in the viewport first, and stamps each with a data-jev-id attribute. It sends Jev one Choice request with the goal, the page's text and the element list, and Jev answers e17 with confidence 0.97. Under the confidence floor, 0.5 or 0.85 on the fallback, it errors instead of guessing. The server clicks e17 with trusted CDP input and tells the agent it clicked the Sign in button",
     };
   },
 
