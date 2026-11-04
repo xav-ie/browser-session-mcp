@@ -115,6 +115,10 @@ const label = (x, y, s, anchor = "middle") => {
   return rect("tag", left, y - 12, w, 19, 5) + text("label", x, y + 2, s, anchor);
 };
 
+// A line of sub text on a background tag, for text that arrows cross.
+const note = (x, y, s) =>
+  rect("tag", x - 6, y - 14, textWidth(s, SIZE.sub) + 12, 20, 5) + text("sub", x, y, s);
+
 const arrow = (points, cls = "edge") =>
   `<path class="${cls}" d="M${points.map(([x, y]) => `${n(x)} ${n(y)}`).join("L")}"/>`;
 
@@ -186,7 +190,7 @@ const diagrams = {
     const group = { x: M, y: 150, w: W - 2 * M, h: 196 };
     const rw = (group.w - 32 - 3 * 16) / 4;
     const role = (i, t) => ({ x: group.x + 16 + i * (rw + 16), y: group.y + 44, w: rw, h: 104, kind: "key", text: t });
-    const mcp = role(0, ["mcp", "the 35 tools, over stdio; restart it any time"]);
+    const mcp = role(0, ["mcp", "the 36 tools, over stdio; restart it any time"]);
     const listener = role(1, ["listener", "records console and network traffic, per visit"]);
     const reaper = role(2, ["reaper", "on a timer, closes sessions left idle"]);
     const takeover = role(3, ["takeover", "serves the page a person logs in through"]);
@@ -205,7 +209,6 @@ const diagrams = {
       body:
         rect("group", group.x, group.y, group.w, group.h, 16) +
         text("title", group.x + 18, group.y + 28, "browser-session: one binary, four roles") +
-        text("sub", group.x + 18, group.y + group.h - 16, "They share one state dir: sessions, visit logs, saved cookies, takeover tickets.") +
         rect("box", chrome.x, chrome.y, chrome.w, chrome.h, 14) +
         text("title", chrome.x + 18, chrome.y + 30, "Chrome, with the DevTools Protocol on :9222") +
         text("sub", chrome.x + 18, chrome.y + 50, "yours to run: headless or not, local or remote; one Chrome holds every session") +
@@ -220,6 +223,9 @@ const diagrams = {
         label(at(mcp).bottom[0], 384, "drives pages") +
         label(at(listener).bottom[0], 384, "watches every tab") +
         label(at(reaper).bottom[0], 384, "cleans up") +
+        // Drawn after the arrows, on a background tag, so they pass under it
+        // like the labels.
+        note(group.x + 18, group.y + group.h - 16, "They share one state dir: sessions, visit logs, saved cookies, takeover tickets.") +
         label(at(takeover).bottom[0], 384, "live view and input"),
       alt: "Your AI agent sends MCP tool calls with a sessionId to the mcp role. The browser-session binary runs as four roles that share one state dir: mcp drives pages, listener watches every tab and records console messages and requests per visit, reaper closes idle sessions on a timer, and takeover serves the page a person opens to log in, with a live view and input to Chrome. All four talk to one Chrome over the DevTools Protocol on port 9222, which holds every session as its own isolated context with its own cookies, storage and tabs",
     };
