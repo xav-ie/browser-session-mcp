@@ -208,7 +208,7 @@ const diagrams = {
       h: chrome.y + chrome.h + M,
       body:
         rect("group", group.x, group.y, group.w, group.h, 16) +
-        text("title", group.x + 18, group.y + 28, "browser-session: one binary, four roles") +
+        text("title", group.x + group.w / 2, group.y + 28, "browser-session: one binary, four roles", "middle") +
         rect("box", chrome.x, chrome.y, chrome.w, chrome.h, 14) +
         text("title", chrome.x + 18, chrome.y + 30, "Chrome, with the DevTools Protocol on :9222") +
         text("sub", chrome.x + 18, chrome.y + 50, "yours to run: headless or not, local or remote; one Chrome holds every session") +
