@@ -4,9 +4,14 @@ default: minor
 
 # act finishes far more tasks
 
+On Ying-Kai Liao's jev-browser task suite (40 live tasks), `act` went from
+11 or 12 right to 29 to 31, within two of jev-browser itself on the same
+machine and model.
+
 `act` now types every value in a form, not just the first: keys already typed
 are no longer offered again, and a field with no matching guess gets its own
-question. When Jev isn't sure of a step, `act` stops with status `uncertain`
+question. It stops as `likely_completed` once Jev rates the goal at least
+even odds met, instead of acting past it. When Jev isn't sure of a step, `act` stops with status `uncertain`
 and the `candidates` it was weighing instead of erroring, and reports
 `likely_completed` when the goal probably is met. It accepts JavaScript
 dialogs (listed in `dialogs`) instead of hanging on them, follows links that
