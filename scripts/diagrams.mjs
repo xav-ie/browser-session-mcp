@@ -308,6 +308,40 @@ const diagrams = {
     };
   },
 
+  "act-loop"() {
+    const gap = 44;
+    const bw = (W - 2 * M - 3 * gap) / 4;
+    const y = 176;
+    const h = 112;
+    const step = (i, kind, t) => ({ x: M + i * (bw + gap), y, w: bw, h, kind, text: t });
+    const read = step(0, "key", ["Read the page", "its elements, visible text, and the steps so far"]);
+    const decide = step(1, "key", ["One Jev request", "the next step, and: goal met? a wall in the way? can't be undone?"]);
+    const act = step(2, "key", ["Do it", "click, type, hover, drag, select, scroll, or a key"]);
+    const check = step(3, "key", ["Check it changed", "if not, try Jev's next best pick"]);
+    const agent = { x: read.x, y: M, w: read.w, h: 88, text: ["Your agent", "act({ goal, values })"] };
+    const stop = {
+      x: decide.x,
+      y: M,
+      w: check.x + check.w - decide.x,
+      h: 88,
+      kind: "end",
+      text: ["Stop with a status", "completed or likely_completed", "needs_login, needs_human, needs_confirmation, stuck, blocked or uncertain"],
+    };
+    const loopY = y + h + 40;
+    return {
+      h: loopY + 14 + M,
+      body:
+        [agent, stop, read, decide, act, check].map(box).join("") +
+        arrow([at(agent).bottom, at(read).top]) +
+        arrow([at(decide).top, [at(decide).top[0], stop.y + stop.h]]) +
+        label(at(decide).top[0], (y + stop.y + stop.h) / 2 + 2, "when it's done, blocked or unsure") +
+        [read, decide, act].map((b, i) => arrow([at(b).right, at([decide, act, check][i]).left])).join("") +
+        arrow([at(check).bottom, [at(check).bottom[0], loopY], [at(read).bottom[0], loopY], at(read).bottom]) +
+        label((at(read).bottom[0] + at(check).bottom[0]) / 2, loopY, "next step, until maxSteps or three actions in a row do nothing"),
+      alt: "Your agent calls act with a goal and values. act reads the page: its elements, visible text and the steps so far. It sends one Jev request that picks the next step and judges whether the goal is met, whether a wall is in the way and whether the click can't be undone. It does the step: click, type, hover, drag, select, scroll, or a key press. It checks the page changed, and if not tries Jev's next best pick. Then it loops back to read the page, until maxSteps or three actions in a row do nothing. When Jev's judgments say it's done, blocked or unsure, it stops with a status: completed or likely_completed; needs_login, needs_human or needs_confirmation; stuck, blocked or uncertain",
+    };
+  },
+
   "saved-state"() {
     return {
       h: 2 * M + 112,

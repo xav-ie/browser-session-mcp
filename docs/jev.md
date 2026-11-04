@@ -72,6 +72,13 @@ nonsense goal).
 `act` runs the loop on the server: read the page, ask Jev for the next step,
 do it, repeat.
 
+<!-- diagram:act-loop -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/act-loop-dark.svg">
+  <img src="diagrams/act-loop.svg" alt="Your agent calls act with a goal and values. act reads the page: its elements, visible text and the steps so far. It sends one Jev request that picks the next step and judges whether the goal is met, whether a wall is in the way and whether the click can't be undone. It does the step: click, type, hover, drag, select, scroll, or a key press. It checks the page changed, and if not tries Jev's next best pick. Then it loops back to read the page, until maxSteps or three actions in a row do nothing. When Jev's judgments say it's done, blocked or unsure, it stops with a status: completed or likely_completed; needs_login, needs_human or needs_confirmation; stuck, blocked or uncertain">
+</picture>
+<!-- /diagram:act-loop -->
+
 ```
 act({
   sessionId,
