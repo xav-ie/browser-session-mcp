@@ -5,81 +5,29 @@
 _[← Back to README](../README.md) · [Docs index](README.md)_
 
 [Jev](https://typesafe.ai) is TypeSafe's decision model. It can't plan or
-write text, but it is fast and cheap at one thing: picking an option out of a
-bounded set. Clicking through a page is mostly that, so browser-session-mcp
-hands Jev the one decision an agent keeps paying a large model for: **which
-element?**
+write text, but it picks one option out of a list in a few hundred
+milliseconds for a fraction of a cent. With a Jev key, browser-session-mcp
+uses it so an agent can say what it wants instead of writing CSS selectors:
 
-- [Why use it](#why-use-it)
+- **Plain-language selectors.** `click`, `type` and `press_key` accept a
+  description like "the login button".
+- **`act`.** Give it a goal and it works through the page on its own, one Jev
+  decision per step.
+- **`ask`.** A yes/no or multiple choice question about the page.
+
+The agent's own model still plans, writes text and checks results. Jev only
+makes the many small "which one?" decisions, so those stop costing a large
+model round trip each.
+
 - [Setup](#setup)
 - [Plain-language selectors](#plain-language-selectors)
 - [act: a whole goal in one call](#act-a-whole-goal-in-one-call)
 - [ask: questions about the page](#ask-questions-about-the-page)
 - [What Jev sees](#what-jev-sees)
 - [How a pick works](#how-a-pick-works)
-- [Limits and tips](#limits-and-tips)
-- [Compared with other Jev browsers](#compared-with-other-jev-browsers)
+- [Limits](#limits)
+- [How it compares](#how-it-compares)
 - [Tuning](#tuning)
-
-## Why use it
-
-Without Jev, an agent acts on a page by reading a whole `take_snapshot`,
-reasoning about it, and writing a CSS selector by hand. That is a large model
-round trip per click, and the selector still breaks when the markup moves.
-
-Jev replaces that with one small request:
-
-| | a large model picks the element | Jev picks it |
-|---|---|---|
-| time per decision | seconds, and the snapshot grows the context every step | 70 to 500 ms end to end ([TypeSafe](https://typesafe.ai)) |
-| input price | $0.20 to $10 per million tokens | $0.042 per million tokens, output free |
-| cost of one pick here | the whole snapshot, every click | about $0.0007 per pick, measured |
-| survives markup changes | only if it rereads the page | yes, it picks from what is there now |
-
-### Measured
-
-On Ying-Kai Liao's [jev-browser task suite](https://github.com/Ying-Kai-Liao/jev-browser/blob/main/bench/tasks.mjs)
-(40 live tasks with ground-truth checks in the page: logins, forms, widgets,
-dynamic pages, iframes, shadow DOM, and tasks built to fail), run on one
-machine with `jev-1.14.0` on 2026-11-04:
-
-| | tasks right, per run | false "done" | median time per passing task |
-|---|---|---|---|
-| `act` | 34, 34, 35 of 40 | 0, 0, 1 | 1.6 s |
-| `act` before this release | 11, 12, 12 of 40 | 0 | 2.1 s |
-| jev-browser itself | 32, 33 of 40 | 1, 1 | 1.9 s |
-
-The suite is vendored in [`bench/`](../bench); `node bench/run.mjs` reruns it.
-Like jev-browser, `act` gets tasks Jev can't judge wrong, such as counting
-to exactly three or reading a table's sort order.
-
-Single tasks other Jev browsers publish times for, as `act` ran them:
-
-| task | `act` | published |
-|---|---|---|
-| Wikipedia, Coffee → Espresso | 1.0 to 1.2 s | about 4 s ([jkudish/jev-browser](https://github.com/jkudish/jev-browser)) |
-| Wikipedia, search Ristretto | 1.4 s | 3.6 s (jkudish/jev-browser) |
-| Wikipedia, search Gödel's incompleteness theorems | 1.5 to 1.6 s | 2.8 s ([jev-ultrafast](https://github.com/browser-use/jev-ultrafast/blob/main/docs/performance.md)) |
-| Google Flights, Zurich → London | 5.7 s in 1 of 3 runs; the others stop at the date picker | 7.07 s (jev-ultrafast) |
-
-### Published
-
-- **[TypeSafe's parallel questions cookbook](https://docs.typesafe.ai/cookbooks/parallel_questions.md)**:
-  13 questions in one request cost 12.2 times less and ran 10 times faster
-  than 13 separate requests. `act` relies on this: each step asks which
-  element, whether the goal is met, whether it is stuck, whether a login,
-  error or bot check page is in the way, whether the click can't be undone,
-  and which value to type, all in one request.
-- **[Jack & Jill case study](https://typesafe.ai/blog/jack-jill-jev-case-study)**:
-  88% cheaper than Gemini, with one check going from about 3.6 s to about
-  0.2 s.
-
-TypeSafe's own headline is 193.6 times faster and 444.6 times cheaper than an
-LLM; their blog notes the LLM side of that comparison is on the high end.
-
-The agent keeps the parts a large model is good at (planning, writing text,
-checking the result) and stops spending tokens on "the login button is
-`form > div:nth-child(3) > button`".
 
 ## Setup
 
@@ -91,8 +39,8 @@ claude mcp add browser-session -e TYPESAFE_API_KEY=... -e BROWSER_URL=... -e STA
   -- nix run github:xav-ie/browser-session-mcp -- mcp
 ```
 
-Without a key everything works as plain CSS, and `act` errors with a note
-saying which variable to set.
+Without a key, selectors are plain CSS and `act` and `ask` return an error
+saying which variable to set. A pick costs about $0.0007.
 
 ## Plain-language selectors
 
@@ -105,81 +53,70 @@ click({ sessionId, selector: "jev: the login button" })   ← straight to Jev
 type({ sessionId, selector: "the email field", text: "me@example.com" })
 ```
 
-There is no syntax to learn. A selector is first used as CSS, and if it
-matches nothing within `timeout`, it is retried as a plain-language goal.
-That fallback also rescues a mistyped CSS selector when Jev can tell what it
-meant. A `jev:` prefix skips the CSS step.
-
-The tool's reply names what was picked, so the agent can check it:
+A selector is first tried as CSS. If it matches nothing within `timeout`, Jev
+picks the element it describes, which also rescues a mistyped CSS selector. A
+`jev:` prefix skips the CSS attempt. The reply names what was picked:
 
 ```
 Clicked button "Sign in" (jev: "the login button", confidence 0.97, 38 offered)
 ```
 
-The two paths have different confidence floors. An explicit `jev:` goal asked
-for a best guess, so it acts at 0.5 or above. The automatic fallback acts
-only at 0.85 or above, because the caller asked for CSS and a rescue should
-only fire when it is clearly right. (Jev will confidently pick something for
-a goal that has no match on the page: 0.81 was measured on a nonsense target.)
-
-`wait_for` takes CSS and text only. It polls; there is nothing to pick.
+When Jev isn't sure, nothing is clicked and the tool returns an error. A
+`jev:` selector needs confidence 0.5. A CSS selector that fell back to Jev
+needs 0.85, since the caller asked for CSS and Jev will confidently pick
+something even for a target that isn't on the page (0.81 was measured on a
+nonsense goal).
 
 ## act: a whole goal in one call
 
-`act` runs the loop on the server. Each step is one Jev request that picks
-the next element or action, and in the same request judges whether the goal
-is met, the agent is stuck, a login, error or bot check page is in the way,
-and whether the next click can't be undone:
+`act` runs the loop on the server: read the page, ask Jev for the next step,
+do it, repeat.
 
 ```
 act({
   sessionId,
-  goal: "search for oolong tea and open the first result",
-  values: { query: "oolong tea" },
-  maxSteps: 8,
+  goal: "log in and open the billing page",
+  values: { username: "ada", password: "..." },
 })
 ```
 
-A step clicks, hovers, right-clicks or drags an element (asking Jev where
-to drop it), types into a field, picks a `<select>` option, scrolls, waits,
-goes back, or presses Enter or Escape. Drags use real mouse input, and HTML5
-drag-and-drop is replayed onto the target the way Playwright does it. After each one
-the loop checks that something changed (URL, title, visible text, open
-dialogs, checked and expanded states, form values). If nothing did, it tries
-Jev's next best choice, and after three dead actions in a row it stops.
+Each step is one Jev request that picks what to do next and, in the same
+request, judges whether the goal is met, whether a login, error or bot check
+page is in the way, and whether the next click can't be undone. A step can
+click, hover, right-click or drag an element, type into a field, pick a
+`<select>` option, scroll, wait, go back, or press Enter or Escape.
 
-Along the way it accepts JavaScript dialogs (`alert`, `confirm`, `prompt`)
-and lists them in `dialogs`, follows a link that opens a new tab into that
-tab, and waits out a page that is mid-navigation.
+- **Text to type goes in `values`.** Jev sees only the keys (`username`,
+  `password`) and says which field each belongs in. The text goes straight to
+  the page, so secrets never reach a model.
+- **Every action is checked.** If the page didn't change, `act` tries Jev's
+  next best choice, and stops after three dead actions in a row.
+- **Dialogs and new tabs are handled.** JavaScript dialogs are accepted and
+  listed in `dialogs`. A link that opens a new tab is followed there.
+- **`confirmIrreversible: true`** stops before a click Jev judges can't be
+  undone, such as placing an order or deleting something.
+- **`maxSteps`** caps the run (default 8, at most 32).
 
-Pass anything to type in `values`. Jev sees only the keys (`query`,
-`password`) and says which field each one belongs in; the text goes straight
-to the page over CDP, so secrets never reach a model. Each key is typed once,
-so a login form gets the username and then the password.
-
-Pass `confirmIrreversible: true` to stop before a click Jev judges can't be
-undone (placing an order, paying, sending, deleting).
-
-It returns a trace of every step with its confidences, and a `status`:
+It returns a trace of every step and a `status`:
 
 | status | meaning | what to do |
 |---|---|---|
-| `completed` | Jev judged the goal met (0.85 or above) | check the page with `take_snapshot`, `take_screenshot` or `ask`; Jev can call a goal met early |
-| `likely_completed` | after at least one step, Jev rates the goal met at 0.5 or above but under 0.85. It rarely rates a met goal higher, and acting on past it tends to undo it | check the page before relying on it |
-| `uncertain` | Jev wasn't sure enough of the next step (under 0.3) | `candidates` lists what it was weighing, most likely first: act on one yourself, or rephrase the goal |
-| `stuck` | nothing on the page looks able to make progress (0.85 or above) | read the page and take over, or rephrase the goal |
-| `needs_login` | a sign-in wall is in the way (0.5 or above) | `request_human_takeover` or `load_browser_state`, then call `act` again. Skipped when `values` were passed, since then the caller supplied what to type |
-| `needs_human` | the page is a CAPTCHA or bot check (0.5 or above) | `request_human_takeover`, then call `act` again |
-| `needs_confirmation` | with `confirmIrreversible`, the next click can't be undone (0.6 or above) | `pending` names it: click it yourself, or call `act` again without `confirmIrreversible` |
-| `blocked` | the page shows an error or rejection (0.5 or above) | read the page |
-| `no_progress` | three actions in a row changed nothing | read the page; something is probably covering it |
-| `max_steps` | the budget ran out (`maxSteps`, default 8, at most 32) | call `act` again with the same goal, or raise `maxSteps` |
+| `completed` | Jev is confident the goal is met | check the page; Jev can be early |
+| `likely_completed` | Jev thinks the goal is probably met | check the page before relying on it |
+| `uncertain` | Jev wasn't sure of the next step | `candidates` lists what it was weighing; act on one yourself or rephrase the goal |
+| `stuck` | nothing on the page looks able to help | read the page, or rephrase the goal |
+| `needs_login` | a sign-in wall is in the way (ignored when `values` were passed) | `request_human_takeover` or `load_browser_state`, then call `act` again |
+| `needs_human` | the page is a CAPTCHA or bot check | `request_human_takeover`, then call `act` again |
+| `needs_confirmation` | with `confirmIrreversible`, the next click can't be undone | `pending` names it; click it yourself or call `act` again without the flag |
+| `blocked` | the page shows an error | read the page |
+| `no_progress` | three actions in a row changed nothing | read the page; something may be covering it |
+| `max_steps` | the step budget ran out | call `act` again, or raise `maxSteps` |
 
-For one action, `click` with a plain-language selector is cheaper than `act`.
+For a single action, `click` with a plain-language selector is cheaper.
 
 ## ask: questions about the page
 
-`ask` gets Jev's judgment of the page as it is now, in one request:
+`ask` gets Jev's judgment of the page as it is now:
 
 ```
 ask({ sessionId, question: "Is an error message showing?" })
@@ -190,34 +127,24 @@ ask({ sessionId, question: "Which page is this?",
   → { answer: "cart", probability: 0.96, probabilities: [...] }
 ```
 
-Without `options` it is a yes/no question and `probability` is the chance of
-yes. With 2 to 255 `options` it picks the one that fits, with each option's
-probability. It reads the URL, title and up to 20,000 characters of visible
-text, and changes nothing.
-
-Use it to branch a script on what a page shows without a large model in the
-loop, or to check what `act` did. Like any Jev answer it is a judgment, not a
-parse: it is weak at counting, arithmetic and dates, so read those with
-`evaluate` or `take_snapshot`.
+Without `options` the answer is yes or no, with the probability of yes. With
+2 to 255 `options` it picks one, with each option's probability. Use it to
+branch a script without a large model, or to check what `act` did. Jev is
+weak at counting, arithmetic and dates, so read those with `evaluate` or
+`take_snapshot` instead.
 
 ## What Jev sees
 
-Each request carries:
+- The goal or question, the page's URL and title, and its visible text (an
+  open dialog's text first). `act` and selectors send up to 1,500 characters
+  of it, `ask` up to 20,000.
+- For picks, one line per element: tag, id, role, its label, whether it is
+  checked, expanded or selected, and a link's `href`.
+- For `act`, the steps taken so far and the keys of `values`.
 
-- the goal, the page's URL and title, and its visible text (up to 1,500
-  characters; an open dialog's text instead of the whole page's);
-- one line per interactive element: tag, id, role, its label (aria label,
-  placeholder, title, `<label>` or inner text), whether it is checked,
-  expanded or selected, and a link's `href`;
-- for `act`, the steps already taken and the keys of `values` not yet typed.
-
-`ask` sends the URL, title and visible text (up to 20,000 characters) and
-your question.
-
-What a person typed into a field is never sent. A text field or password box
-is described by its label and `(filled)` or `(empty)` only. The page
-fingerprint `act` uses to detect effects is hashed inside the page, so form
-values never leave it either.
+What a person typed into a field is never sent. A field is described by its
+label and `(filled)` or `(empty)` only, and the page fingerprint `act` uses
+to detect changes is hashed inside the page.
 
 ## How a pick works
 
@@ -228,74 +155,86 @@ values never leave it either.
 </picture>
 <!-- /diagram:jev-pick -->
 
-1. Collect the page's interactive elements from the DOM (links, buttons,
-   inputs, selects, editable regions, their ARIA roles, and elements only a
-   script makes clickable, like sortable table headers), including those in
-   open shadow roots and same-origin iframes, and skipping hidden and
-   disabled ones. Elements in an open dialog go first, then the rest of the
-   viewport, so a long page can't crowd them out; at most 240 are offered,
-   under Jev's 255 option limit.
-2. Stamp each one with a `data-jev-id` attribute carrying a random token for
-   this pick.
-3. Send one Choice request over those ids.
-4. Act on `[data-jev-id="<token>-e17"]` through the same trusted CDP input as
-   a CSS selector.
+1. Collect the elements a person could use: links, buttons, form fields,
+   ARIA widgets, draggable items, and things only a script makes clickable,
+   like sortable table headers. Open shadow roots and same-origin iframes
+   are included. Elements in an open dialog come first, then the rest of the
+   viewport; at most 240 are offered, under Jev's limit of 255.
+2. Stamp each with a `data-jev-id` attribute carrying a random token, so a
+   stale answer from an earlier pick can't land on a different element.
+3. Ask Jev to choose one id.
+4. Act on it with the same real mouse and keyboard input as a CSS selector.
 
-The random token matters when two callers share a tab: a newer pick re-stamps
-the page, so an older answer matches nothing and fails, instead of landing on
-whatever became `e17` since.
+Jev only ever picks among the ids it was offered; its answer never becomes
+coordinates or JavaScript.
 
-Jev only ever chooses among the ids it was just offered. Its answer never
-becomes coordinates or JavaScript. Everything fails closed, never guessing:
-for `click`, `type` and `press_key`, no key, an empty page, a confidence
-under the floor or a malformed answer is an error, and on the automatic
-fallback the error keeps the original CSS timeout so the agent can see why
-Jev was tried. `act` stops with `uncertain` and the candidates instead, so the
-steps it already took aren't lost.
+## Limits
 
-## Limits and tips
+- **The page is read when the call runs.** On a page still loading,
+  `wait_for` content first (`act` waits on its own).
+- **Only usable elements are offered.** "The third paragraph" has no match.
+- **Cross-origin iframes are out of reach**, such as a payment widget from
+  another site.
+- **Past 240 elements**, the rest are left out. `act` scrolls to reach them;
+  before a single click, `scroll` first.
+- **Stealth.** The `data-jev-id` stamps are DOM changes a page script could
+  notice. Use CSS selectors where that matters.
+- **Verify the end state.** `completed` is Jev's opinion.
 
-- **Elements are read when the call runs.** On a page that is still loading,
-  `wait_for` the content first.
-- **Only interactive elements are offered.** "The third paragraph" has no
-  match; describe something you can click or type into.
-- **Cross-origin iframes are out of reach.** Elements in same-origin iframes
-  and open shadow roots are offered; a payment widget from another origin is
-  not.
-- **Past 240 elements**, the rest are left out and Jev is told how many.
-  `act` can scroll to reach them; for a single click, `scroll` first.
-- **Stealth trade off.** Collecting elements runs in an isolated world, but
-  the `data-jev-id` stamps are DOM changes a page script could notice with a
-  MutationObserver. Use CSS selectors on pages where that matters.
-- **Verify the end state.** `completed` is Jev's opinion. Take a snapshot.
+## How it compares
 
-## Compared with other Jev browsers
+Other projects drive a browser with Jev too. They are standalone agents that
+start a fresh browser per task. browser-session-mcp adds Jev to long-lived,
+logged-in sessions the agent also drives with ordinary tools, with human
+takeover for logins.
 
-Several projects drive a browser with Jev. They are mostly standalone
-agents; browser-session-mcp adds Jev to a long-lived, logged-in session that
-an agent already drives with ordinary tools, so the two mix in one flow.
-
-| | browser-session-mcp | [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | [jev-browser (jkudish)](https://github.com/jkudish/jev-browser) | [jev-browser (Ying-Kai-Liao)](https://github.com/Ying-Kai-Liao/jev-browser) |
+| | browser-session-mcp | [jev-browser](https://github.com/Ying-Kai-Liao/jev-browser) | [jev-browser (jkudish)](https://github.com/jkudish/jev-browser) | [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) |
 |---|---|---|---|---|
-| form | MCP server, Rust, real Chrome over CDP | Python library | MCP, CLI and library on headless Playwright | MCP, CLI and library on Playwright |
-| sessions and logins | persistent, isolated per agent, human takeover, saved cookies | per run | per run, password handoff | per run |
-| single-element picks | `jev:` and automatic CSS fallback on click, type, press_key | no | no | `browser_choose` |
-| text to type | caller's `values`, keys only to the model | a small LLM writes it | an LLM writes it | caller's values |
-| stops on | goal met (or likely), uncertain, stuck, login wall, bot check, confirmation needed, error, no effect, budget | done, blocked | goal met, stuck | done (or likely), login, confirmation needed, ambiguous, error, blocked |
-| page checks | `ask`: yes/no, or which option fits | no | no | `browser_check`, `browser_choose` |
-| page reads | `take_snapshot` (whole page) | no | page as text, markdown or aria | `browser_read`: only the parts relevant to a question |
-| hover, drag, right-click | yes | no | no | yes |
-| task suite above | 34 to 35 of 40 | | | 32 to 33 of 40 |
+| runs as | MCP server on your Chrome | MCP server, CLI, library | MCP server, CLI, library | Python library |
+| sessions | persistent, logged in, human takeover | one per task | one per task | one per task |
+| picks one element | yes, on click, type and press_key | yes | no | no |
+| text to type | your `values`, never shown to the model | your values | written by an LLM | written by an LLM |
+| hover, drag, right-click | yes | yes | no | no |
+| page questions | `ask` | yes | no | no |
+| reads only the relevant part of a page | no | yes | no | no |
+
+### Benchmark
+
+jev-browser publishes a [suite of 40 tasks](https://github.com/Ying-Kai-Liao/jev-browser/blob/main/bench/tasks.mjs)
+on live sites: logins, forms, widgets, loading pages, iframes, shadow DOM, and
+tasks that should fail. Each task has a check that runs in the page. We ran
+its own harness and ours (in [`bench/`](../bench)) on one machine, with the
+same Jev model (`jev-1.14.0`), on 2026-11-04:
+
+| | tasks done right | wrongly claimed done | typical time per task |
+|---|---|---|---|
+| browser-session-mcp | 86% (average of 3 runs) | 1 of 120 | 1.6 s |
+| jev-browser | 81% (average of 2 runs) | 2 of 80 | 1.9 s |
+
+Both miss tasks Jev can't judge, such as counting to exactly three or
+reading a table's sort order. jev-browser does the work on a few tasks but
+then reports itself stuck.
+
+Other projects publish times for single tasks. Ours, on the same tasks:
+
+| task | browser-session-mcp | published by |
+|---|---|---|
+| Wikipedia: from Coffee to the Espresso article | 1.0 to 1.2 s | about 4 s, jkudish/jev-browser |
+| Wikipedia: search for Ristretto | 1.4 s | 3.6 s, jkudish/jev-browser |
+| Wikipedia: search for Gödel's incompleteness theorems | 1.5 to 1.6 s | 2.8 s, jev-ultrafast |
+| Google Flights: Zurich to London | 5.7 s, in 1 of 3 tries | 7.07 s, jev-ultrafast |
 
 ## Tuning
 
 | var | default | notes |
 |---|---|---|
 | `TYPESAFE_API_KEY` | | turns Jev on |
-| `JEV_MODEL` | `jev-1.14.0` | pinned on purpose: answers can shift between releases, so upgrade deliberately rather than riding `jev-latest` |
-| `JEV_BASE_URL` | `https://api.typesafe.ai` | any `/v1/systemone` compatible carrier (Vercel AI Gateway, OpenRouter, Cloudflare) |
+| `JEV_MODEL` | `jev-1.14.0` | pinned on purpose: answers can shift between releases |
+| `JEV_BASE_URL` | `https://api.typesafe.ai` | any `/v1/systemone` compatible provider (Vercel AI Gateway, OpenRouter, Cloudflare) |
 | `JEV_TIMEOUT_MS` | `10000` | per request |
-| `JEV_MIN_CONFIDENCE` | `0.5` | floor for `jev:` goals. `act` uses a fixed 0.3, since it checks each action's effect and retries with the next best pick |
-| `JEV_FALLBACK_MIN_CONFIDENCE` | `0.85` | floor for the automatic fallback |
+| `JEV_MIN_CONFIDENCE` | `0.5` | floor for `jev:` selectors |
+| `JEV_FALLBACK_MIN_CONFIDENCE` | `0.85` | floor for CSS selectors that fell back to Jev |
 
-The full list of server variables is in [Deployment](deployment.md#environment).
+`act` uses its own floor of 0.3, since it checks each action's effect and
+retries with Jev's next best choice. The full list of server variables is in
+[Deployment](deployment.md#environment).
