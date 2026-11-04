@@ -1,4 +1,4 @@
-<img align="right" src="logo/jev-enabled.svg" width="200" alt="A sticker reading JEV-ENABLED, now with 85% confidence, with fine print: verify the final page yourself">
+<img align="right" src="logo/jev-enabled.svg" width="140" alt="A holographic purple sticker reading jev inside, in the style of the old Intel inside stickers">
 
 # Picking elements with Jev
 

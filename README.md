@@ -147,7 +147,7 @@ has the details and the code.
 
 ## Picking elements with Jev
 
-<img align="right" src="docs/logo/jev-enabled.svg" width="180" alt="A sticker reading JEV-ENABLED, now with 85% confidence, with fine print: verify the final page yourself">
+<img align="right" src="docs/logo/jev-enabled.svg" width="120" alt="A holographic purple sticker reading jev inside, in the style of the old Intel inside stickers">
 
 Set `TYPESAFE_API_KEY` and agents stop writing CSS selectors. Describe the
 element in plain words and [Jev](https://typesafe.ai), a small decision model,
