@@ -391,6 +391,49 @@ impl BrowserSessionServer {
         )))
     }
 
+    async fn ask(&self, args: JsonObject) -> Result<Structured<AskOut>> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let question = required_str(&args, "question")?.to_string();
+        let options: Vec<String> = match args.get("options") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(a)) => a
+                .iter()
+                .map(|o| {
+                    o.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| anyhow!("`options` must be strings"))
+                })
+                .collect::<Result<_>>()?,
+            Some(_) => bail!("`options` must be an array of strings"),
+        };
+        if options.len() == 1 || options.len() > 255 {
+            bail!("`options` needs 2 to 255 entries, or leave it out for a yes/no question");
+        }
+        let page = sessions.active_page(&session_id).await?;
+        let a = jev::ask(&page, &question, &options).await?;
+        let text = if options.is_empty() {
+            format!("{} (probability of yes {:.2})", a.answer, a.probability)
+        } else {
+            format!("{} (confidence {:.2})", a.answer, a.probability)
+        };
+        Ok(ok_text_struct(
+            text,
+            AskOut {
+                answer: a.answer,
+                probability: a.probability,
+                probabilities: a
+                    .probabilities
+                    .into_iter()
+                    .map(|(option, probability)| AskOption {
+                        option,
+                        probability,
+                    })
+                    .collect(),
+            },
+        ))
+    }
+
     async fn act(&self, args: JsonObject) -> Result<Structured<ActOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
@@ -1544,6 +1587,7 @@ tools! {
     "take_screenshot" => take_screenshot,
     "take_snapshot" => take_snapshot,
     "act" => act,
+    "ask" => ask,
     "click" => click,
     "type" => type_text,
     "press_key" => press_key,
@@ -1656,6 +1700,24 @@ struct ActExtra {
     candidates: Vec<ActCandidate>,
     pending: Option<String>,
     dialogs: Vec<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct AskOut {
+    /// "yes" or "no" for a yes/no question, else the option that fits.
+    answer: String,
+    /// For a yes/no question, the probability of yes; with options, Jev's
+    /// confidence in `answer`.
+    probability: f64,
+    /// With options: each option's probability, most likely first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    probabilities: Vec<AskOption>,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct AskOption {
+    option: String,
+    probability: f64,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -2929,6 +2991,12 @@ fn tool_defs() -> Vec<Tool> {
         ("required", json!(["width", "height"])),
         ("additionalProperties", Value::Bool(false)),
     ]);
+    let str_list_t = obj(&[
+        ("type", Value::String("array".into())),
+        ("items", str_t.clone()),
+        ("minItems", json!(2)),
+        ("maxItems", json!(255)),
+    ]);
     let values_t = obj(&[
         ("type", Value::String("object".into())),
         ("additionalProperties", str_t.clone()),
@@ -3118,6 +3186,27 @@ fn tool_defs() -> Vec<Tool> {
                 &["sessionId", "goal"],
             ),
             writes(true, true),
+        ),
+        tool(
+            "ask",
+            "Ask the Jev decision model a question about the session's active tab and get a calibrated answer in one cheap call (~150 to 500 ms, a fraction of a cent), judged on the page's URL, title and visible text (an open dialog's first; up to 20,000 characters). Without `options` it is a yes/no question, e.g. \"Is an error message showing?\" or \"Is the user signed in?\", answered with the probability of yes. With `options` it picks the one that fits, e.g. question \"Which page is this?\" with [\"product page\", \"cart\", \"checkout\", \"error page\"], with each option's probability. Useful for branching a script without a large model, and for checking a result after act. Jev reads and judges; it is weak at counting, arithmetic and dates, so ask those of evaluate or take_snapshot instead. Needs TYPESAFE_API_KEY; any Jev problem is an error, never a default answer. It reads the page without changing it.",
+            object_schema(
+                &[
+                    session_id,
+                    (
+                        "question",
+                        &str_t,
+                        "The question, about the page as it is now. Phrase a yes/no question as a statement or a question with a clear yes, e.g. \"The order was placed successfully.\"",
+                    ),
+                    (
+                        "options",
+                        &str_list_t,
+                        "Answers to choose between (2 to 255). Leave out for a yes/no question.",
+                    ),
+                ],
+                &["sessionId", "question"],
+            ),
+            ToolAnnotations::new().read_only(true).open_world(true),
         ),
         tool(
             "click",

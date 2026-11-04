@@ -1569,6 +1569,95 @@ pub async fn decide_select_option(
     Ok(Some((i, label, answer.confidence)))
 }
 
+/// How much visible text `ask` sends: enough for a long article's opening
+/// and most app screens, well under Jev's 32k-token question context.
+const ASK_TEXT_CHARS: usize = 20_000;
+
+/// The page as `ask` reads it: URL, title and visible text, an open
+/// dialog's text first.
+const ASK_READ_FN: &str = r#"function() {
+  var MAX = __MAX__;
+  var textOf = function(root) { return String(root.innerText || '').replace(/\s+/g, ' ').trim(); };
+  var modal = document.querySelector('dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+  var text = '';
+  if (modal && modal.getClientRects().length) text = 'Open dialog: ' + textOf(modal) + '\n\n';
+  if (document.body) text += textOf(document.body);
+  if (text.length > MAX) text = text.slice(0, MAX - 3) + '...';
+  return { url: String(location.href), title: String(document.title), text: text };
+}"#;
+
+/// `ask`'s answer about the page.
+pub struct AskAnswer {
+    /// "yes" or "no" for a yes/no question, else the chosen option.
+    pub answer: String,
+    /// For a yes/no question, the probability of yes; for options, Jev's
+    /// confidence in the chosen one.
+    pub probability: f64,
+    /// Every option's probability, most likely first (options only).
+    pub probabilities: Vec<(String, f64)>,
+}
+
+/// Judge the page as it is now: a yes/no question (a Noul) when `options` is
+/// empty, else which option fits (a Choice). One request; any Jev problem is
+/// an error, never a default answer.
+pub async fn ask(page: &Page, question: &str, options: &[String]) -> Result<AskAnswer> {
+    let cfg = config()?;
+    let read = ASK_READ_FN.replace("__MAX__", &ASK_TEXT_CHARS.to_string());
+    let v = iso_eval_function(page, &read)
+        .await
+        .context("reading the page")?;
+    let url = v.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+    let title = v.get("title").and_then(|v| v.as_str()).unwrap_or_default();
+    let text = v.get("text").and_then(|v| v.as_str()).unwrap_or_default();
+    let state = format!("Page: {url} — {title}\nVisible text: {text}");
+    if options.is_empty() {
+        let body = json!({
+            "model": cfg.model,
+            "state": state,
+            "questions": { "answer": { "type": "noul", "instructions": question } }
+        });
+        let json = post_systemone(&cfg, &body).await?;
+        let p = parse_noul(&json, "answer")?;
+        return Ok(AskAnswer {
+            answer: if p >= 0.5 { "yes" } else { "no" }.to_string(),
+            probability: p,
+            probabilities: Vec::new(),
+        });
+    }
+    let mut criteria = Map::new();
+    for (i, o) in options.iter().enumerate() {
+        criteria.insert(format!("o{i}"), Value::String(o.clone()));
+    }
+    let body = json!({
+        "model": cfg.model,
+        "state": state,
+        "questions": {
+            "answer": { "type": "choice", "instructions": question, "criteria": criteria }
+        }
+    });
+    let json = post_systemone(&cfg, &body).await?;
+    let ids: Vec<&str> = criteria.keys().map(|k| k.as_str()).collect();
+    let answer = parse_choice(&json, "answer", &ids)?;
+    let label = |id: &str| {
+        id.strip_prefix('o')
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|n| options.get(n))
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    };
+    let mut probabilities = Vec::new();
+    if !answer.ranked.is_empty() {
+        let chosen_p = 1.0 - answer.ranked.iter().map(|(_, p)| p).sum::<f64>();
+        probabilities.push((label(&answer.chosen), chosen_p.max(0.0)));
+        probabilities.extend(answer.ranked.iter().map(|(id, p)| (label(id), *p)));
+    }
+    Ok(AskAnswer {
+        answer: label(&answer.chosen),
+        probability: answer.confidence,
+        probabilities,
+    })
+}
+
 /// Whether an extracted element description names a field the agent can type
 /// into (a text-ish input, a textarea, contenteditable) rather than click.
 pub fn is_text_field(desc: &str) -> bool {

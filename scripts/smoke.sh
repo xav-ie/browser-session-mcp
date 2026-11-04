@@ -258,6 +258,21 @@ class Handler(BaseHTTPRequestHandler):
             vchoice = "name" if "name" in vkeys else "__none__"
             answers["value_key"] = {"choice": vchoice, "confidence": 0.91}
 
+        # ask: a yes/no Noul, or a Choice over the caller's options.
+        if "answer" in questions:
+            q = questions["answer"]
+            if q["type"] == "noul":
+                answers["answer"] = {"noul": 0.93 if "smoke" in low else 0.04}
+            else:
+                opts = list(q["criteria"])
+                pick = next((k for k in opts if str(q["criteria"][k]).lower() in low), opts[0])
+                rest = [k for k in opts if k != pick]
+                probs = {pick: 0.8}
+                for k in rest:
+                    probs[k] = 0.2 / len(rest)
+                answers["answer"] = {"choice": pick, "confidence": 0.8,
+                                     "probabilities": probs}
+
         resp = json.dumps({
             "model": "jev-stub",
             "answers": answers,
@@ -656,6 +671,15 @@ check "type: navigate to the shadow page" "$(call navigate "$(printf '{"sessionI
 check "type: build a shadow input" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).attachShadow({mode: %s}).innerHTML = %s; return 1 })()"}' "$SID" "'host'" "'open'" "'<input id=deep placeholder=Email>'")")" '"result":1'
 check "type: jev finds a field in a shadow root" "$(call type "$(printf '{"sessionId":"%s","selector":"jev: the Email field","text":"Gödel ✓"}' "$SID")")" 'Typed 7 chars'
 check "type: non-ASCII text went in" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.getElementById(%s).shadowRoot.getElementById(%s).value"}' "$SID" "'host'" "'deep'")")" 'Gödel ✓'
+
+# ---- ask: questions about the page (against the stub API above) ------------
+ASK_URL="data:text/html,<title>basket</title><p>Your%20cart%20holds%20a%20smoke%20detector</p>"
+check "ask: navigate to the cart page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$ASK_URL")")" 'Navigated to'
+check "ask: a yes/no question" "$(call ask "$(printf '{"sessionId":"%s","question":"Is there an item in the cart?"}' "$SID")")" '"answer":"yes"'
+ASK_PICK=$(call ask "$(printf '{"sessionId":"%s","question":"Which page is this?","options":["product page","cart","checkout"]}' "$SID")")
+check "ask: picks the option that fits" "$ASK_PICK" '"answer":"cart"'
+check "ask: lists each option's probability" "$ASK_PICK" '"probabilities"'
+check "ask: rejects a single option" "$(call ask "$(printf '{"sessionId":"%s","question":"Which?","options":["only"]}' "$SID")")" '2 to 255 entries'
 
 # ---- close ---------------------------------------------------------------
 
