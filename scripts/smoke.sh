@@ -172,6 +172,9 @@ class Handler(BaseHTTPRequestHandler):
                     probs[other] = 0.09
                 answers["element"] = {"choice": choice, "confidence": 0.91,
                                       "probabilities": probs}
+                if "unsure" in first:
+                    # no distribution, so only the floor decides
+                    answers["element"] = {"choice": choice, "confidence": 0.3}
             else:
                 # plain jev:/fallback resolve; the unsure and bogus paths
                 # deliberately carry no probabilities so distribution
@@ -213,6 +216,8 @@ class Handler(BaseHTTPRequestHandler):
             answers["stuck"] = {"noul": 0.97 if "impossible" in first else 0.02}
             answers["login"] = {"noul": 0.97 if "sign-in wall" in title else 0.02}
             answers["error"] = {"noul": 0.97 if "error page" in title else 0.02}
+            answers["irreversible"] = {"noul": 0.97 if "checkout" in title else 0.02}
+            answers["bot_check"] = {"noul": 0.97 if "bot check" in title else 0.02}
             if "value_key" in questions:
                 vkeys = questions["value_key"]["criteria"]
                 vchoice = "name" if "name" in vkeys else "__none__"
@@ -222,6 +227,12 @@ class Handler(BaseHTTPRequestHandler):
                     vprobs[vother] = 0.09
                 answers["value_key"] = {"choice": vchoice, "confidence": 0.91,
                                         "probabilities": vprobs}
+
+        # act's follow-up value question about one chosen field.
+        if "value_key" in questions and "goal_met" not in questions:
+            vkeys = questions["value_key"]["criteria"]
+            vchoice = "name" if "name" in vkeys else "__none__"
+            answers["value_key"] = {"choice": vchoice, "confidence": 0.91}
 
         resp = json.dumps({
             "model": "jev-stub",
@@ -540,7 +551,7 @@ check "act: blocked on an error page" "$(call act "$(printf '{"sessionId":"%s","
 EMPTY_URL="data:text/html,<title>empty-page</title><p>Nothing%20here</p>"
 check "act: navigate to the empty page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$EMPTY_URL")")" 'Navigated to'
 check "act: goal-met without elements" "$(call act "$(printf '{"sessionId":"%s","goal":"confirm we are on the empty page"}' "$SID")")" 'Goal was already met'
-check "act: bails when there is nothing to act on" "$(call act "$(printf '{"sessionId":"%s","goal":"click the thing"}' "$SID")")" 'no interactive elements'
+check "act: waits, then stops when there is nothing to act on" "$(call act "$(printf '{"sessionId":"%s","goal":"click the thing"}' "$SID")")" 'Stuck after 0 steps'
 
 # Repeated no-effect clicks end in no_progress.
 DEAD_URL="data:text/html,<title>dead-page</title><button id=dead-btn>Poke</button>"
@@ -548,6 +559,41 @@ check "act: navigate to the dead page" "$(call navigate "$(printf '{"sessionId":
 ACT_DEAD=$(call act "$(printf '{"sessionId":"%s","goal":"poke the dead thing"}' "$SID")")
 check "act: no_progress after dead clicks" "$ACT_DEAD" 'no visible effect'
 check "act: no_progress status is reported" "$ACT_DEAD" 'no_progress'
+
+# Low confidence hands the decision back instead of erroring.
+check "act: navigate back to the loop page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$ACT_URL")")" 'Navigated to'
+ACT_UNSURE=$(call act "$(printf '{"sessionId":"%s","goal":"do the unsure thing"}' "$SID")")
+check "act: uncertain on a low-confidence step" "$ACT_UNSURE" '"status":"uncertain"'
+check "act: uncertain lists candidates" "$ACT_UNSURE" '"candidates"'
+
+# A bot check stops with needs_human.
+BOT_URL="data:text/html,<title>bot%20check</title><button>Verify</button>"
+check "act: navigate to the bot check" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$BOT_URL")")" 'Navigated to'
+check "act: needs_human on a bot check" "$(call act "$(printf '{"sessionId":"%s","goal":"open my account"}' "$SID")")" '"status":"needs_human"'
+
+# confirmIrreversible holds back a click that can't be undone.
+BUY_URL="data:text/html,<title>checkout</title><button id=buy>Do%20it</button>"
+check "act: navigate to checkout" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$BUY_URL")")" 'Navigated to'
+check "act: wire the buy button" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).addEventListener(%s, () => { document.title = %s }); return 1 })()"}' "$SID" "'buy'" "'click'" "'bought'")")" '"result":1'
+ACT_BUY=$(call act "$(printf '{"sessionId":"%s","goal":"type the name and submit","confirmIrreversible":true}' "$SID")")
+check "act: needs_confirmation before an irreversible click" "$ACT_BUY" '"status":"needs_confirmation"'
+check "act: names the pending click" "$ACT_BUY" '"pending"'
+check "act: nothing was bought" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'checkout'
+
+# A confirm() dialog is accepted and reported instead of hanging the loop.
+DIALOG_URL="data:text/html,<title>dialog</title><button id=dlg>Do%20it</button>"
+check "act: navigate to the dialog page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$DIALOG_URL")")" 'Navigated to'
+check "act: wire a confirm dialog" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).addEventListener(%s, () => { document.title = confirm(%s) ? %s : %s }); return 1 })()"}' "$SID" "'dlg'" "'click'" "'Sure?'" "'act-done'" "'refused'")")" '"result":1'
+ACT_DLG=$(call act "$(printf '{"sessionId":"%s","goal":"type the name and submit"}' "$SID")")
+check "act: accepts a confirm dialog" "$ACT_DLG" 'Completed the goal in 1 step'
+check "act: reports the dialog" "$ACT_DLG" 'sure?'
+
+# Typing text with no key on a US keyboard, and picking inside a shadow root.
+SHADOW_URL="data:text/html,<title>shadow</title><button>Cancel</button><div id=host></div>"
+check "type: navigate to the shadow page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$SHADOW_URL")")" 'Navigated to'
+check "type: build a shadow input" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).attachShadow({mode: %s}).innerHTML = %s; return 1 })()"}' "$SID" "'host'" "'open'" "'<input id=deep placeholder=Email>'")")" '"result":1'
+check "type: jev finds a field in a shadow root" "$(call type "$(printf '{"sessionId":"%s","selector":"jev: the Email field","text":"Gödel ✓"}' "$SID")")" 'Typed 7 chars'
+check "type: non-ASCII text went in" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.getElementById(%s).shadowRoot.getElementById(%s).value"}' "$SID" "'host'" "'deep'")")" 'Gödel ✓'
 
 # ---- close ---------------------------------------------------------------
 

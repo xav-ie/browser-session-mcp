@@ -121,28 +121,70 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     if (tag === 'a' && el.getAttribute('href')) p.push('-> ' + clamp(el.getAttribute('href'), 80));
     return p.join(' ');
   };
-  var stale = document.querySelectorAll('[data-jev-id]');
-  for (var k = 0; k < stale.length; k++) stale[k].removeAttribute('data-jev-id');
+  // Every document the page shows: the top one, open shadow roots and
+  // same-origin iframes, each with its offset from the top viewport.
+  var roots = [];
+  var walk = function(root, ox, oy, depth) {
+    if (depth > 4) return;
+    roots.push({ root: root, ox: ox, oy: oy });
+    var all = root.querySelectorAll('*');
+    for (var a = 0; a < all.length && a < 20000; a++) {
+      var n = all[a];
+      if (n.shadowRoot) walk(n.shadowRoot, ox, oy, depth + 1);
+      if (n.tagName === 'IFRAME' || n.tagName === 'FRAME') {
+        var doc = null;
+        try { doc = n.contentDocument; } catch (e) {}
+        if (doc && doc.documentElement) {
+          var fr = n.getBoundingClientRect();
+          walk(doc, ox + fr.left + n.clientLeft, oy + fr.top + n.clientTop, depth + 1);
+        }
+      }
+    }
+  };
+  walk(document, 0, 0, 0);
+  var styleOf = function(el) { return (el.ownerDocument.defaultView || window).getComputedStyle(el); };
+  var DIALOG = 'dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
   var vw = document.documentElement.clientWidth || 0;
   var vh = document.documentElement.clientHeight || 0;
-  var inView = [], offView = [];
-  var nodes = document.querySelectorAll(SEL);
-  for (var i = 0; i < nodes.length; i++) {
-    var el = nodes[i];
-    if (el.disabled) continue;
-    if (!el.getClientRects().length) continue;
-    var st = getComputedStyle(el);
-    if (st.visibility === 'hidden' || st.display === 'none') continue;
+  var inDialog = [], inView = [], offView = [], seen = new Set();
+  var consider = function(el, ox, oy) {
+    if (seen.has(el) || el.disabled) return;
+    seen.add(el);
+    if (!el.getClientRects().length) return;
+    var st = styleOf(el);
+    if (st.visibility === 'hidden' || st.display === 'none') return;
     var r = el.getBoundingClientRect();
-    var visible = r.bottom > -20 && r.top < vh + 20 && r.right > -20 && r.left < vw + 20;
-    (visible ? inView : offView).push(el);
+    var visible = r.bottom + oy > -20 && r.top + oy < vh + 20 && r.right + ox > -20 && r.left + ox < vw + 20;
+    if (visible && el.closest(DIALOG)) inDialog.push(el);
+    else (visible ? inView : offView).push(el);
+  };
+  // Elements only scripts make clickable (sortable table headers, card
+  // tiles): pointer cursor, no interactive ancestor or descendant, and not
+  // just inheriting the cursor from a parent.
+  var POINTER = 'th, td, li, span, div, img, label, svg, i, p';
+  for (var ri = 0; ri < roots.length; ri++) {
+    var R = roots[ri];
+    var stale = R.root.querySelectorAll('[data-jev-id]');
+    for (var k = 0; k < stale.length; k++) stale[k].removeAttribute('data-jev-id');
+    var nodes = R.root.querySelectorAll(SEL);
+    for (var i = 0; i < nodes.length; i++) consider(nodes[i], R.ox, R.oy);
+    var maybe = R.root.querySelectorAll(POINTER);
+    for (var m = 0; m < maybe.length && m < 3000; m++) {
+      var c = maybe[m];
+      if (c.closest(SEL) || c.querySelector(SEL)) continue;
+      if (styleOf(c).cursor !== 'pointer') continue;
+      if (c.parentElement && styleOf(c.parentElement).cursor === 'pointer') continue;
+      consider(c, R.ox, R.oy);
+    }
   }
-  var chosen = inView.concat(offView).slice(0, MAX);
+  var chosen = inDialog.concat(inView, offView).slice(0, MAX);
   var elements = [];
   for (var j = 0; j < chosen.length; j++) {
     var id = 'e' + (j + 1);
     chosen[j].setAttribute('data-jev-id', STAMP + '-' + id);
-    var rec = { id: id, desc: describe(chosen[j]) };
+    var desc = describe(chosen[j]);
+    if (chosen[j].closest(DIALOG)) desc += ' (in dialog)';
+    var rec = { id: id, desc: desc };
     if (chosen[j].tagName === 'SELECT' && chosen[j].options) {
       var opts = [];
       for (var q = 0; q < chosen[j].options.length && q < 25; q++) {
@@ -156,7 +198,7 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     var t = String(root.innerText || '').replace(/\s+/g, ' ').trim();
     return t.length > 1500 ? t.slice(0, 1499) + '...' : t;
   };
-  var modal = document.querySelector('dialog[open], [role="dialog"], [aria-modal="true"]');
+  var modal = document.querySelector(DIALOG);
   var text = '';
   if (modal && modal.getClientRects().length) text = textOf(modal);
   else if (document.body) text = textOf(document.body);
@@ -165,7 +207,7 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     title: clamp(document.title, 120),
     text: text,
     elements: elements,
-    omitted: Math.max(0, inView.length + offView.length - chosen.length)
+    omitted: Math.max(0, inDialog.length + inView.length + offView.length - chosen.length)
   };
 }"#;
 
@@ -185,6 +227,35 @@ fn new_stamp() -> Result<String> {
     getrandom::fill(&mut buf).map_err(|e| anyhow!("getrandom: {e}"))?;
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
+
+/// JS that finds the first element matching a CSS selector in the page or,
+/// failing that, in any open shadow root or same-origin iframe (where `act`
+/// stamps elements too), with the offset of its document from the top
+/// viewport. Defines `__bsDeep(sel)` → `{ el, ox, oy }` or `null`; prepend
+/// it to a function body.
+pub const DEEP_FIND_JS: &str = r#"var __bsDeep = function(sel) {
+  var hit = null;
+  var walk = function(root, ox, oy, depth) {
+    if (hit || depth > 4) return;
+    var el = root.querySelector(sel);
+    if (el) { hit = { el: el, ox: ox, oy: oy }; return; }
+    var all = root.querySelectorAll('*');
+    for (var a = 0; a < all.length && a < 20000 && !hit; a++) {
+      var n = all[a];
+      if (n.shadowRoot) walk(n.shadowRoot, ox, oy, depth + 1);
+      if (!hit && (n.tagName === 'IFRAME' || n.tagName === 'FRAME')) {
+        var doc = null;
+        try { doc = n.contentDocument; } catch (e) {}
+        if (doc && doc.documentElement) {
+          var fr = n.getBoundingClientRect();
+          walk(doc, ox + fr.left + n.clientLeft, oy + fr.top + n.clientTop, depth + 1);
+        }
+      }
+    }
+  };
+  walk(document, 0, 0, 0);
+  return hit;
+};"#;
 
 /// A cheap fingerprint of what an action could visibly change: location,
 /// title, visible text, the interactive-element count, open dialogs,
@@ -414,8 +485,12 @@ fn parse_choice(body: &Value, question: &str, valid: &[&str]) -> Result<ChoiceAn
             if (sum - 1.0).abs() > 0.02 {
                 bail!("Jev probabilities for {question} sum to {sum:.3}, not ~1");
             }
-            if let Some((best, _)) = &top {
-                if best.as_str() != chosen {
+            // A tie (within rounding) with the chosen option is agreement:
+            // `top` keeps the first of equal values, which need not be the
+            // one Jev named.
+            if let Some((best, best_p)) = &top {
+                let chosen_p = probs.get(chosen).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                if best.as_str() != chosen && best_p - chosen_p > 0.01 {
                     bail!("Jev chose `{chosen}` but its own probabilities favor `{best}`");
                 }
             }
@@ -565,6 +640,14 @@ pub const PSEUDO_ACTIONS: &[(&str, &str)] = &[
         "Wait briefly for the page to settle (loading, animation) before deciding again.",
     ),
     ("back", "Go back to the previous page in history."),
+    (
+        "press_enter",
+        "Press Enter in the focused field, e.g. to submit a search just typed.",
+    ),
+    (
+        "press_escape",
+        "Press Escape, e.g. to close a popup, menu or dialog.",
+    ),
 ];
 
 /// The `state` string for an `act` step: the goal, the page's identity, what
@@ -650,6 +733,14 @@ pub struct StepDecision {
     pub login: f64,
     /// Jev's probability that the page shows an error or rejection.
     pub error: f64,
+    /// Jev's probability that the chosen next step can't be undone
+    /// (placing an order, paying, sending, deleting).
+    pub irreversible: f64,
+    /// Jev's probability that the page is a CAPTCHA or bot check.
+    pub bot_check: f64,
+    /// The top options with their probabilities, chosen first, for an
+    /// `uncertain` stop.
+    pub candidates: Vec<(String, f64)>,
     /// Speculative answer from the same request: which caller-provided
     /// value belongs in the field to fill next, if any.
     pub value_key: Option<String>,
@@ -664,9 +755,29 @@ pub struct StepDecision {
     pub page: PageInfo,
 }
 
+impl StepDecision {
+    /// How an offered id was described to Jev: an element's description or
+    /// a pseudo-action's.
+    pub fn describe(&self, id: &str) -> String {
+        self.page
+            .elements
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.desc.clone())
+            .or_else(|| {
+                PSEUDO_ACTIONS
+                    .iter()
+                    .find(|(p, _)| *p == id)
+                    .map(|(p, _)| (*p).to_string())
+            })
+            .unwrap_or_else(|| id.to_string())
+    }
+}
+
 /// Ask Jev for the next `act` step. One fan-out request carries the element
-/// Choice, the goal-met / stuck / login / error Nouls, and — speculatively —
-/// the value-to-type Choice: up to six decisions, one round trip. Extra
+/// Choice, the goal-met / stuck / login / error / irreversible / bot-check
+/// Nouls, and, speculatively, the value-to-type Choice: up to eight decisions,
+/// one round trip. Extra
 /// questions are close to free on this API, so asking the value question
 /// before knowing the element saves a whole round trip on form steps.
 pub async fn decide_step(
@@ -720,6 +831,20 @@ pub async fn decide_step(
             "instructions": "The page shows an error, rejection, or failure message relevant to the goal."
         }),
     );
+    questions.insert(
+        "irreversible".to_string(),
+        json!({
+            "type": "noul",
+            "instructions": "The best next step toward the goal would place an order, make a payment, send a message, publish, or delete something, which cannot be undone."
+        }),
+    );
+    questions.insert(
+        "bot_check".to_string(),
+        json!({
+            "type": "noul",
+            "instructions": "The page is a CAPTCHA, a 'verify you are human' check, or another bot challenge instead of the site's content."
+        }),
+    );
     let mut value_criteria = Map::new();
     if has_elements && !value_keys.is_empty() {
         for k in value_keys {
@@ -748,6 +873,9 @@ pub async fn decide_step(
     let stuck = parse_noul(&json, "stuck")?;
     let login = parse_noul(&json, "login")?;
     let error = parse_noul(&json, "error")?;
+    let irreversible = parse_noul(&json, "irreversible")?;
+    let bot_check = parse_noul(&json, "bot_check")?;
+    let mut candidates = Vec::new();
     let mut chosen = String::new();
     let mut is_element = false;
     let mut description = String::new();
@@ -773,6 +901,8 @@ pub async fn decide_step(
                 .map(|(_, desc)| (*desc).to_string())
                 .unwrap_or_else(|| chosen.clone())
         };
+        candidates.push((chosen.clone(), confidence));
+        candidates.extend(answer.ranked.iter().take(2).cloned());
         next_best = answer
             .ranked
             .into_iter()
@@ -805,11 +935,56 @@ pub async fn decide_step(
         stuck,
         login,
         error,
+        irreversible,
+        bot_check,
+        candidates,
         value_key,
         next_best,
         has_elements,
         page: page_info,
     })
+}
+
+/// Ask Jev which of the caller's untyped `values` keys belongs in one text
+/// field `act` chose. The step's speculative value question is asked before
+/// the element is known; this one runs only when that guess came back empty,
+/// so it sees the actual field. `None` means no value fits.
+pub async fn decide_value_for_field(
+    goal: &str,
+    field_desc: &str,
+    keys: &[String],
+) -> Result<Option<String>> {
+    let cfg = config()?;
+    let state = format!(
+        "Goal: \"{goal}\".\nThe agent is about to type into this field: {field_desc}\n\
+         Choose which provided value belongs in it."
+    );
+    let mut criteria = Map::new();
+    for k in keys {
+        criteria.insert(k.clone(), Value::String(format!("the value for {k}")));
+    }
+    criteria.insert(
+        "__none__".to_string(),
+        Value::String("None of the provided values belongs in this field.".to_string()),
+    );
+    let body = json!({
+        "model": cfg.model,
+        "state": state,
+        "questions": {
+            "value_key": {
+                "type": "choice",
+                "instructions": "Which provided value belongs in this field?",
+                "criteria": criteria
+            }
+        }
+    });
+    let json = post_systemone(&cfg, &body).await?;
+    let ids: Vec<&str> = criteria.keys().map(|k| k.as_str()).collect();
+    let answer = parse_choice(&json, "value_key", &ids)?;
+    if answer.chosen == "__none__" || answer.confidence < cfg.min_confidence {
+        return Ok(None);
+    }
+    Ok(Some(answer.chosen))
 }
 
 /// Ask Jev which option of a `<select>` to pick, keyed by live DOM index —
