@@ -33,7 +33,7 @@ Jev replaces that with one small request:
 |---|---|---|
 | time per decision | seconds, and the snapshot grows the context every step | 70 to 500 ms end to end ([TypeSafe](https://typesafe.ai)) |
 | input price | $0.20 to $10 per million tokens | $0.042 per million tokens, output free |
-| cost of one pick here | the whole snapshot, every click | about $0.0007 (measured, [#34](https://github.com/xav-ie/browser-session-mcp/pull/34)) |
+| cost of one pick here | the whole snapshot, every click | about $0.0007 per pick, measured |
 | survives markup changes | only if it rereads the page | yes, it picks from what is there now |
 
 ### Measured
