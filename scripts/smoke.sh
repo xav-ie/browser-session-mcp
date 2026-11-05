@@ -223,7 +223,7 @@ class Handler(BaseHTTPRequestHandler):
                 answers["operation"] = {"choice": op, "confidence": 0.9}
             answers["bot_check"] = {"noul": 0.97 if "bot check" in title else 0.02}
             for q, spec in questions.items():
-                if q.startswith("value_e"):
+                if q.startswith("value_e") or q == "value_key":
                     vkeys = spec["criteria"]
                     vchoice = "name" if "name" in vkeys else "__none__"
                     vother = next((k for k in vkeys if k != vchoice), None)

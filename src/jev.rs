@@ -1018,6 +1018,9 @@ pub struct StepDecision {
     /// field (up to [`VALUE_FIELDS`]), the caller-provided value key that
     /// belongs in it, keyed by element id.
     pub field_values: std::collections::HashMap<String, String>,
+    /// The step's general guess at which value is typed next, used when the
+    /// chosen field's own answer is none.
+    pub value_key: Option<String>,
     /// Next-best element by returned probability, for no-effect recovery.
     pub next_best: Option<(String, f64)>,
     /// Whether the page offered any interactive element at all. When it
@@ -1177,6 +1180,14 @@ pub async fn decide_step(
             "__none__".to_string(),
             Value::String("None of the provided values belongs in this field.".to_string()),
         );
+        questions.insert(
+            "value_key".to_string(),
+            json!({
+                "type": "choice",
+                "instructions": "If the next step is to type into a field, which provided value belongs there? Otherwise pick __none__.",
+                "criteria": value_criteria
+            }),
+        );
         for e in &value_fields {
             questions.insert(
                 format!("value_{}", e.id),
@@ -1247,6 +1258,13 @@ pub async fn decide_step(
     }
     let mut field_values = std::collections::HashMap::new();
     let ids: Vec<&str> = value_criteria.keys().map(|k| k.as_str()).collect();
+    let mut value_key = None;
+    if !value_fields.is_empty() {
+        let answer = parse_choice(&json, "value_key", &ids)?;
+        if answer.chosen != "__none__" && answer.confidence >= ACT_MIN_CONFIDENCE {
+            value_key = Some(answer.chosen);
+        }
+    }
     for e in &value_fields {
         let answer = parse_choice(&json, &format!("value_{}", e.id), &ids)?;
         if answer.chosen != "__none__" && answer.confidence >= ACT_MIN_CONFIDENCE {
@@ -1277,6 +1295,7 @@ pub async fn decide_step(
         candidates,
         operation,
         field_values,
+        value_key,
         next_best,
         has_elements,
         page: page_info,

@@ -634,8 +634,9 @@ impl BrowserSessionServer {
                         let mut key = d
                             .field_values
                             .get(&el.id)
-                            .cloned()
-                            .filter(|k| untyped.contains(k));
+                            .filter(|k| untyped.contains(k))
+                            .or(d.value_key.as_ref().filter(|k| untyped.contains(k)))
+                            .cloned();
                         if key.is_none() && !untyped.is_empty() {
                             key = jev::decide_value_for_field(&goal, &el.desc, &untyped)
                                 .await
