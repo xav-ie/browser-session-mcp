@@ -293,7 +293,7 @@ const diagrams = {
       [
         { from: "agent", to: "mcp", label: "click(\"the login button\")" },
         { from: "mcp", to: "page", label: "collect interactive elements" },
-        { from: "page", to: "mcp", label: "up to 240, viewport first", ret: true },
+        { from: "page", to: "mcp", label: "all of them, viewport first", ret: true },
         { from: "mcp", to: "page", label: "stamp each with data-jev-id" },
         { from: "mcp", to: "jev", label: "one Choice: goal, page text, element list" },
         { from: "jev", to: "mcp", label: "e17, confidence 0.97", ret: true },
@@ -304,7 +304,7 @@ const diagrams = {
     );
     return {
       ...d,
-      alt: "Sequence: the agent calls click with the plain-language selector the login button. The mcp server collects the page's interactive elements, up to 240 with the ones in the viewport first, and stamps each with a data-jev-id attribute. It sends Jev one Choice request with the goal, the page's text and the element list, and Jev answers e17 with confidence 0.97. Under the confidence floor, 0.5 or 0.85 on the fallback, it errors instead of guessing. The server clicks e17 with trusted CDP input and tells the agent it clicked the Sign in button",
+      alt: "Sequence: the agent calls click with the plain-language selector the login button. The mcp server collects the page's interactive elements, those in a dialog and the viewport first, and stamps each with a data-jev-id attribute. It sends Jev one Choice request with the goal, the page's text and the element list, and Jev answers e17 with confidence 0.97. Under the confidence floor, 0.5 or 0.85 on the fallback, it errors instead of guessing. The server clicks e17 with trusted CDP input and tells the agent it clicked the Sign in button",
     };
   },
 

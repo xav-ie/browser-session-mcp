@@ -53,9 +53,11 @@ click({ sessionId, selector: "jev: the login button" })   ← straight to Jev
 type({ sessionId, selector: "the email field", text: "me@example.com" })
 ```
 
-A selector is first tried as CSS. If it matches nothing within `timeout`, Jev
-picks the element it describes, which also rescues a mistyped CSS selector. A
-`jev:` prefix skips the CSS attempt. The reply names what was picked:
+A selector is first tried as CSS. If it matches nothing, Jev picks the
+element it describes, which also rescues a mistyped CSS selector. Real CSS
+gets the full `timeout` to appear first; plain words like "the login button"
+can never match as CSS, so they go to Jev right after one check. A `jev:`
+prefix skips the CSS attempt. The reply names what was picked:
 
 ```
 Clicked button "Sign in" (jev: "the login button", confidence 0.97, 38 offered)
@@ -158,19 +160,25 @@ to detect changes is hashed inside the page.
 <!-- diagram:jev-pick -->
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/jev-pick-dark.svg">
-  <img src="diagrams/jev-pick.svg" alt="Sequence: the agent calls click with the plain-language selector the login button. The mcp server collects the page's interactive elements, up to 240 with the ones in the viewport first, and stamps each with a data-jev-id attribute. It sends Jev one Choice request with the goal, the page's text and the element list, and Jev answers e17 with confidence 0.97. Under the confidence floor, 0.5 or 0.85 on the fallback, it errors instead of guessing. The server clicks e17 with trusted CDP input and tells the agent it clicked the Sign in button">
+  <img src="diagrams/jev-pick.svg" alt="Sequence: the agent calls click with the plain-language selector the login button. The mcp server collects the page's interactive elements, those in a dialog and the viewport first, and stamps each with a data-jev-id attribute. It sends Jev one Choice request with the goal, the page's text and the element list, and Jev answers e17 with confidence 0.97. Under the confidence floor, 0.5 or 0.85 on the fallback, it errors instead of guessing. The server clicks e17 with trusted CDP input and tells the agent it clicked the Sign in button">
 </picture>
 <!-- /diagram:jev-pick -->
 
 1. Collect the elements a person could use: links, buttons, form fields,
    ARIA widgets, draggable items, and things only a script makes clickable,
    like sortable table headers. Open shadow roots and same-origin iframes
-   are included. Elements in an open dialog come first, then the rest of the
-   viewport; at most 240 are offered, under Jev's limit of 255.
+   are included, and elements in an open dialog come first, then the rest
+   of the viewport.
 2. Stamp each with a `data-jev-id` attribute carrying a random token, so a
    stale answer from an earlier pick can't land on a different element.
-3. Ask Jev to choose one id.
+3. Ask Jev to choose one id, or "none of these".
 4. Act on it with the same real mouse and keyboard input as a CSS selector.
+
+One Jev question holds at most 255 options. A page with more elements is
+split into the fewest groups that fit, all the same size (1,800 elements
+become 8 groups of 225), and one request asks every group for its best
+match or none. Each group's top two go to the final pick, so nothing on the
+page is left out. That costs one extra request, only on pages that big.
 
 Jev only ever picks among the ids it was offered; its answer never becomes
 coordinates or JavaScript.
@@ -182,8 +190,7 @@ coordinates or JavaScript.
 - **Only usable elements are offered.** "The third paragraph" has no match.
 - **Cross-origin iframes are out of reach**, such as a payment widget from
   another site.
-- **Past 240 elements**, the rest are left out. `act` scrolls to reach them;
-  before a single click, `scroll` first.
+- **Past 5,000 elements**, the rest are left out and Jev is told how many.
 - **Stealth.** The `data-jev-id` stamps are DOM changes a page script could
   notice. Use CSS selectors where that matters.
 - **Verify the end state.** `completed` is Jev's opinion.
