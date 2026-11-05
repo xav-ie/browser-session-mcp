@@ -295,10 +295,11 @@ is in [`bench/`](../bench).
 | jev-browser | 81% | 93% | 80% |
 
 Across all three, browser-session-mcp wrongly claimed done 7 times in 345
-task runs, jev-browser 8 times. Set 1 was scored before `act` could press
-any key and before it read pages without their menus, and those two gaps
-were most of its misses there. One task of set 2 is left out for both
-tools because its check was wrong. On the tasks they don't share, each
+task runs, jev-browser 8 times. In set 1, `act` missed a task that needed
+the Tab key, which it couldn't press then, and on a link-following task it
+didn't notice it had arrived; both prompted fixes before set 2 was written.
+One task of set 2 is left out for both tools because its check was
+wrong. On the tasks they don't share, each
 tool wins a few: browser-session-mcp at loading pages and multi-step
 carts, jev-browser at closing popups and deleting from lists. Both miss
 tasks Jev can't judge, such as counting to exactly three or reading a
