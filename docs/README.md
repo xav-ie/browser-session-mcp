@@ -23,7 +23,8 @@ people want them:
 4. **[Picking elements with Jev](jev.md)**: read when you want agents to
    [describe elements instead of writing CSS](jev.md#plain-language-selectors),
    run a whole goal with [`act`](jev.md#act-a-whole-goal-in-one-call), or
-   [`ask`](jev.md#ask-questions-about-the-page) about the page:
+   [`ask`](jev.md#ask-questions-about-the-page) and
+   [`read`](jev.md#read-only-the-relevant-parts) the page:
    [what Jev sees](jev.md#what-jev-sees), [how it compares](jev.md#how-it-compares)
    and [tuning](jev.md#tuning).
 5. **[Development](development.md)**: read before sending a change: the

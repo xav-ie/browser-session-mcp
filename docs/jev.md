@@ -14,6 +14,7 @@ uses it so an agent can say what it wants instead of writing CSS selectors:
 - **`act`.** Give it a goal and it works through the page on its own, one Jev
   decision per step.
 - **`ask`.** A yes/no or multiple choice question about the page.
+- **`read`.** Only the parts of a long page that answer a question.
 
 The agent's own model still plans, writes text and checks results. Jev only
 makes the many small "which one?" decisions, so those stop costing a large
@@ -23,6 +24,7 @@ model round trip each.
 - [Plain-language selectors](#plain-language-selectors)
 - [act: a whole goal in one call](#act-a-whole-goal-in-one-call)
 - [ask: questions about the page](#ask-questions-about-the-page)
+- [read: only the relevant parts](#read-only-the-relevant-parts)
 - [What Jev sees](#what-jev-sees)
 - [How a pick works](#how-a-pick-works)
 - [Limits](#limits)
@@ -39,7 +41,7 @@ claude mcp add browser-session -e TYPESAFE_API_KEY=... -e BROWSER_URL=... -e STA
   -- nix run github:xav-ie/browser-session-mcp -- mcp
 ```
 
-Without a key, selectors are plain CSS and `act` and `ask` return an error
+Without a key, selectors are plain CSS and `act`, `ask` and `read` return an error
 saying which variable to set. A pick costs about $0.0007.
 
 ## Plain-language selectors
@@ -142,11 +144,30 @@ branch a script without a large model, or to check what `act` did. Jev is
 weak at counting, arithmetic and dates, so read those with `evaluate` or
 `take_snapshot` instead.
 
+## read: only the relevant parts
+
+`take_snapshot` returns the whole page. On a long article that is tens of
+thousands of characters the agent has to read through. `read` returns only
+what answers a question:
+
+```
+read({ sessionId, question: "When and why did Japan surrender?" })
+```
+
+The page's visible text is split into passages of about 600 characters, each
+under its heading, leaving out navigation, sidebars, headers and footers.
+Jev rates every passage's relevance at once, in parallel requests, and the
+relevant ones come back in page order under `## heading` lines, up to
+`maxChars` (12,000 by default; the most relevant first if they don't all
+fit). Wikipedia's 118,000-character "Surrender of Japan" article comes back
+as about 12,000 characters in under half a second. A page under 8,000
+characters comes back whole, without asking Jev.
+
 ## What Jev sees
 
 - The goal or question, the page's URL and title, and its visible text (an
   open dialog's text first). `act` and selectors send up to 1,500 characters
-  of it, `ask` up to 20,000.
+  of it, `ask` up to 20,000, and `read` all of it, a passage per question.
 - For picks, one line per element: tag, id, role, its label, whether it is
   checked, expanded or selected, and a link's `href`.
 - For `act`, the steps taken so far and the keys of `values`.
@@ -160,7 +181,7 @@ to detect changes is hashed inside the page.
 <!-- diagram:jev-pick -->
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/jev-pick-dark.svg">
-  <img src="diagrams/jev-pick.svg" alt="Sequence: the agent calls click with the plain-language selector the login button. The mcp server collects the page's interactive elements, those in a dialog and the viewport first, and stamps each with a data-jev-id attribute. It sends Jev one Choice request with the goal, the page's text and the element list, and Jev answers e17 with confidence 0.97. Under the confidence floor, 0.5 or 0.85 on the fallback, it errors instead of guessing. The server clicks e17 with trusted CDP input and tells the agent it clicked the Sign in button">
+  <img src="diagrams/jev-pick.svg" alt="Sequence: the agent calls click with the plain-language selector the login button. The mcp server collects the page's interactive elements, those in a dialog and the viewport first, and keeps a reference to each where the page's scripts can't see it. It sends Jev one Choice request with the goal, the page's text and the element list, and Jev answers e17 with confidence 0.97. Under the confidence floor, 0.5 or 0.85 on the fallback, it errors instead of guessing. The server clicks e17 with trusted CDP input and tells the agent it clicked the Sign in button">
 </picture>
 <!-- /diagram:jev-pick -->
 
@@ -169,8 +190,10 @@ to detect changes is hashed inside the page.
    like sortable table headers. Open shadow roots and same-origin iframes
    are included, and elements in an open dialog come first, then the rest
    of the viewport.
-2. Stamp each with a `data-jev-id` attribute carrying a random token, so a
-   stale answer from an earlier pick can't land on a different element.
+2. Keep a reference to each in an isolated world: a separate JavaScript
+   space that shares the page's DOM but that the page's own scripts can't
+   see. Nothing is written to the page, and an answer always lands on
+   exactly the element it was offered, even if the page changed since.
 3. Ask Jev to choose one id, or "none of these".
 4. Act on it with the same real mouse and keyboard input as a CSS selector.
 
@@ -191,8 +214,6 @@ coordinates or JavaScript.
 - **Cross-origin iframes are out of reach**, such as a payment widget from
   another site.
 - **Past 5,000 elements**, the rest are left out and Jev is told how many.
-- **Stealth.** The `data-jev-id` stamps are DOM changes a page script could
-  notice. Use CSS selectors where that matters.
 - **Verify the end state.** `completed` is Jev's opinion.
 
 ## How it compares
@@ -210,7 +231,7 @@ takeover for logins.
 | text to type | your `values`, never shown to the model | your values | written by an LLM | written by an LLM |
 | hover, drag, right-click | yes | yes | no | no |
 | page questions | `ask` | yes | no | no |
-| reads only the relevant part of a page | no | yes | no | no |
+| reads only the relevant part of a page | `read` | yes | no | no |
 
 ### Benchmark
 
@@ -222,7 +243,7 @@ same Jev model (`jev-1.14.0`), on 2026-11-04:
 
 | | tasks done right | wrongly claimed done | typical time per task |
 |---|---|---|---|
-| browser-session-mcp | 86% (average of 3 runs) | 0 of 120 | 1.4 s |
+| browser-session-mcp | 87% (average of 3 runs) | 0 of 120 | 1.5 s |
 | jev-browser | 81% (average of 2 runs) | 2 of 80 | 1.9 s |
 
 Both miss tasks Jev can't judge, such as counting to exactly three or
@@ -235,8 +256,8 @@ Other projects publish times for single tasks. Ours, on the same tasks:
 |---|---|---|
 | Wikipedia: from Coffee to the Espresso article | 1.3 s | about 4 s, jkudish/jev-browser |
 | Wikipedia: search for Ristretto | 1.4 s | 3.6 s, jkudish/jev-browser |
-| Wikipedia: search for Gödel's incompleteness theorems | 1.6 s | 2.8 s, jev-ultrafast |
-| Google Flights: Zurich to London | about 5.7 s, but it finished only 3 of 9 tries | 7.07 s, jev-ultrafast |
+| Wikipedia: search for Gödel's incompleteness theorems | 1.7 s | 2.8 s, jev-ultrafast |
+| Google Flights: Zurich to London | about 6 s when it finishes, but the date calendar stops it most tries | 7.07 s, jev-ultrafast |
 
 ## Tuning
 
