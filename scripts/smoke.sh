@@ -136,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
         # The element Choice, whenever the request carries one.
         if "element" in questions:
             criteria = questions["element"]["criteria"]
-            if "goal_met" not in questions and "__none__" in criteria:
+            if "goal_met" not in questions and any(k.startswith("o") for k in criteria):
                 # second-stage <select> pick: the option mentioning blue
                 keys = sorted((k for k in criteria if k.startswith("o")),
                               key=lambda k: int(k[1:]))
@@ -181,13 +181,13 @@ class Handler(BaseHTTPRequestHandler):
                 # validation is skipped and the floor/valid-id checks fire
                 goal = first
                 if "unsure" in goal:
-                    order = sorted(criteria, key=lambda k: int(k[1:]))
+                    order = sorted((k for k in criteria if k.startswith("e")), key=lambda k: int(k[1:]))
                     answers["element"] = {"choice": order[0], "confidence": 0.2}
                 elif "bogus" in goal:
                     answers["element"] = {"choice": "e999", "confidence": 0.91}
                 else:
                     marker = "email" if "email" in goal else "log in"
-                    order = sorted(criteria, key=lambda k: int(k[1:]))
+                    order = sorted((k for k in criteria if k.startswith("e")), key=lambda k: int(k[1:]))
                     choice = next((k for k in order if marker in criteria[k].lower()),
                                   order[0])
                     other = next((k for k in criteria if k != choice), None)
@@ -231,6 +231,14 @@ class Handler(BaseHTTPRequestHandler):
                     vprobs[vother] = 0.09
                 answers["value_key"] = {"choice": vchoice, "confidence": 0.91,
                                         "probabilities": vprobs}
+
+        # Group questions narrowing a big page: each group's "log in" element,
+        # or __none__.
+        for q, spec in questions.items():
+            if q.startswith("g") and q[1:].isdigit():
+                gcrit = spec["criteria"]
+                hit = next((k for k in gcrit if "log in" in str(gcrit[k]).lower()), "__none__")
+                answers[q] = {"choice": hit, "confidence": 0.9}
 
         # act's follow-up drop target for a drag.
         if "target" in questions:
@@ -597,6 +605,16 @@ check "act: wire a confirm dialog" "$(call evaluate "$(printf '{"sessionId":"%s"
 ACT_DLG=$(call act "$(printf '{"sessionId":"%s","goal":"type the name and submit"}' "$SID")")
 check "act: accepts a confirm dialog" "$ACT_DLG" 'Completed the goal in 1 step'
 check "act: reports the dialog" "$ACT_DLG" 'sure?'
+
+# A page with more elements than fit one Jev question: 600 buttons, the
+# target last. They are narrowed in even groups first, so it is still found.
+BIG_URL="data:text/html,<title>big</title><div id=big></div>"
+check "jev: navigate to the big page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$BIG_URL")")" 'Navigated to'
+check "jev: build 600 buttons" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { const b = document.getElementById(%s); for (let i = 0; i < 599; i++) b.insertAdjacentHTML(%s, %s + i + %s); b.insertAdjacentHTML(%s, %s); document.getElementById(%s).addEventListener(%s, () => { document.title = %s }); return 1 })()"}' "$SID" "'big'" "'beforeend'" "'<button>Item '" "'</button>'" "'beforeend'" "'<button id=last>Log in</button>'" "'last'" "'click'" "'big-clicked'")")" '"result":1'
+check "jev: finds the target past the first group" "$(call click "$(printf '{"sessionId":"%s","selector":"jev: the Log in button"}' "$SID")")" '600 offered'
+check "jev: clicked the last button" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'big-clicked'
+check "jev: nothing matching is an error, not a guess" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.getElementById(%s).remove()"}' "$SID" "'last'")")" 'result'
+check "jev: reports that nothing matched" "$(call click "$(printf '{"sessionId":"%s","selector":"jev: the Log in button"}' "$SID")")" 'found nothing matching'
 
 # Hover, right-click and drag, each on its own page so the stub's default
 # pick (the first element) is the one to act on.

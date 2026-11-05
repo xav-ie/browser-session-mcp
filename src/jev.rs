@@ -38,9 +38,18 @@ use std::time::{Duration, Instant};
 
 use crate::server::iso_eval_function;
 
-/// How many interactive elements to offer Jev. Below the 255-option Choice
-/// limit with headroom for the criteria map.
-const MAX_ELEMENTS: usize = 240;
+/// Jev's limit on the options of one Choice question.
+const CHOICE_LIMIT: usize = 255;
+
+/// How many interactive elements one extraction collects. A page with more
+/// than fit one Choice is narrowed in even groups first (see [`narrow`]);
+/// past this, the rest are left out and Jev is told how many.
+const MAX_ELEMENTS: usize = 5000;
+
+/// Group questions per request in [`narrow`]: each holds up to 254 element
+/// descriptions, and four keep a request well inside Jev's 64k-token
+/// context. Requests beyond the first go out in parallel.
+const GROUPS_PER_REQUEST: usize = 4;
 
 /// Collect interactive elements from the DOM — not the accessibility tree,
 /// which under-reports inputs (DuckDuckGo's search box disappears from it,
@@ -381,12 +390,14 @@ pub fn available() -> bool {
 /// One option of an extracted `<select>`, identified by live DOM index —
 /// labels clamp and can collide, indexes cannot (and long labels could
 /// otherwise never be matched after clamping).
+#[derive(Clone)]
 pub struct SelectOption {
     pub i: u64,
     pub label: String,
 }
 
 /// One extracted interactive element.
+#[derive(Clone)]
 pub struct Element {
     /// Its offered id, e.g. "e17" (the DOM stamp prefixes the extraction's
     /// token; see [`PageInfo::css`]).
@@ -414,6 +425,18 @@ pub struct PageInfo {
 }
 
 impl PageInfo {
+    /// The same extraction with only the elements at `keep` (in order).
+    fn subset(&self, keep: &[usize]) -> PageInfo {
+        PageInfo {
+            url: self.url.clone(),
+            title: self.title.clone(),
+            text: self.text.clone(),
+            elements: keep.iter().map(|&i| self.elements[i].clone()).collect(),
+            omitted: self.omitted,
+            stamp: self.stamp.clone(),
+        }
+    }
+
     /// CSS selector for an element this extraction offered. Matches nothing
     /// once a newer extraction has re-stamped the page.
     pub fn css(&self, id: &str) -> String {
@@ -434,7 +457,9 @@ fn build_state(goal: &str, page: &PageInfo) -> String {
     if !page.text.is_empty() {
         lines.push(format!("Visible text: {}", page.text));
     }
-    lines.push("Interactive elements:".to_string());
+    if !page.elements.is_empty() {
+        lines.push("Interactive elements:".to_string());
+    }
     lines.extend(
         page.elements
             .iter()
@@ -600,21 +625,134 @@ async fn extract_with_retry(page: &Page, skip_typed: bool) -> Result<PageInfo> {
     Err(last.expect("at least one attempt ran")).context("extracting interactive elements")
 }
 
+/// Split `n` elements into the fewest groups of at most `cap`, all as
+/// equal as possible (1,800 at 254 → 8 groups of 225), so every group
+/// question uses its options alike.
+fn even_groups(n: usize, cap: usize) -> Vec<std::ops::Range<usize>> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let k = n.div_ceil(cap);
+    let (base, extra) = (n / k, n % k);
+    let mut start = 0;
+    (0..k)
+        .map(|g| {
+            let len = base + usize::from(g < extra);
+            let r = start..start + len;
+            start += len;
+            r
+        })
+        .collect()
+}
+
+/// Narrow a page with more elements than fit one Choice (next to `reserved`
+/// other options) to the few worth the final pick. The elements are split
+/// into even groups of up to 254, and each group is asked, in one fan-out
+/// request per [`GROUPS_PER_REQUEST`] groups, for its best match or "none
+/// of these"; each group's top two picks go on. Returns the indexes kept,
+/// in page order: all of them when they already fit, none when every group
+/// said none.
+async fn narrow(
+    cfg: &Config,
+    state: &str,
+    instructions: &str,
+    page: &PageInfo,
+    reserved: usize,
+) -> Result<Vec<usize>> {
+    let n = page.elements.len();
+    if n + reserved <= CHOICE_LIMIT {
+        return Ok((0..n).collect());
+    }
+    let groups = even_groups(n, CHOICE_LIMIT - 1);
+    let requests = groups.chunks(GROUPS_PER_REQUEST).map(|batch| async move {
+        let mut questions = Map::new();
+        for (g, range) in batch.iter().enumerate() {
+            let mut criteria = Map::new();
+            for e in &page.elements[range.clone()] {
+                criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
+            }
+            criteria.insert(
+                "__none__".to_string(),
+                Value::String("None of these elements fits.".to_string()),
+            );
+            questions.insert(
+                format!("g{g}"),
+                json!({ "type": "choice", "instructions": instructions, "criteria": criteria }),
+            );
+        }
+        let body = json!({ "model": cfg.model, "state": state, "questions": questions });
+        let json = post_systemone(cfg, &body).await?;
+        let mut picked = Vec::new();
+        for (g, range) in batch.iter().enumerate() {
+            let mut ids: Vec<&str> = page.elements[range.clone()]
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect();
+            ids.push("__none__");
+            let answer = parse_choice(&json, &format!("g{g}"), &ids)?;
+            let top_two = std::iter::once(answer.chosen.clone())
+                .chain(answer.ranked.into_iter().map(|(id, _)| id))
+                .filter(|id| id != "__none__")
+                .take(2);
+            picked.extend(top_two);
+        }
+        Ok::<_, anyhow::Error>(picked)
+    });
+    let picked: Vec<String> = futures::future::try_join_all(requests)
+        .await?
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok(page
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| picked.contains(&e.id))
+        .map(|(i, _)| i)
+        .collect())
+}
+
 async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resolution> {
     let cfg = config()?;
     let page_info = extract_with_retry(page, false).await?;
     if page_info.elements.is_empty() {
         bail!("no interactive elements found on the page — navigate or wait_for content first");
     }
+    let checked = page_info.elements.len();
+    let started = Instant::now();
+    let keep = narrow(
+        &cfg,
+        &build_state(goal, &page_info.subset(&[])),
+        "Which listed element is the best match for what the agent wants to act on? Pick __none__ if none of them is.",
+        &page_info,
+        1,
+    )
+    .await?;
+    if keep.is_empty() {
+        bail!(
+            "Jev found nothing matching \"{goal}\" among the page's {checked} elements, so \
+             nothing was acted on. take_snapshot and target an explicit CSS selector"
+        );
+    }
+    let page_info = page_info.subset(&keep);
 
     let state = build_state(goal, &page_info);
     let mut criteria = Map::new();
     for e in &page_info.elements {
         criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
     }
+    criteria.insert(
+        "__none__".to_string(),
+        Value::String("None of these elements is what the agent wants.".to_string()),
+    );
 
-    let started = Instant::now();
     let (element_id, confidence, input_tokens, model) = decide(&cfg, &state, &criteria).await?;
+    if element_id == "__none__" {
+        bail!(
+            "Jev found nothing matching \"{goal}\" among the page's {checked} elements, so \
+             nothing was acted on. take_snapshot and target an explicit CSS selector"
+        );
+    }
     if confidence < floor {
         bail!(
             "Jev's confidence for the best match was only {confidence:.2} (below the \
@@ -641,7 +779,7 @@ async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resol
         css: page_info.css(&element_id),
         description,
         confidence,
-        offered: page_info.elements.len(),
+        offered: checked,
         element_id,
     })
 }
@@ -738,25 +876,7 @@ fn build_act_state(
     recent: &[String],
     value_keys: &[String],
 ) -> String {
-    let mut lines = vec![format!("Goal: \"{goal}\".")];
-    if page.title.is_empty() {
-        lines.push(format!("Page: {}", page.url));
-    } else {
-        lines.push(format!("Page: {} — {}", page.url, page.title));
-    }
-    if !page.text.is_empty() {
-        lines.push(format!("Visible text: {}", page.text));
-    }
-    if !recent.is_empty() {
-        lines.push("Actions already taken:".to_string());
-        lines.extend(recent.iter().map(|r| format!("- {r}")));
-    }
-    if !value_keys.is_empty() {
-        lines.push(format!(
-            "Values the caller can type, by key: {}.",
-            value_keys.join(", ")
-        ));
-    }
+    let mut lines = act_state_head(goal, page, recent, value_keys);
     if page.elements.is_empty() {
         lines.push("(no interactive elements were found on this page)".to_string());
     }
@@ -778,6 +898,37 @@ fn build_act_state(
         ));
     }
     lines.join("\n")
+}
+
+/// The part of an `act` step's state before the element menu: goal, page,
+/// visible text, steps so far and value keys. On its own it is the state
+/// for [`narrow`]'s group questions, whose options carry the elements.
+fn act_state_head(
+    goal: &str,
+    page: &PageInfo,
+    recent: &[String],
+    value_keys: &[String],
+) -> Vec<String> {
+    let mut lines = vec![format!("Goal: \"{goal}\".")];
+    if page.title.is_empty() {
+        lines.push(format!("Page: {}", page.url));
+    } else {
+        lines.push(format!("Page: {} — {}", page.url, page.title));
+    }
+    if !page.text.is_empty() {
+        lines.push(format!("Visible text: {}", page.text));
+    }
+    if !recent.is_empty() {
+        lines.push("Actions already taken:".to_string());
+        lines.extend(recent.iter().map(|r| format!("- {r}")));
+    }
+    if !value_keys.is_empty() {
+        lines.push(format!(
+            "Values the caller can type, by key: {}.",
+            value_keys.join(", ")
+        ));
+    }
+    lines
 }
 
 /// Criteria for an `act` step Choice: every element plus the pseudo-actions.
@@ -869,7 +1020,25 @@ pub async fn decide_step(
     value_keys: &[String],
 ) -> Result<StepDecision> {
     let cfg = config()?;
-    let page_info = extract_with_retry(page, true).await?;
+    let mut page_info = extract_with_retry(page, true).await?;
+    let reserved = PSEUDO_ACTIONS.len();
+    if page_info.elements.len() + reserved > CHOICE_LIMIT {
+        let head = act_state_head(goal, &page_info, recent, value_keys).join("\n");
+        let mut keep = narrow(
+            &cfg,
+            &head,
+            "Which listed element is the best next step toward the goal? Pick __none__ if none of them helps.",
+            &page_info,
+            reserved,
+        )
+        .await?;
+        // Every group said none: offer the page as it reads, dialog and
+        // viewport first, and let the step scroll, wait or go back.
+        if keep.is_empty() {
+            keep = (0..CHOICE_LIMIT - reserved).collect();
+        }
+        page_info = page_info.subset(&keep);
+    }
     let has_elements = !page_info.elements.is_empty();
 
     let state = build_act_state(goal, &page_info, recent, value_keys);
@@ -1423,7 +1592,7 @@ mod tests {
             url: "https://example.com".to_string(),
             title: String::new(),
             text: String::new(),
-            elements: (1..=MAX_ELEMENTS)
+            elements: (1..=CHOICE_LIMIT - PSEUDO_ACTIONS.len())
                 .map(|i| Element {
                     id: format!("e{i}"),
                     desc: format!("button {i}"),
@@ -1434,10 +1603,27 @@ mod tests {
             stamp: "ab12".to_string(),
         };
         let criteria = act_criteria(&page);
-        assert_eq!(criteria.len(), MAX_ELEMENTS + PSEUDO_ACTIONS.len());
-        assert!(criteria.len() <= 255);
+        assert_eq!(criteria.len(), CHOICE_LIMIT);
         assert!(criteria.contains_key("scroll_down"));
         assert!(criteria.contains_key("back"));
+    }
+
+    #[test]
+    fn groups_are_even_and_fit_one_choice() {
+        let sizes = |n| {
+            even_groups(n, CHOICE_LIMIT - 1)
+                .iter()
+                .map(|r| r.len())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sizes(1800), vec![225; 8]);
+        assert_eq!(sizes(254), vec![254]);
+        assert_eq!(sizes(255), vec![128, 127]);
+        assert_eq!(sizes(0), Vec::<usize>::new());
+        let g = even_groups(1801, CHOICE_LIMIT - 1);
+        assert_eq!(g.first().unwrap().start, 0);
+        assert_eq!(g.last().unwrap().end, 1801);
+        assert!(g.iter().all(|r| r.len() < CHOICE_LIMIT));
     }
 
     #[test]

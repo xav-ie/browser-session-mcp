@@ -2099,7 +2099,14 @@ async fn resolve_and_wait(
         );
         return Ok((res.css, Some(note)));
     }
-    if let Err(css_err) = wait_for_selector(page, selector, timeout_ms).await {
+    // Prose can never match as CSS, so it gets one immediate check instead
+    // of waiting out the timeout before Jev is asked.
+    let css_wait = if jev::available() && looks_like_prose(selector) {
+        0
+    } else {
+        timeout_ms
+    };
+    if let Err(css_err) = wait_for_selector(page, selector, css_wait).await {
         if !jev::available() {
             return Err(css_err);
         }
@@ -2116,6 +2123,137 @@ async fn resolve_and_wait(
         return Ok((res.css, Some(note)));
     }
     Ok((selector.to_string(), None))
+}
+
+/// Whether a selector is plain words rather than CSS. A CSS type selector
+/// names an HTML element or a custom element, and custom element names
+/// always contain a hyphen; so a word that is neither, and has no CSS
+/// punctuation, can never match ("the login button", "Submit"). "form
+/// button" and "#nav a" stay CSS.
+fn looks_like_prose(selector: &str) -> bool {
+    const TAGS: &[&str] = &[
+        "a",
+        "abbr",
+        "address",
+        "area",
+        "article",
+        "aside",
+        "audio",
+        "b",
+        "base",
+        "bdi",
+        "bdo",
+        "blockquote",
+        "body",
+        "br",
+        "button",
+        "canvas",
+        "caption",
+        "cite",
+        "code",
+        "col",
+        "colgroup",
+        "data",
+        "datalist",
+        "dd",
+        "del",
+        "details",
+        "dfn",
+        "dialog",
+        "div",
+        "dl",
+        "dt",
+        "em",
+        "embed",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "head",
+        "header",
+        "hgroup",
+        "hr",
+        "html",
+        "i",
+        "iframe",
+        "img",
+        "input",
+        "ins",
+        "kbd",
+        "label",
+        "legend",
+        "li",
+        "link",
+        "main",
+        "map",
+        "mark",
+        "menu",
+        "meta",
+        "meter",
+        "nav",
+        "noscript",
+        "object",
+        "ol",
+        "optgroup",
+        "option",
+        "output",
+        "p",
+        "picture",
+        "pre",
+        "progress",
+        "q",
+        "rp",
+        "rt",
+        "ruby",
+        "s",
+        "samp",
+        "script",
+        "search",
+        "section",
+        "select",
+        "slot",
+        "small",
+        "source",
+        "span",
+        "strong",
+        "style",
+        "sub",
+        "summary",
+        "sup",
+        "svg",
+        "table",
+        "tbody",
+        "td",
+        "template",
+        "textarea",
+        "tfoot",
+        "th",
+        "thead",
+        "time",
+        "title",
+        "tr",
+        "track",
+        "u",
+        "ul",
+        "var",
+        "video",
+        "wbr",
+    ];
+    selector.split_whitespace().any(|word| {
+        let w = word.trim_end_matches(['.', ',', '!', '?']).to_lowercase();
+        !w.is_empty()
+            && !w.contains([
+                '#', '.', '[', ']', '>', ':', '=', '+', '~', '*', '(', ')', '|', '-',
+            ])
+            && !TAGS.contains(&w.as_str())
+    })
 }
 
 /// `act` stop gates: Jev's probability that the goal is already met — or
@@ -3438,6 +3576,30 @@ fn object_schema(props: &[(&str, &Value, &str)], required: &[&str]) -> JsonObjec
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn prose_selectors_skip_the_css_wait() {
+        for prose in [
+            "the login button",
+            "Submit",
+            "Log in",
+            "Shakespeare's Sonnets",
+            "the email field.",
+        ] {
+            assert!(looks_like_prose(prose), "{prose}");
+        }
+        for css in [
+            "form button",
+            "#nav a",
+            "div.item > a",
+            "input[type=email]",
+            "my-widget",
+            "a:hover",
+            "button",
+        ] {
+            assert!(!looks_like_prose(css), "{css}");
+        }
+    }
 
     #[test]
     fn transport_errors_are_judged_by_type_not_text() {
