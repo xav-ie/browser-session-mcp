@@ -911,13 +911,32 @@ pub const PSEUDO_ACTIONS: &[(&str, &str)] = &[
     ),
     ("back", "Go back to the previous page in history."),
     (
-        "press_enter",
-        "Press Enter in the focused field, e.g. to submit a search just typed.",
+        "press_key",
+        "Press a key on the keyboard: Enter to submit a search just typed, Escape to close a popup, Tab to move focus, an arrow, and so on.",
     ),
+];
+
+/// The keys `act`'s press_key action can press, asked speculatively in each
+/// step's request so the answer is ready if the step picks press_key.
+const KEYS: &[(&str, &str)] = &[
+    ("Enter", "Enter: submit a search or form, confirm"),
+    ("Escape", "Escape: close a popup, menu or dialog"),
+    ("Tab", "Tab: move focus to the next control"),
+    ("Shift+Tab", "Shift+Tab: move focus to the previous control"),
+    ("ArrowDown", "Down arrow"),
+    ("ArrowUp", "Up arrow"),
+    ("ArrowLeft", "Left arrow"),
+    ("ArrowRight", "Right arrow"),
+    ("Space", "Space bar: toggle the focused checkbox or button"),
     (
-        "press_escape",
-        "Press Escape, e.g. to close a popup, menu or dialog.",
+        "Backspace",
+        "Backspace: delete the character before the cursor",
     ),
+    ("Delete", "Delete: delete the character after the cursor"),
+    ("PageDown", "Page Down"),
+    ("PageUp", "Page Up"),
+    ("Home", "Home"),
+    ("End", "End"),
 ];
 
 /// The `state` string for an `act` step: the goal, the page's identity, what
@@ -1040,6 +1059,9 @@ pub struct StepDecision {
     /// How to act on a chosen element: one of [`OPERATIONS`]' ids, "click"
     /// unless Jev was sure of another.
     pub operation: String,
+    /// The key for a press_key step (one of [`KEYS`]), "Enter" unless Jev
+    /// was sure of another.
+    pub key: String,
     /// Speculative answers from the same request: for each offered text
     /// field (up to [`VALUE_FIELDS`]), the caller-provided value key that
     /// belongs in it, keyed by element id.
@@ -1179,6 +1201,7 @@ pub async fn decide_step(
                     bot_check: parse_noul(json, "bot_check")?,
                     candidates: Vec::new(),
                     operation: "click".to_string(),
+                    key: "Enter".to_string(),
                     field_values: std::collections::HashMap::new(),
                     value_key: None,
                     next_best: None,
@@ -1248,6 +1271,18 @@ async fn step_on(
             }),
         );
     }
+    let mut keys = Map::new();
+    for (id, desc) in KEYS {
+        keys.insert((*id).to_string(), Value::String((*desc).to_string()));
+    }
+    questions.insert(
+        "key".to_string(),
+        json!({
+            "type": "choice",
+            "instructions": "If the best next step is to press a key, which key does the goal call for?",
+            "criteria": keys
+        }),
+    );
     questions.insert(
         "irreversible".to_string(),
         json!({
@@ -1356,6 +1391,13 @@ async fn step_on(
             operation = answer.chosen;
         }
     }
+    let key_ids: Vec<&str> = KEYS.iter().map(|(id, _)| *id).collect();
+    let key_answer = parse_choice(&json, "key", &key_ids)?;
+    let key = if key_answer.confidence >= ACT_MIN_CONFIDENCE {
+        key_answer.chosen
+    } else {
+        "Enter".to_string()
+    };
     let mut field_values = std::collections::HashMap::new();
     let ids: Vec<&str> = value_criteria.keys().map(|k| k.as_str()).collect();
     let mut value_key = None;
@@ -1394,6 +1436,7 @@ async fn step_on(
         bot_check,
         candidates,
         operation,
+        key,
         field_values,
         value_key,
         next_best,

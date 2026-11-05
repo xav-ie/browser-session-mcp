@@ -162,7 +162,9 @@ class Handler(BaseHTTPRequestHandler):
                     marker = "dead"
                 else:
                     marker = "name"
-                if marker is None:
+                if "press" in first:
+                    choice = "press_key"
+                elif marker is None:
                     choice = "back"
                 else:
                     choice = next((k for k in order if marker in descs[k]), order[0])
@@ -218,6 +220,8 @@ class Handler(BaseHTTPRequestHandler):
             answers["login"] = {"noul": 0.97 if "sign-in wall" in title else 0.02}
             answers["error"] = {"noul": 0.97 if "error page" in title else 0.02}
             answers["irreversible"] = {"noul": 0.97 if "checkout" in title else 0.02}
+            if "key" in questions:
+                answers["key"] = {"choice": "Tab" if "tab" in first else "Enter", "confidence": 0.9}
             if "operation" in questions:
                 op = ("hover" if "hover" in first else "right_click" if "right-click" in first
                       else "drag" if "drag" in first else "click")
@@ -637,6 +641,14 @@ check "act: wire an HTML5 drop zone" "$(call evaluate "$(printf '{"sessionId":"%
 ACT_DRAG=$(call act "$(printf '{"sessionId":"%s","goal":"drag box A onto the drop zone"}' "$SID")")
 check "act: drags onto the chosen target" "$ACT_DRAG" '"action":"drag"'
 check "act: the HTML5 drop fired" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'act-done'
+
+# act presses any key, here Tab to move focus; press_key takes combinations.
+TAB_URL="data:text/html,<title>tab</title><input id=a autofocus><input id=b>"
+check "act: navigate to the tab page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$TAB_URL")")" 'Navigated to'
+check "act: wire a focus handler" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).focus(); document.getElementById(%s).addEventListener(%s, () => { document.title = %s }); return 1 })()"}' "$SID" "'a'" "'b'" "'focus'" "'act-done'")")" '"result":1'
+check "act: presses Tab when the goal calls for it" "$(call act "$(printf '{"sessionId":"%s","goal":"press tab to move to the next field"}' "$SID")")" '"target":"Tab"'
+check "press_key: Shift+Tab moves focus back" "$(call press_key "$(printf '{"sessionId":"%s","key":"Shift+Tab"}' "$SID")")" 'Pressed Shift+Tab'
+check "press_key: focus really moved back" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.activeElement.id"}' "$SID")")" '"a"'
 
 # Typing text with no key on a US keyboard, and picking inside a shadow root.
 SHADOW_URL="data:text/html,<title>shadow</title><button>Cancel</button><div id=host></div>"

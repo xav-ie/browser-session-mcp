@@ -745,21 +745,24 @@ impl BrowserSessionServer {
                     "scroll_up" => scroll_viewport(&page, -0.8).await?,
                     "back" => go_back(&page).await?,
                     "wait" => tokio::time::sleep(Duration::from_millis(500)).await,
-                    "press_enter" => dispatch_key(&page, "Enter").await?,
-                    "press_escape" => dispatch_key(&page, "Escape").await?,
+                    "press_key" => dispatch_key(&page, &d.key).await?,
                     other => bail!("Jev chose `{other}`, which is not one of the offered actions"),
                 }
                 (
                     ActStep {
                         step: step as usize,
                         action: d.chosen.clone(),
-                        target: None,
+                        target: (d.chosen == "press_key").then(|| d.key.clone()),
                         typed: None,
                         confidence: d.confidence,
                         goal: d.goal_met,
                         stuck: d.stuck,
                     },
-                    format!("{step}. {}", d.chosen),
+                    if d.chosen == "press_key" {
+                        format!("{step}. pressed {}", d.key)
+                    } else {
+                        format!("{step}. {}", d.chosen)
+                    },
                 )
             };
             steps.push(record);
@@ -806,8 +809,7 @@ impl BrowserSessionServer {
                     | Some("scroll_down")
                     | Some("scroll_up")
                     | Some("wait")
-                    | Some("press_enter")
-                    | Some("press_escape")
+                    | Some("press_key")
             );
             let after = page_fingerprint(&page).await;
             // A dialog the action opened is an effect too, and the next
@@ -1597,7 +1599,7 @@ struct ActStep {
     /// 1-based step number.
     step: usize,
     /// "click", "type", "select", "scroll_down", "scroll_up", "wait",
-    /// "back", "press_enter", "press_escape", "hover", "right_click",
+    /// "back", "press_key" (the key in `target`), "hover", "right_click",
     /// "drag", or "missed" when the element was gone before it could be
     /// acted on.
     action: String,
@@ -2767,16 +2769,59 @@ async fn focus_element(page: &Page, selector: &str) -> Result<()> {
 /// Press a key at the page level (on whatever's focused) via CDP Input,
 /// looking the key up in chromiumoxide's US keyboard layout. Printable keys
 /// send `text` with a `keyDown`; named keys (Enter, Tab, Escape, ArrowDown…)
-/// use `rawKeyDown`. keyDown + keyUp are dispatched.
+/// use `rawKeyDown`. keyDown + keyUp are dispatched. A combination such as
+/// `Shift+Tab` or `Control+a` holds its modifiers down around the key; a
+/// lone `+` is still the plus key. `Space` names the space bar.
 async fn dispatch_key(page: &Page, key: &str) -> Result<()> {
+    const MODIFIERS: &[(&str, i64)] = &[("Alt", 1), ("Control", 2), ("Meta", 4), ("Shift", 8)];
+    let (mods, key) = match key.rsplit_once('+') {
+        Some((mods, k))
+            if !k.is_empty()
+                && !mods.is_empty()
+                && mods
+                    .split('+')
+                    .all(|m| MODIFIERS.iter().any(|(n, _)| *n == m)) =>
+        {
+            (mods.split('+').collect::<Vec<_>>(), k)
+        }
+        _ => (Vec::new(), key),
+    };
+    let key = if key == "Space" { " " } else { key };
     let def = USKEYBOARD_LAYOUT.iter().find(|k| k.key == key).ok_or_else(|| {
-        anyhow!("unknown key `{key}` (use names like Enter, Tab, Escape, ArrowDown, Backspace, or a single char)")
+        anyhow!("unknown key `{key}` (use names like Enter, Tab, Escape, ArrowDown, Backspace, Space, a single char, or a combination like Shift+Tab)")
     })?;
-    let text: Option<&str> = def.text.or(if def.key.chars().count() == 1 {
-        Some(def.key)
-    } else {
+    let mask: i64 = mods
+        .iter()
+        .filter_map(|m| MODIFIERS.iter().find(|(n, _)| n == m).map(|(_, b)| *b))
+        .sum();
+    let modifier_event = |name: &str, kind: DispatchKeyEventType| {
+        let def = USKEYBOARD_LAYOUT.iter().find(|k| k.key == name);
+        let mut ev = DispatchKeyEventParams::builder()
+            .r#type(kind)
+            .key(name)
+            .modifiers(mask);
+        if let Some(d) = def {
+            ev = ev.code(d.code).windows_virtual_key_code(d.key_code);
+        }
+        ev.build().map_err(|e| anyhow!("modifier key: {e}"))
+    };
+    for m in &mods {
+        page.execute(modifier_event(m, DispatchKeyEventType::RawKeyDown)?)
+            .await
+            .context("Input.dispatchKeyEvent (modifier down)")?;
+    }
+    // A modifier other than Shift turns a printable key into a shortcut, which
+    // must not also insert its character.
+    let shortcut = mask & !8 != 0;
+    let text: Option<&str> = if shortcut {
         None
-    });
+    } else {
+        def.text.or(if def.key.chars().count() == 1 {
+            Some(def.key)
+        } else {
+            None
+        })
+    };
     let down_type = if text.is_some() {
         DispatchKeyEventType::KeyDown
     } else {
@@ -2786,7 +2831,8 @@ async fn dispatch_key(page: &Page, key: &str) -> Result<()> {
         .r#type(down_type)
         .key(def.key)
         .code(def.code)
-        .windows_virtual_key_code(def.key_code);
+        .windows_virtual_key_code(def.key_code)
+        .modifiers(mask);
     if let Some(t) = text {
         down = down.text(t);
     }
@@ -2798,11 +2844,17 @@ async fn dispatch_key(page: &Page, key: &str) -> Result<()> {
         .key(def.key)
         .code(def.code)
         .windows_virtual_key_code(def.key_code)
+        .modifiers(mask)
         .build()
         .map_err(|e| anyhow!("key up: {e}"))?;
     page.execute(up)
         .await
         .context("Input.dispatchKeyEvent (up)")?;
+    for m in mods.iter().rev() {
+        page.execute(modifier_event(m, DispatchKeyEventType::KeyUp)?)
+            .await
+            .context("Input.dispatchKeyEvent (modifier up)")?;
+    }
     Ok(())
 }
 
@@ -3038,7 +3090,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "act",
-            "Act toward a goal on the session's active tab in one call: the server extracts the page's interactive elements (including open shadow roots and same-origin iframes) and visible text, asks the Jev decision model for the next step, does it (click, type, select, hover, right-click, drag, scroll, back, wait, or press Enter or Escape), and repeats until the goal reads achieved, nothing looks able to make progress, or the step budget runs out. Each step is one cheap Jev request (~150 to 500 ms), not a driving-LLM round trip, so multi-step flows take seconds and fractions of a cent. Pass `values` (e.g. { query: \"Oolong\" }) for anything to type: Jev only sees the keys and picks which field each belongs to; the text goes straight to the page, so secrets never reach a model. JavaScript dialogs are accepted and listed in `dialogs`, and a link that opens a new tab is followed there. Needs TYPESAFE_API_KEY; every step lands on an element the extraction just offered, and when Jev isn't sure of a step it stops with status `uncertain` and the `candidates` it was weighing instead of guessing. `status` is completed, likely_completed (Jev leaned toward done but wasn't sure), uncertain, stuck, needs_login (pair with request_human_takeover or load_browser_state; a run with `values` keeps going at a login form), needs_human (a CAPTCHA or bot check; use request_human_takeover), needs_confirmation (only with confirmIrreversible; `pending` names the click it held back), blocked (an error page), no_progress or max_steps. Returns a per-step trace with confidences. Jev can be eager to call a goal met: verify with take_snapshot or take_screenshot afterwards. For a single action, click/type with a plain-language selector is cheaper.",
+            "Act toward a goal on the session's active tab in one call: the server extracts the page's interactive elements (including open shadow roots and same-origin iframes) and visible text, asks the Jev decision model for the next step, does it (click, type, select, hover, right-click, drag, scroll, back, wait, or press a key such as Enter, Escape, Tab or an arrow), and repeats until the goal reads achieved, nothing looks able to make progress, or the step budget runs out. Each step is one cheap Jev request (~150 to 500 ms), not a driving-LLM round trip, so multi-step flows take seconds and fractions of a cent. Pass `values` (e.g. { query: \"Oolong\" }) for anything to type: Jev only sees the keys and picks which field each belongs to; the text goes straight to the page, so secrets never reach a model. JavaScript dialogs are accepted and listed in `dialogs`, and a link that opens a new tab is followed there. Needs TYPESAFE_API_KEY; every step lands on an element the extraction just offered, and when Jev isn't sure of a step it stops with status `uncertain` and the `candidates` it was weighing instead of guessing. `status` is completed, likely_completed (Jev leaned toward done but wasn't sure), uncertain, stuck, needs_login (pair with request_human_takeover or load_browser_state; a run with `values` keeps going at a login form), needs_human (a CAPTCHA or bot check; use request_human_takeover), needs_confirmation (only with confirmIrreversible; `pending` names the click it held back), blocked (an error page), no_progress or max_steps. Returns a per-step trace with confidences. Jev can be eager to call a goal met: verify with take_snapshot or take_screenshot afterwards. For a single action, click/type with a plain-language selector is cheaper.",
             object_schema(
                 &[
                     session_id,
