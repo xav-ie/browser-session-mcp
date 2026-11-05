@@ -1658,6 +1658,205 @@ pub async fn ask(page: &Page, question: &str, options: &[String]) -> Result<AskA
     })
 }
 
+/// `read` returns a page under this many characters whole, without asking
+/// Jev: pruning it wouldn't be worth a request.
+const READ_WHOLE_BELOW: usize = 8_000;
+
+/// Passage characters per `read` request, keeping each well inside Jev's
+/// 64k-token context. Longer pages send several requests in parallel.
+const READ_CHARS_PER_REQUEST: usize = 50_000;
+
+/// The page as `read` splits it: visible text in passages of about 600
+/// characters, cut at the text's own line breaks, each under the heading it
+/// follows, leaving out navigation, sidebars, headers and footers. An open
+/// dialog is read instead of the page.
+const READ_SPLIT_FN: &str = r#"function() {
+  var DIALOG = 'dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
+  var modal = document.querySelector(DIALOG);
+  var root = modal && modal.getClientRects().length ? modal : document.body;
+  if (!root) return { url: String(location.href), title: String(document.title), chars: 0, passages: [] };
+  var norm = function(s) { return String(s || '').replace(/\s+/g, ' ').trim(); };
+  var headings = new Set();
+  root.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(function(h) { var t = norm(h.innerText); if (t) headings.add(t); });
+  // Navigation, sidebars, headers and footers (a table of contents, menus)
+  // repeat the headings and say nothing about the content.
+  var chrome = new Set();
+  root.querySelectorAll('nav, aside, header, footer, [role="navigation"], [role="complementary"], [role="banner"], [role="contentinfo"]').forEach(function(n) {
+    String(n.innerText || '').split('\n').forEach(function(l) { l = norm(l); if (l) chrome.add(l); });
+  });
+  var lines = String(root.innerText || '').split('\n').map(norm).filter(function(l) { return l && !chrome.has(l); });
+  var passages = [], heading = '', buf = '', chars = 0;
+  var flush = function() { if (buf) passages.push({ h: heading, t: buf }); buf = ''; };
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    chars += line.length + 1;
+    if (headings.has(line)) { flush(); heading = line; continue; }
+    if (buf && buf.length + line.length > 600) flush();
+    buf = buf ? buf + '\n' + line : line;
+  }
+  flush();
+  return { url: String(location.href), title: String(document.title), chars: chars, passages: passages };
+}"#;
+
+/// One passage `read` kept.
+pub struct ReadPassage {
+    /// The heading it falls under, if any.
+    pub heading: String,
+    pub text: String,
+    /// Jev's probability that it helps answer the question; 1 when the page
+    /// was short enough to return whole.
+    pub relevance: f64,
+}
+
+/// What `read` found.
+pub struct ReadResult {
+    pub url: String,
+    pub title: String,
+    /// Visible characters on the page.
+    pub page_chars: usize,
+    /// Passages the page was split into.
+    pub total: usize,
+    /// The passages returned, in page order.
+    pub passages: Vec<ReadPassage>,
+    /// Whether Jev filtered the page (false: short enough to return whole).
+    pub filtered: bool,
+}
+
+/// Return only the parts of the page that help answer `question`: one Noul
+/// per passage, in parallel requests, keeping those Jev rates at even odds
+/// or better, most relevant first if they don't all fit in `max_chars`,
+/// then back in page order. A short page comes back whole.
+pub async fn read(page: &Page, question: &str, max_chars: usize) -> Result<ReadResult> {
+    let v = iso_eval_function(page, READ_SPLIT_FN)
+        .await
+        .context("reading the page")?;
+    let url = v
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let title = v
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let page_chars = v.get("chars").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let all: Vec<(String, String)> = v
+        .get("passages")
+        .and_then(|p| p.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|p| {
+                    let s = |k: &str| {
+                        p.get(k)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    (s("h"), s("t"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let total = all.len();
+    if page_chars < READ_WHOLE_BELOW.min(max_chars) {
+        let passages = all
+            .into_iter()
+            .map(|(heading, text)| ReadPassage {
+                heading,
+                text,
+                relevance: 1.0,
+            })
+            .collect();
+        return Ok(ReadResult {
+            url,
+            title,
+            page_chars,
+            total,
+            passages,
+            filtered: false,
+        });
+    }
+    let cfg = config()?;
+    let state = format!("Page: {url} — {title}");
+    // Batch passages into requests by size.
+    let mut batches: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut size = 0;
+    for (i, (h, t)) in all.iter().enumerate() {
+        if size + h.len() + t.len() > READ_CHARS_PER_REQUEST
+            && !batches.last().is_some_and(Vec::is_empty)
+        {
+            batches.push(Vec::new());
+            size = 0;
+        }
+        size += h.len() + t.len();
+        batches.last_mut().expect("one batch").push(i);
+    }
+    let requests = batches.iter().map(|batch| {
+        let mut questions = Map::new();
+        for &i in batch {
+            let (h, t) = &all[i];
+            let under = if h.is_empty() {
+                String::new()
+            } else {
+                format!(" (under the heading \"{h}\")")
+            };
+            questions.insert(
+                format!("p{i}"),
+                json!({
+                    "type": "noul",
+                    "instructions": format!(
+                        "This passage{under} helps answer the question \"{question}\". Passage: {t}"
+                    )
+                }),
+            );
+        }
+        let body = json!({ "model": cfg.model, "state": state, "questions": questions });
+        let cfg = &cfg;
+        async move {
+            let json = post_systemone(cfg, &body).await?;
+            batch
+                .iter()
+                .map(|&i| Ok((i, parse_noul(&json, &format!("p{i}"))?)))
+                .collect::<Result<Vec<(usize, f64)>>>()
+        }
+    });
+    let mut scored: Vec<(usize, f64)> = futures::future::try_join_all(requests)
+        .await?
+        .into_iter()
+        .flatten()
+        .filter(|(_, p)| *p >= 0.5)
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut budget = max_chars;
+    let mut kept: Vec<(usize, f64)> = Vec::new();
+    for (i, p) in scored {
+        let len = all[i].0.len() + all[i].1.len();
+        if len > budget {
+            continue;
+        }
+        budget -= len;
+        kept.push((i, p));
+    }
+    kept.sort_by_key(|(i, _)| *i);
+    let passages = kept
+        .into_iter()
+        .map(|(i, relevance)| ReadPassage {
+            heading: all[i].0.clone(),
+            text: all[i].1.clone(),
+            relevance,
+        })
+        .collect();
+    Ok(ReadResult {
+        url,
+        title,
+        page_chars,
+        total,
+        passages,
+        filtered: true,
+    })
+}
+
 /// Whether an extracted element description names a field the agent can type
 /// into (a text-ish input, a textarea, contenteditable) rather than click.
 pub fn is_text_field(desc: &str) -> bool {

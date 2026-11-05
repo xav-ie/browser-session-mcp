@@ -37,7 +37,7 @@ credentials.
   keyboard input. Stealth can be switched on and off per session.
 - **Test like a slow phone.** Throttle a session's CPU and network, and run
   your own script before the page's to time what happens from the first byte.
-- **[36 tools](#all-36-tools)** for tabs, navigation, clicks and typing,
+- **[37 tools](#all-37-tools)** for tabs, navigation, clicks and typing,
   screenshots, accessibility snapshots, logs, CPU profiles and throttling.
 
 ## Quick start
@@ -209,7 +209,7 @@ to enable it. `JEV_MODEL`, `JEV_BASE_URL`, `JEV_TIMEOUT_MS`,
 `JEV_MIN_CONFIDENCE` and `JEV_FALLBACK_MIN_CONFIDENCE` tune it — see
 [Deployment](docs/deployment.md#environment).
 
-## All 36 tools
+## All 37 tools
 
 Most tools take a `sessionId` first. Tools marked ⚙ need one of the optional
 background roles from [Deployment](docs/deployment.md).
@@ -221,7 +221,7 @@ can type their results.
 | Sessions | `open_browser_session`, `close_browser_session`, `list_browser_sessions` |
 | Tabs | `new_page`, `list_pages`, `switch_tab`, `close_tab` |
 | Navigation | `navigate` |
-| Seeing the page | `take_screenshot`, `take_snapshot` (the accessibility tree as text), `ask` |
+| Seeing the page | `take_screenshot`, `take_snapshot` (the accessibility tree as text), `ask`, `read` |
 | Acting on it | `act`, `click`, `type`, `press_key`, `scroll`, `move_mouse`, `wait_for`, `evaluate` |
 | Logs ⚙ | `list_visits`, `list_console_messages`, `list_network_requests` |
 | Profiling | `start_profiling`, `stop_profiling` |
@@ -251,6 +251,7 @@ can type their results.
 - `take_screenshot({ sessionId, fullPage? })`: a PNG
 - `take_snapshot({ sessionId })`: the accessibility tree as indented text
 - `ask({ sessionId, question, options? })` → `{ answer, probability, probabilities? }`: asks Jev about the page as it is now, yes/no or which of your `options` fits, in one cheap call
+- `read({ sessionId, question, maxChars? })` → `{ text, pageChars, passages, kept, filtered }`: only the passages of the page that help answer `question`, under their headings; a page under 8,000 characters comes back whole
 
 **Acting on it** (real CDP input, not synthetic JavaScript events)
 - `act({ sessionId, goal, values?, maxSteps? })` → `{ status, goal, steps, url, title }`: a Jev-driven loop toward a goal — click, type (from `values`), select, scroll, wait or back per step, checking goal-met, dead-end, login and error walls each round until it finishes, gets stuck or runs out of budget

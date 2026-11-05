@@ -434,6 +434,63 @@ impl BrowserSessionServer {
         ))
     }
 
+    async fn read(&self, args: JsonObject) -> Result<Structured<ReadOut>> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let question = required_str(&args, "question")?.to_string();
+        let max_chars = optional_u64(&args, "maxChars").unwrap_or(12_000).max(500) as usize;
+        let page = sessions.active_page(&session_id).await?;
+        let r = jev::read(&page, &question, max_chars).await?;
+        let mut text = String::new();
+        let mut heading = None;
+        for p in &r.passages {
+            if heading != Some(&p.heading) {
+                if !p.heading.is_empty() {
+                    text.push_str(&format!("## {}\n\n", p.heading));
+                }
+                heading = Some(&p.heading);
+            }
+            text.push_str(&p.text);
+            text.push_str("\n\n");
+        }
+        let text = text.trim_end().to_string();
+        let summary = if !r.filtered {
+            format!(
+                "The page is short ({} characters), so here it is whole.",
+                r.page_chars
+            )
+        } else if r.passages.is_empty() {
+            format!(
+                "Nothing among the page's {} passages ({} characters) looked relevant to the question.",
+                r.total, r.page_chars
+            )
+        } else {
+            format!(
+                "{} of the page's {} passages looked relevant ({} of {} characters).",
+                r.passages.len(),
+                r.total,
+                text.chars().count(),
+                r.page_chars
+            )
+        };
+        Ok(ok_text_struct(
+            if text.is_empty() {
+                summary.clone()
+            } else {
+                format!("{summary}\n\n{text}")
+            },
+            ReadOut {
+                text,
+                url: r.url,
+                title: r.title,
+                page_chars: r.page_chars,
+                passages: r.total,
+                kept: r.passages.len(),
+                filtered: r.filtered,
+            },
+        ))
+    }
+
     async fn act(&self, args: JsonObject) -> Result<Structured<ActOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
@@ -1588,6 +1645,7 @@ tools! {
     "take_snapshot" => take_snapshot,
     "act" => act,
     "ask" => ask,
+    "read" => read,
     "click" => click,
     "type" => type_text,
     "press_key" => press_key,
@@ -1700,6 +1758,24 @@ struct ActExtra {
     candidates: Vec<ActCandidate>,
     pending: Option<String>,
     dialogs: Vec<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ReadOut {
+    /// The passages kept, in page order, under their headings as `## `
+    /// lines; empty when nothing looked relevant.
+    text: String,
+    url: String,
+    title: String,
+    /// Visible characters on the page.
+    page_chars: usize,
+    /// Passages the page was split into.
+    passages: usize,
+    /// Passages returned.
+    kept: usize,
+    /// False when the page was short enough to return whole, without Jev.
+    filtered: bool,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -3202,6 +3278,27 @@ fn tool_defs() -> Vec<Tool> {
                         "options",
                         &str_list_t,
                         "Answers to choose between (2 to 255). Leave out for a yes/no question.",
+                    ),
+                ],
+                &["sessionId", "question"],
+            ),
+            ToolAnnotations::new().read_only(true).open_world(true),
+        ),
+        tool(
+            "read",
+            "Read only the parts of the session's active tab that help answer a question, instead of the whole page: the page's visible text (an open dialog's, when one is showing) is split into passages of about 600 characters under their headings, the Jev decision model rates each one's relevance in parallel requests, and the relevant ones come back in page order under `## heading` lines, up to `maxChars`. A long article shrinks to the few sections that matter, saving the agent's context; a page under 8,000 characters comes back whole without asking Jev. Use take_snapshot for the page's structure and controls, and read for its content. Needs TYPESAFE_API_KEY; any Jev problem is an error. It reads the page without changing it.",
+            object_schema(
+                &[
+                    session_id,
+                    (
+                        "question",
+                        &str_t,
+                        "What you want to know from the page, e.g. \"When and why did Japan surrender?\" or \"the refund policy\".",
+                    ),
+                    (
+                        "maxChars",
+                        &pos_int_t,
+                        "Most characters of passages to return, the most relevant first if they don't all fit. Default 12000.",
                     ),
                 ],
                 &["sessionId", "question"],

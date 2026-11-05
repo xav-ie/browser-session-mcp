@@ -273,6 +273,11 @@ class Handler(BaseHTTPRequestHandler):
                 answers["answer"] = {"choice": pick, "confidence": 0.8,
                                      "probabilities": probs}
 
+        # read: one Noul per passage; the ones about smoke are relevant.
+        for q, spec in questions.items():
+            if q.startswith("p") and q[1:].isdigit() and spec["type"] == "noul":
+                answers[q] = {"noul": 0.9 if "smoke" in spec["instructions"].lower() else 0.05}
+
         resp = json.dumps({
             "model": "jev-stub",
             "answers": answers,
@@ -680,6 +685,17 @@ ASK_PICK=$(call ask "$(printf '{"sessionId":"%s","question":"Which page is this?
 check "ask: picks the option that fits" "$ASK_PICK" '"answer":"cart"'
 check "ask: lists each option's probability" "$ASK_PICK" '"probabilities"'
 check "ask: rejects a single option" "$(call ask "$(printf '{"sessionId":"%s","question":"Which?","options":["only"]}' "$SID")")" '2 to 255 entries'
+
+# ---- read: only the relevant passages (against the stub API above) ---------
+READ_URL="data:text/html,<title>long</title><main id=m></main>"
+check "read: navigate to a long page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$READ_URL")")" 'Navigated to'
+check "read: fill it with 40 sections" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { const m = document.getElementById(%s); for (let i = 0; i < 40; i++) m.insertAdjacentHTML(%s, %s + i + %s + (i === 27 ? %s : %s).repeat(12) + %s); return document.body.innerText.length })()"}' "$SID" "'m'" "'beforeend'" "'<h2>Section '" "'</h2><p>'" "'The smoke detector chirps when its battery is low. '" "'Nothing much happens in this part of the page. '" "'</p>'")")" '"result":'
+READ_OUT=$(call read "$(printf '{"sessionId":"%s","question":"Why does the alarm chirp?"}' "$SID")")
+check "read: keeps the relevant section" "$READ_OUT" 'smoke detector chirps'
+check "read: under its heading" "$READ_OUT" '## Section 27'
+check "read: drops the rest" "$READ_OUT" '"kept":1'
+check "read: a short page comes back whole" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "data:text/html,<p>Tiny%20page</p>")")" 'Navigated to'
+check "read: whole, without Jev" "$(call read "$(printf '{"sessionId":"%s","question":"anything"}' "$SID")")" '"filtered":false'
 
 # ---- close ---------------------------------------------------------------
 
