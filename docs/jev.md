@@ -281,23 +281,28 @@ takeover for logins.
 jev-browser publishes a [suite of 40 tasks](https://github.com/Ying-Kai-Liao/jev-browser/blob/main/bench/tasks.mjs)
 on live sites: logins, forms, widgets, loading pages, iframes, shadow DOM, and
 tasks that should fail. Each task has a check that runs in the page. `act`
-was developed against this suite, so its score there is optimistic. We also
-wrote 15 held-out tasks of the same kinds after development, which `act` was
-never tuned on. Both harnesses ran both sets, alternating, on one machine
-with the same Jev model (`jev-1.14.0`), 5 runs each, on 2026-11-05. Our
-harness and the task files are in [`bench/`](../bench).
+was developed against this suite, so its score there is optimistic. To see
+how it does on tasks it was never tuned on, we wrote two held-out sets of
+the same kinds of tasks on other pages: the first after the main work, the
+second after the last fixes the first one prompted, each before running
+`act` on it. Both harnesses ran each set alternating, on one machine with
+the same Jev model (`jev-1.14.0`), 5 runs each, on 2026-11-05. The harness
+is in [`bench/`](../bench).
 
-| | original 40 tasks | 15 held-out tasks | wrongly claimed done |
+| | original 40 tasks | held-out set 1 (15 tasks) | held-out set 2 (14 tasks) |
 |---|---|---|---|
-| browser-session-mcp | 85% | 85% | 6 of 275 |
-| jev-browser | 81% | 93% | 8 of 275 |
+| browser-session-mcp | 85% | 85% | 81% |
+| jev-browser | 81% | 93% | 80% |
 
-On the held-out tasks jev-browser is ahead. In that run `act` couldn't
-press keys other than Enter and Escape; it can now press any key, so the
-held-out "press Tab" task passes, though it no longer counts as unseen. On
-one link-following task `act` doesn't notice it has arrived and wanders
-on. Both miss tasks Jev can't judge, such as
-counting to exactly three or reading a table's sort order.
+Across all three, browser-session-mcp wrongly claimed done 7 times in 345
+task runs, jev-browser 8 times. Set 1 was scored before `act` could press
+any key and before it read pages without their menus, and those two gaps
+were most of its misses there. One task of set 2 is left out for both
+tools because its check was wrong. On the tasks they don't share, each
+tool wins a few: browser-session-mcp at loading pages and multi-step
+carts, jev-browser at closing popups and deleting from lists. Both miss
+tasks Jev can't judge, such as counting to exactly three or reading a
+table's sort order.
 
 Speed, on three tasks the other projects publish times for: all tools on
 the same machine, Chrome and Jev model; runs interleaved over 10 rounds,
