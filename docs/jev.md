@@ -194,10 +194,11 @@ cheaply and often, and around what to do with an answer that isn't certain.
   typing over it, which works on React inputs; keys are pressed for real,
   and text that isn't on a US keyboard is inserted the way an input method
   does. The values themselves never reach Jev, only their names.
-- **Offer everything, in the order a person sees it.** Elements in an open
-  dialog come first, then the viewport, then the rest, including open shadow
-  roots and same-origin iframes. A page with more than one question holds is
-  split into even groups, so nothing is left out.
+- **Offer what a person sees first, and everything if needed.** Elements in
+  an open dialog come first, then the viewport, then the rest, including
+  open shadow roots and same-origin iframes. On a page too big for one
+  question, Jev can say the right element isn't among those shown, and only
+  then is the whole page offered, in even groups.
 - **Leave no trace.** The elements offered are remembered in an isolated
   world the page's scripts can't see, so picking writes nothing to the page.
 
@@ -235,11 +236,14 @@ to detect changes is hashed inside the page.
 3. Ask Jev to choose one id, or "none of these".
 4. Act on it with the same real mouse and keyboard input as a CSS selector.
 
-One Jev question holds at most 255 options. A page with more elements is
-split into the fewest groups that fit, all the same size (1,800 elements
-become 8 groups of 225), and one request asks every group for its best
-match or none. Each group's top two go to the final pick, so nothing on the
-page is left out. That costs one extra request, only on pages that big.
+One Jev question holds at most 255 options. On a page with more elements,
+Jev first sees what a person would: the first 248 (dialog and viewport
+first) plus an option saying the right one isn't listed. Most picks end
+there. If Jev says it isn't listed, or isn't sure, the whole page is split
+into the fewest groups that fit, all the same size (1,800 elements become 8
+groups of 225), one request asks every group for its best match or none,
+and each group's top two go to a final pick. So nothing on the page is out
+of reach, and only the hard cases pay for it.
 
 Jev only ever picks among the ids it was offered; its answer never becomes
 coordinates or JavaScript.
@@ -277,16 +281,36 @@ jev-browser publishes a [suite of 40 tasks](https://github.com/Ying-Kai-Liao/jev
 on live sites: logins, forms, widgets, loading pages, iframes, shadow DOM, and
 tasks that should fail. Each task has a check that runs in the page. We ran
 its own harness and ours (in [`bench/`](../bench)) on one machine, with the
-same Jev model (`jev-1.14.0`), on 2026-11-04:
+same Jev model (`jev-1.14.0`), on 2026-11-05:
 
 | | tasks done right | wrongly claimed done |
 |---|---|---|
-| browser-session-mcp | 87% (average of 3 runs) | 0 of 120 |
+| browser-session-mcp | 84% (average of 6 runs) | 1 of 240 |
 | jev-browser | 81% (average of 2 runs) | 2 of 80 |
 
 Both miss tasks Jev can't judge, such as counting to exactly three or
 reading a table's sort order. jev-browser does the work on a few tasks but
 then reports itself stuck.
+
+Four tasks the other projects publish times for, run here like for like on
+2026-11-05: the same machine, Chrome and Jev model; every tool given the
+text to type up front (none generating it with a language model); and the
+clock running from the page being loaded until the tool says it's done.
+Each cell is passes out of 5, then the median time of the passing runs:
+
+| task | browser-session-mcp | [jkudish/jev-browser](https://github.com/jkudish/jev-browser) | [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) |
+|---|---|---|---|
+| Wikipedia: from Coffee to the Espresso article | 5/5, 0.93 s | 5/5, 2.17 s | 4/5, 0.81 s |
+| Wikipedia: search for Ristretto | 5/5, 1.24 s | 5/5, 1.68 s | 5/5, 0.89 s |
+| Wikipedia: search for Gödel's incompleteness theorems | 5/5, 1.42 s | 5/5, 1.54 s | 5/5, 1.12 s |
+| Google Flights: Zurich to London | 5/5, 6.9 s | can't run it | 0/5 |
+
+jev-ultrafast is the fastest on short tasks: it waits about 50 ms after an
+action, where `act` waits 300 ms for the page to react. jkudish/jev-browser
+types into ordinary fields only through a language model, so it can't run
+the Flights task without one; jev-ultrafast's Flights runs used a stand-in
+that hands it the given text per field, which may not match how it expects
+dates.
 
 ## Tuning
 
