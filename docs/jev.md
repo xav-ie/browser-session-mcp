@@ -279,38 +279,38 @@ takeover for logins.
 
 jev-browser publishes a [suite of 40 tasks](https://github.com/Ying-Kai-Liao/jev-browser/blob/main/bench/tasks.mjs)
 on live sites: logins, forms, widgets, loading pages, iframes, shadow DOM, and
-tasks that should fail. Each task has a check that runs in the page. We ran
-its own harness and ours (in [`bench/`](../bench)) on one machine, with the
-same Jev model (`jev-1.14.0`), on 2026-11-05:
+tasks that should fail. Each task has a check that runs in the page. `act`
+was developed against this suite, so its score there is optimistic. We also
+wrote 15 held-out tasks of the same kinds after development, which `act` was
+never tuned on. Both harnesses ran both sets, alternating, on one machine
+with the same Jev model (`jev-1.14.0`), 5 runs each, on 2026-11-05. Our
+harness and the task files are in [`bench/`](../bench).
 
-| | tasks done right | wrongly claimed done |
-|---|---|---|
-| browser-session-mcp | 84% (average of 6 runs) | 1 of 240 |
-| jev-browser | 81% (average of 2 runs) | 2 of 80 |
+| | original 40 tasks | 15 held-out tasks | wrongly claimed done |
+|---|---|---|---|
+| browser-session-mcp | 85% | 85% | 6 of 275 |
+| jev-browser | 81% | 93% | 8 of 275 |
 
-Both miss tasks Jev can't judge, such as counting to exactly three or
-reading a table's sort order. jev-browser does the work on a few tasks but
-then reports itself stuck.
+On the held-out tasks jev-browser is ahead. `act` can't press keys other
+than Enter and Escape, and on one link-following task it doesn't notice it
+has arrived and wanders on. Both miss tasks Jev can't judge, such as
+counting to exactly three or reading a table's sort order.
 
-Four tasks the other projects publish times for, run here like for like on
-2026-11-05: the same machine, Chrome and Jev model; every tool given the
-text to type up front (none generating it with a language model); and the
-clock running from the page being loaded until the tool says it's done.
-Each cell is passes out of 5, then the median time of the passing runs:
+Speed, on three tasks the other projects publish times for: all tools on
+the same machine, Chrome and Jev model; runs interleaved over 10 rounds,
+each in a fresh browser; every tool given the text to type up front (none
+generating it with a language model); and one outside clock from the page
+being loaded until the tool says it's done. Each cell is passes, then the
+median time:
 
 | task | browser-session-mcp | [jkudish/jev-browser](https://github.com/jkudish/jev-browser) | [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) |
 |---|---|---|---|
-| Wikipedia: from Coffee to the Espresso article | 5/5, 0.93 s | 5/5, 2.17 s | 4/5, 0.81 s |
-| Wikipedia: search for Ristretto | 5/5, 1.24 s | 5/5, 1.68 s | 5/5, 0.89 s |
-| Wikipedia: search for Gödel's incompleteness theorems | 5/5, 1.42 s | 5/5, 1.54 s | 5/5, 1.12 s |
-| Google Flights: Zurich to London | 5/5, 6.9 s | can't run it | 0/5 |
+| Wikipedia: from Coffee to the Espresso article | 10/10, 0.99 s | 10/10, 1.89 s | 10/10, 0.90 s |
+| Wikipedia: search for Ristretto | 10/10, 1.37 s | 10/10, 1.55 s | 10/10, 1.02 s |
+| Wikipedia: search for Gödel's incompleteness theorems | 10/10, 1.51 s | 10/10, 1.78 s | 10/10, 1.26 s |
 
-jev-ultrafast is the fastest on short tasks: it waits about 50 ms after an
-action, where `act` waits 300 ms for the page to react. jkudish/jev-browser
-types into ordinary fields only through a language model, so it can't run
-the Flights task without one; jev-ultrafast's Flights runs used a stand-in
-that hands it the given text per field, which may not match how it expects
-dates.
+jev-ultrafast is the fastest: it waits about 50 ms after an action, where
+`act` waits 300 ms for the page to react.
 
 ## Tuning
 
