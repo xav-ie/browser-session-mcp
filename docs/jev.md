@@ -25,6 +25,7 @@ model round trip each.
 - [act: a whole goal in one call](#act-a-whole-goal-in-one-call)
 - [ask: questions about the page](#ask-questions-about-the-page)
 - [read: only the relevant parts](#read-only-the-relevant-parts)
+- [Approach](#approach)
 - [What Jev sees](#what-jev-sees)
 - [How a pick works](#how-a-pick-works)
 - [Limits](#limits)
@@ -162,6 +163,43 @@ relevant ones come back in page order under `## heading` lines, up to
 fit). Wikipedia's 118,000-character "Surrender of Japan" article comes back
 as about 12,000 characters in under half a second. A page under 8,000
 characters comes back whole, without asking Jev.
+
+## Approach
+
+Jev makes one kind of decision well: pick one option from a list, with a
+calibrated confidence. Everything here is built around asking it that,
+cheaply and often, and around what to do with an answer that isn't certain.
+
+- **Show the page, not just the controls.** Every decision includes the
+  page's visible text (an open dialog's first) next to the list of usable
+  elements, so Jev can tell a result has loaded or a message appeared, not
+  only what can be clicked.
+- **Ask everything at once.** One `act` step is one request that asks which
+  element, how to use it (click, hover, drag, right-click), which value to
+  type into each field, whether the goal is met, whether a login, error or
+  bot check page is in the way, and whether the click can't be undone. Jev
+  answers extra questions in parallel, so they cost no waiting.
+- **Stop when it's probably done.** Jev rarely rates a finished goal
+  certain, and acting past a finished goal tends to undo it. So `act` stops
+  once Jev rates the goal at even odds or better and reports
+  `likely_completed`, except right after typing, when a search suggestion
+  can look like the answer.
+- **Never act on a guess.** Below its confidence floor, a selector errors
+  and `act` stops with the candidates it was weighing. Jev may also answer
+  "none of these", and the server only ever acts on an element it offered.
+- **Check every action.** After each step `act` compares a fingerprint of
+  the page. If nothing changed, it tries Jev's next best choice, and after
+  three dead actions it stops instead of looping.
+- **Type like a person.** Fields are cleared by selecting their text and
+  typing over it, which works on React inputs; keys are pressed for real,
+  and text that isn't on a US keyboard is inserted the way an input method
+  does. The values themselves never reach Jev, only their names.
+- **Offer everything, in the order a person sees it.** Elements in an open
+  dialog come first, then the viewport, then the rest, including open shadow
+  roots and same-origin iframes. A page with more than one question holds is
+  split into even groups, so nothing is left out.
+- **Leave no trace.** The elements offered are remembered in an isolated
+  world the page's scripts can't see, so picking writes nothing to the page.
 
 ## What Jev sees
 
