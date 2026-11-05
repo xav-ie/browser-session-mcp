@@ -3,3 +3,4 @@
 .direnv
 *.log
 result*
+bench/tasks.local.mjs

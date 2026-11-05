@@ -7,12 +7,12 @@
 // "likely_done".
 //
 //   BROWSER_URL=http://localhost:9222 TYPESAFE_API_KEY=... node bench/run.mjs \
-//     [--set base,hard,guard,peers|all] [--only id,id] [--concurrency 3] [--out file.json]
+//     [--set base,hard,guard,peers,local|all] [--only id,id] [--concurrency 3] [--out file.json]
 //
 // MCP_BIN defaults to target/release/browser-session. STATE_DIR defaults to
 // a temporary directory.
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -24,7 +24,11 @@ const arg = (k, d) => {
   const i = process.argv.indexOf(k);
   return i > 0 ? process.argv[i + 1] : d;
 };
-const SETS = { base: TASKS, hard: HARD, guard: GUARD, peers: PEERS };
+// Extra tasks in bench/tasks.local.mjs (git-ignored), exported as LOCAL, the
+// same convention as jev-browser's harness, so both can run one task file.
+const localFile = path.join(path.dirname(fileURLToPath(import.meta.url)), "tasks.local.mjs");
+const LOCAL = existsSync(localFile) ? (await import(localFile)).LOCAL : [];
+const SETS = { base: TASKS, hard: HARD, guard: GUARD, peers: PEERS, local: LOCAL };
 const set = arg("--set", "all");
 const pool = set === "all" ? Object.values(SETS).flat() : set.split(",").flatMap((s) => SETS[s] ?? []);
 const only = arg("--only")?.split(",");
