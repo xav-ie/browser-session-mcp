@@ -464,8 +464,13 @@ impl BrowserSessionServer {
             }
             // Once something was done, a goal that reads probably met is a
             // stop: Jev rarely calls an achieved goal certain, and acting on
-            // past it (a further click, going back) tends to undo it.
-            if !steps.is_empty() && d.goal_met >= ACT_LIKELY_GATE {
+            // past it (a further click, going back) tends to undo it. Not
+            // right after typing, though: a typed search shows its result as
+            // a suggestion before it is opened, and read as done. A goal
+            // that typing does finish still ends likely_completed at the
+            // next stop.
+            let just_typed = steps.last().is_some_and(|s| s.action == "type");
+            if !steps.is_empty() && !just_typed && d.goal_met >= ACT_LIKELY_GATE {
                 return Ok(act_done(
                     "likely_completed",
                     &goal,
