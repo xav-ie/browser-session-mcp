@@ -279,23 +279,14 @@ tasks that should fail. Each task has a check that runs in the page. We ran
 its own harness and ours (in [`bench/`](../bench)) on one machine, with the
 same Jev model (`jev-1.14.0`), on 2026-11-04:
 
-| | tasks done right | wrongly claimed done | typical time per task |
-|---|---|---|---|
-| browser-session-mcp | 87% (average of 3 runs) | 0 of 120 | 1.5 s |
-| jev-browser | 81% (average of 2 runs) | 2 of 80 | 1.9 s |
+| | tasks done right | wrongly claimed done |
+|---|---|---|
+| browser-session-mcp | 87% (average of 3 runs) | 0 of 120 |
+| jev-browser | 81% (average of 2 runs) | 2 of 80 |
 
 Both miss tasks Jev can't judge, such as counting to exactly three or
 reading a table's sort order. jev-browser does the work on a few tasks but
 then reports itself stuck.
-
-Other projects publish times for single tasks. Ours, on the same tasks:
-
-| task | browser-session-mcp | published by |
-|---|---|---|
-| Wikipedia: from Coffee to the Espresso article | 1.3 s | about 4 s, jkudish/jev-browser |
-| Wikipedia: search for Ristretto | 1.4 s | 3.6 s, jkudish/jev-browser |
-| Wikipedia: search for Gödel's incompleteness theorems | 1.7 s | 2.8 s, jev-ultrafast |
-| Google Flights: Zurich to London | about 6 s when it finishes, but the date calendar stops it most tries | 7.07 s, jev-ultrafast |
 
 ## Tuning
 
