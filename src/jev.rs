@@ -221,14 +221,32 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     }
     elements.push(rec);
   }
+  // The page's own content, not its menus: navigation, sidebars, headers
+  // and footers (a Wikipedia article's first 1,500 characters are nearly all
+  // menu and table of contents) are left out, so a judgment like "is the
+  // goal met?" reads what the page is about.
+  var norm = function(s) { return String(s || '').replace(/\s+/g, ' ').trim(); };
   var textOf = function(root) {
-    var t = String(root.innerText || '').replace(/\s+/g, ' ').trim();
+    var chrome = new Set();
+    root.querySelectorAll('nav, aside, header, footer, [role="navigation"], [role="complementary"], [role="banner"], [role="contentinfo"]').forEach(function(n) {
+      String(n.innerText || '').split('\n').forEach(function(l) { l = norm(l); if (l) chrome.add(l); });
+    });
+    var t = String(root.innerText || '').split('\n').map(norm).filter(function(l) { return l && !chrome.has(l); }).join(' ');
     return t.length > 1500 ? t.slice(0, 1499) + '...' : t;
   };
   var modal = document.querySelector(DIALOG);
+  var main = document.querySelector('main, [role="main"]');
   var text = '';
   if (modal && modal.getClientRects().length) text = textOf(modal);
+  else if (main && main.getClientRects().length) text = textOf(main);
   else if (document.body) text = textOf(document.body);
+  // The page's main heading leads, even where a site puts it inside a
+  // <header> (Wikipedia's article title).
+  var h1 = document.querySelector('h1');
+  var heading = h1 && h1.getClientRects().length ? norm(h1.innerText) : '';
+  if (heading && !(modal && modal.getClientRects().length) && text.indexOf(heading) !== 0) {
+    text = ('Heading: ' + heading + '. ' + text).slice(0, 1500);
+  }
   return {
     url: String(location.href),
     title: clamp(document.title, 120),
