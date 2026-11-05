@@ -222,7 +222,7 @@ same Jev model (`jev-1.14.0`), on 2026-11-04:
 
 | | tasks done right | wrongly claimed done | typical time per task |
 |---|---|---|---|
-| browser-session-mcp | 86% (average of 3 runs) | 1 of 120 | 1.6 s |
+| browser-session-mcp | 86% (average of 3 runs) | 0 of 120 | 1.4 s |
 | jev-browser | 81% (average of 2 runs) | 2 of 80 | 1.9 s |
 
 Both miss tasks Jev can't judge, such as counting to exactly three or
@@ -233,10 +233,10 @@ Other projects publish times for single tasks. Ours, on the same tasks:
 
 | task | browser-session-mcp | published by |
 |---|---|---|
-| Wikipedia: from Coffee to the Espresso article | 1.0 to 1.2 s | about 4 s, jkudish/jev-browser |
+| Wikipedia: from Coffee to the Espresso article | 1.3 s | about 4 s, jkudish/jev-browser |
 | Wikipedia: search for Ristretto | 1.4 s | 3.6 s, jkudish/jev-browser |
-| Wikipedia: search for Gödel's incompleteness theorems | 1.5 to 1.6 s | 2.8 s, jev-ultrafast |
-| Google Flights: Zurich to London | 5.7 s, in 1 of 3 tries | 7.07 s, jev-ultrafast |
+| Wikipedia: search for Gödel's incompleteness theorems | 1.6 s | 2.8 s, jev-ultrafast |
+| Google Flights: Zurich to London | about 5.7 s, but it finished only 3 of 9 tries | 7.07 s, jev-ultrafast |
 
 ## Tuning
 
