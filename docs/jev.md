@@ -96,7 +96,8 @@ Each step is one Jev request that picks what to do next and, in the same
 request, judges whether the goal is met, whether a login, error or bot check
 page is in the way, and whether the next click can't be undone. A step can
 click, hover, right-click or drag an element, type into a field, pick a
-`<select>` option, scroll, wait, go back, or press Enter or Escape.
+`<select>` option, scroll, wait, go back, or press a key (Enter, Escape,
+Tab, Shift+Tab, an arrow, Space and so on).
 
 - **Text to type goes in `values`.** Jev sees only the keys (`username`,
   `password`) and says which field each belongs in. The text goes straight to
@@ -291,9 +292,11 @@ harness and the task files are in [`bench/`](../bench).
 | browser-session-mcp | 85% | 85% | 6 of 275 |
 | jev-browser | 81% | 93% | 8 of 275 |
 
-On the held-out tasks jev-browser is ahead. `act` can't press keys other
-than Enter and Escape, and on one link-following task it doesn't notice it
-has arrived and wanders on. Both miss tasks Jev can't judge, such as
+On the held-out tasks jev-browser is ahead. In that run `act` couldn't
+press keys other than Enter and Escape; it can now press any key, so the
+held-out "press Tab" task passes, though it no longer counts as unseen. On
+one link-following task `act` doesn't notice it has arrived and wanders
+on. Both miss tasks Jev can't judge, such as
 counting to exactly three or reading a table's sort order.
 
 Speed, on three tasks the other projects publish times for: all tools on
