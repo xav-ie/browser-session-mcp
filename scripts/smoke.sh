@@ -222,15 +222,16 @@ class Handler(BaseHTTPRequestHandler):
                       else "drag" if "drag" in first else "click")
                 answers["operation"] = {"choice": op, "confidence": 0.9}
             answers["bot_check"] = {"noul": 0.97 if "bot check" in title else 0.02}
-            if "value_key" in questions:
-                vkeys = questions["value_key"]["criteria"]
-                vchoice = "name" if "name" in vkeys else "__none__"
-                vother = next((k for k in vkeys if k != vchoice), None)
-                vprobs = {vchoice: 0.91}
-                if vother:
-                    vprobs[vother] = 0.09
-                answers["value_key"] = {"choice": vchoice, "confidence": 0.91,
-                                        "probabilities": vprobs}
+            for q, spec in questions.items():
+                if q.startswith("value_e"):
+                    vkeys = spec["criteria"]
+                    vchoice = "name" if "name" in vkeys else "__none__"
+                    vother = next((k for k in vkeys if k != vchoice), None)
+                    vprobs = {vchoice: 0.91}
+                    if vother:
+                        vprobs[vother] = 0.09
+                    answers[q] = {"choice": vchoice, "confidence": 0.91,
+                                  "probabilities": vprobs}
 
         # Group questions narrowing a big page: each group's "log in" element,
         # or __none__.

@@ -799,6 +799,10 @@ async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resol
     })
 }
 
+/// How many of a step's text fields get their own "which value goes here?"
+/// question; a chosen field beyond them is asked about afterwards.
+const VALUE_FIELDS: usize = 16;
+
 /// Ways `act` can act on a chosen element besides typing and selecting,
 /// asked speculatively in each step's request.
 pub const OPERATIONS: &[(&str, &str)] = &[
@@ -989,9 +993,10 @@ pub struct StepDecision {
     /// How to act on a chosen element: one of [`OPERATIONS`]' ids, "click"
     /// unless Jev was sure of another.
     pub operation: String,
-    /// Speculative answer from the same request: which caller-provided
-    /// value belongs in the field to fill next, if any.
-    pub value_key: Option<String>,
+    /// Speculative answers from the same request: for each offered text
+    /// field (up to [`VALUE_FIELDS`]), the caller-provided value key that
+    /// belongs in it, keyed by element id.
+    pub field_values: std::collections::HashMap<String, String>,
     /// Next-best element by returned probability, for no-effect recovery.
     pub next_best: Option<(String, f64)>,
     /// Whether the page offered any interactive element at all. When it
@@ -1126,8 +1131,21 @@ pub async fn decide_step(
             "instructions": "The best next step toward the goal would place an order, make a payment, send a message, publish, or delete something, which cannot be undone."
         }),
     );
+    // Which value goes in which field is asked per field, so the answer
+    // fits whichever field the step picks ("from" into "Where from?", never
+    // "Where to?").
     let mut value_criteria = Map::new();
-    if has_elements && !value_keys.is_empty() {
+    let value_fields: Vec<&Element> = if value_keys.is_empty() {
+        Vec::new()
+    } else {
+        page_info
+            .elements
+            .iter()
+            .filter(|e| is_text_field(&e.desc))
+            .take(VALUE_FIELDS)
+            .collect()
+    };
+    if !value_fields.is_empty() {
         for k in value_keys {
             value_criteria.insert(
                 k.clone(),
@@ -1136,16 +1154,18 @@ pub async fn decide_step(
         }
         value_criteria.insert(
             "__none__".to_string(),
-            Value::String("No typing is needed in the next step.".to_string()),
+            Value::String("None of the provided values belongs in this field.".to_string()),
         );
-        questions.insert(
-            "value_key".to_string(),
-            json!({
-                "type": "choice",
-                "instructions": "If the next step is to type into a field, which provided value belongs there? Otherwise pick __none__.",
-                "criteria": value_criteria
-            }),
-        );
+        for e in &value_fields {
+            questions.insert(
+                format!("value_{}", e.id),
+                json!({
+                    "type": "choice",
+                    "instructions": format!("Which provided value belongs in this field: {}?", e.desc),
+                    "criteria": value_criteria
+                }),
+            );
+        }
     }
     let body = json!({
         "model": cfg.model,
@@ -1204,12 +1224,12 @@ pub async fn decide_step(
             operation = answer.chosen;
         }
     }
-    let mut value_key = None;
-    if !value_criteria.is_empty() {
-        let ids: Vec<&str> = value_criteria.keys().map(|k| k.as_str()).collect();
-        let answer = parse_choice(&json, "value_key", &ids)?;
+    let mut field_values = std::collections::HashMap::new();
+    let ids: Vec<&str> = value_criteria.keys().map(|k| k.as_str()).collect();
+    for e in &value_fields {
+        let answer = parse_choice(&json, &format!("value_{}", e.id), &ids)?;
         if answer.chosen != "__none__" && answer.confidence >= ACT_MIN_CONFIDENCE {
-            value_key = Some(answer.chosen);
+            field_values.insert(e.id.clone(), answer.chosen);
         }
     }
     tracing::debug!(
@@ -1235,7 +1255,7 @@ pub async fn decide_step(
         bot_check,
         candidates,
         operation,
-        value_key,
+        field_values,
         next_best,
         has_elements,
         page: page_info,

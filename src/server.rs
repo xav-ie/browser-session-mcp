@@ -631,7 +631,11 @@ impl BrowserSessionServer {
                         // The step's value guess was made before the field
                         // was known; when it found nothing, ask again about
                         // this field. A field no value fits just gets clicked.
-                        let mut key = d.value_key.clone().filter(|k| untyped.contains(k));
+                        let mut key = d
+                            .field_values
+                            .get(&el.id)
+                            .cloned()
+                            .filter(|k| untyped.contains(k));
                         if key.is_none() && !untyped.is_empty() {
                             key = jev::decide_value_for_field(&goal, &el.desc, &untyped)
                                 .await
@@ -2476,14 +2480,14 @@ async fn click_label(page: &Page, css: &str, label: &str) -> Result<()> {
 /// the shared path of the `type` tool and `act`'s value typing. The click
 /// is best effort (a field can be focusable but covered); focus is not.
 async fn type_into(page: &Page, css: &str, text: &str, clear: bool, delay_ms: u64) -> Result<()> {
-    if clear {
-        clear_field(page, css).await;
-    }
     focus_element(page, css)
         .await
         .with_context(|| format!("locating {css}"))?;
     if let Ok((x, y)) = element_center(page, css).await {
         page.click(Point::new(x, y)).await.ok();
+    }
+    if clear {
+        clear_field(page, css).await;
     }
     type_chars(page, text, delay_ms)
         .await
@@ -2509,12 +2513,18 @@ async fn clear_typed_marks(page: &Page) {
     let _ = iso_eval_function(page, decl).await;
 }
 
-/// Empty a field's value before typing, wherever [`jev::DEEP_FIND_JS`]
-/// finds it. Best effort: a field without a `value` is left alone.
+/// Select everything in a field before typing, so the first key replaces
+/// it, the way a person clears a field. Setting `value` directly doesn't
+/// stick on framework-controlled inputs (React keeps its own state), and
+/// typing then appended to the old text. Best effort.
 async fn clear_field(page: &Page, css: &str) {
     let decl = format!(
-        "function() {{ {deep} const h = __bsDeep({sel}); \
-         if (h && h.el.value !== undefined) h.el.value = ''; return !!h; }}",
+        "function() {{ {deep} const h = __bsDeep({sel}); if (!h) return false; const el = h.el; \
+         el.focus(); \
+         if (el.isContentEditable) {{ const r = el.ownerDocument.createRange(); r.selectNodeContents(el); \
+           const s = el.ownerDocument.getSelection(); s.removeAllRanges(); s.addRange(r); }} \
+         else {{ try {{ el.select(); if (el.selectionStart === null) el.value = ''; }} \
+           catch (e) {{ el.value = ''; }} }} return true; }}",
         deep = jev::DEEP_FIND_JS,
         sel = serde_json::to_string(css).unwrap_or_else(|_| "''".to_string()),
     );
