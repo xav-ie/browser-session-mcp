@@ -690,7 +690,7 @@ impl BrowserSessionServer {
                 }
                 .await;
                 // A page that re-rendered between the pick and the action
-                // has dropped the stamped element; decide again on the new
+                // has dropped the picked element; decide again on the new
                 // page rather than failing the whole run.
                 let (action, typed, dropped_on) = match attempt {
                     Ok(done) => done,
@@ -2415,8 +2415,8 @@ async fn scroll_viewport(page: &Page, fraction: f64) -> Result<()> {
 }
 
 /// Set a `<select>` to its option at `index`, firing input/change so page
-/// scripts observe it. The element is targeted by its just-stamped
-/// `data-jev-id`, and the option by index — labels are clamped to 60 chars
+/// scripts observe it. The element is targeted by its extraction
+/// reference, and the option by index — labels are clamped to 60 chars
 /// for Jev, so matching on text could miss long ones.
 async fn set_select_option(page: &Page, css: &str, index: u64, label: &str) -> Result<()> {
     let decl = format!(
@@ -2499,7 +2499,8 @@ async fn type_into(page: &Page, css: &str, text: &str, clear: bool, delay_ms: u6
 async fn mark_typed(page: &Page, css: &str) {
     let decl = format!(
         "function() {{ {deep} const h = __bsDeep({sel}); \
-         if (h) h.el.setAttribute('data-bs-typed', ''); return !!h; }}",
+         if (h) (globalThis.__bsTyped || (globalThis.__bsTyped = new WeakSet())).add(h.el); \
+         return !!h; }}",
         deep = jev::DEEP_FIND_JS,
         sel = serde_json::to_string(css).unwrap_or_else(|_| "''".to_string()),
     );
@@ -2508,8 +2509,7 @@ async fn mark_typed(page: &Page, css: &str) {
 
 /// Drop the marks an earlier `act` run left, at the start of a new one.
 async fn clear_typed_marks(page: &Page) {
-    let decl = "function() { document.querySelectorAll('[data-bs-typed]')\
-         .forEach(function(el) { el.removeAttribute('data-bs-typed'); }); return true; }";
+    let decl = "function() { globalThis.__bsTyped = new WeakSet(); return true; }";
     let _ = iso_eval_function(page, decl).await;
 }
 

@@ -10,26 +10,23 @@
 //!
 //! ```text
 //! click({ sessionId, selector: "jev: the login button" })
-//!   1. extract the page's interactive elements from the DOM, each stamped
-//!      with a data-jev-id attribute (in-viewport first, cap 240 — below
-//!      Jev's 255-option Choice limit)
-//!   2. one Choice call over those ids, goal in the state string
-//!   3. act on [data-jev-id="<stamp>-e17"] through the same trusted-CDP path
+//!   1. extract the page's interactive elements from the DOM (dialog and
+//!      viewport first), keeping a reference to each in the isolated world
+//!   2. one Choice call over their ids, goal in the state string; a page
+//!      with more than fit one Choice is narrowed in even groups first
+//!   3. act on the referenced element through the same trusted-CDP path
 //! ```
 //!
-//! The DOM stamp carries a random per-extraction token: a concurrent
-//! extraction on the same tab (another `act`, another MCP process) re-stamps
-//! the page, and a stale pick then matches nothing and fails closed instead
-//! of landing on whichever element became "e17" in the newer menu.
+//! The references live in the isolated world, keyed by a random token per
+//! extraction, so nothing is written to the page for its scripts to notice,
+//! and an answer from an earlier extraction (another `act`, another MCP
+//! process on the same tab) still lands on exactly the element it was
+//! offered, never on whatever another menu called "e17".
 //!
 //! Everything fails closed: no key configured, empty page, low confidence,
 //! malformed answer — the tool errors and the caller falls back to a CSS
 //! selector. A Jev answer never turns into coordinates or JS on its own; it
 //! only selects among ids the extraction just offered.
-//!
-//! Stealth note: extraction runs in an isolated world, but the attribute
-//! stamps are DOM mutations a page script could observe through a
-//! MutationObserver — the same trade-off every Jev browser integration makes.
 use anyhow::{Context, Result, anyhow, bail};
 use chromiumoxide::Page;
 use once_cell::sync::Lazy;
@@ -54,12 +51,11 @@ const GROUPS_PER_REQUEST: usize = 4;
 /// Collect interactive elements from the DOM — not the accessibility tree,
 /// which under-reports inputs (DuckDuckGo's search box disappears from it,
 /// for one; both jev-browser and jev-ultrafast hit this and switched to the
-/// DOM). Clears stale `data-jev-id` stamps from earlier calls so a
-/// `[data-jev-id="eN"]` selector can only ever match an element Jev was just
-/// offered, then re-stamps in offer order: in-viewport elements first so the
-/// cap can't crowd them out on long pages. [`MAX_ELEMENTS`] is injected into
-/// the template below so the Rust and JS caps can't drift apart; the stamp
-/// token is injected per call (see [`extract_fn`]).
+/// DOM). Offers them dialog first, then the viewport, then the rest, and
+/// keeps references to them in the isolated world under the call's token
+/// (see [`PageInfo::css`]). [`MAX_ELEMENTS`] is injected into the template
+/// below so the Rust and JS caps can't drift apart; the token is injected
+/// per call (see [`extract_fn`]).
 const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   var MAX = __MAX_ELEMENTS__;
   var STAMP = '__STAMP__';
@@ -164,7 +160,7 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     seen.add(el);
     // A field this act run already filled stays out of the offer while it
     // holds text, so the loop moves on instead of re-picking it.
-    if (SKIP_TYPED && el.hasAttribute('data-bs-typed') && String(el.value || el.innerText || '').trim()) return;
+    if (SKIP_TYPED && globalThis.__bsTyped && globalThis.__bsTyped.has(el) && String(el.value || el.innerText || '').trim()) return;
     if (!el.getClientRects().length) return;
     var st = styleOf(el);
     if (st.visibility === 'hidden' || st.display === 'none') return;
@@ -179,8 +175,6 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   var POINTER = 'th, td, li, span, div, img, label, svg, i, p';
   for (var ri = 0; ri < roots.length; ri++) {
     var R = roots[ri];
-    var stale = R.root.querySelectorAll('[data-jev-id]');
-    for (var k = 0; k < stale.length; k++) stale[k].removeAttribute('data-jev-id');
     var nodes = R.root.querySelectorAll(SEL);
     for (var i = 0; i < nodes.length; i++) consider(nodes[i], R.ox, R.oy);
     // Table headers (often sortable) and sizeable images (hover targets).
@@ -204,10 +198,17 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     }
   }
   var chosen = inDialog.concat(inView, offView).slice(0, MAX);
+  // Keep the offered elements in this isolated world, where page scripts
+  // can't see them, under this extraction's token; actions look them up by
+  // reference (see DEEP_FIND_JS). The last few extractions are kept, so a
+  // late answer still lands on exactly the element it was offered.
+  var store = globalThis.__bsPicks || (globalThis.__bsPicks = { order: [] });
+  store[STAMP] = chosen;
+  store.order.push(STAMP);
+  while (store.order.length > 8) delete store[store.order.shift()];
   var elements = [];
   for (var j = 0; j < chosen.length; j++) {
     var id = 'e' + (j + 1);
-    chosen[j].setAttribute('data-jev-id', STAMP + '-' + id);
     var desc = describe(chosen[j]);
     if (chosen[j].closest(DIALOG)) desc += ' (in dialog)';
     var rec = { id: id, desc: desc };
@@ -256,12 +257,26 @@ fn new_stamp() -> Result<String> {
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// JS that finds the first element matching a CSS selector in the page or,
-/// failing that, in any open shadow root or same-origin iframe (where `act`
-/// stamps elements too), with the offset of its document from the top
-/// viewport. Defines `__bsDeep(sel)` → `{ el, ox, oy }` or `null`; prepend
-/// it to a function body.
+/// JS that finds an element, with the offset of its document from the top
+/// viewport: a `jev-ref:` reference (see [`PageInfo::css`]) to an element an
+/// extraction kept, or else the first match of a CSS selector in the page,
+/// any open shadow root or any same-origin iframe. Defines `__bsDeep(sel)`
+/// → `{ el, ox, oy }` or `null`; prepend it to a function body. Runs in the
+/// isolated world, which holds the references.
 pub const DEEP_FIND_JS: &str = r#"var __bsDeep = function(sel) {
+  var ref = /^jev-ref:([0-9a-f]+):(\d+)$/.exec(sel);
+  if (ref) {
+    var picks = globalThis.__bsPicks && globalThis.__bsPicks[ref[1]];
+    var el = picks && picks[+ref[2]];
+    if (!el || !el.isConnected) return null;
+    var ox = 0, oy = 0, w = el.ownerDocument.defaultView;
+    while (w && w.frameElement) {
+      var fe = w.frameElement, fr = fe.getBoundingClientRect();
+      ox += fr.left + fe.clientLeft; oy += fr.top + fe.clientTop;
+      w = w.parent;
+    }
+    return { el: el, ox: ox, oy: oy };
+  }
   var hit = null;
   var walk = function(root, ox, oy, depth) {
     if (hit || depth > 4) return;
@@ -319,7 +334,7 @@ pub const FINGERPRINT_FN: &str = r#"function() {
 pub struct Resolution {
     /// The chosen element's offered id, e.g. "e17".
     pub element_id: String,
-    /// CSS selector targeting it, e.g. `[data-jev-id="1a2b3c4d-e17"]`.
+    /// Reference to it for the action helpers, e.g. `jev-ref:1a2b3c4d:16`.
     pub css: String,
     /// The chosen element's compact description, for the confirmation text.
     pub description: String,
@@ -437,10 +452,16 @@ impl PageInfo {
         }
     }
 
-    /// CSS selector for an element this extraction offered. Matches nothing
-    /// once a newer extraction has re-stamped the page.
+    /// A reference to an element this extraction offered, for the action
+    /// helpers' [`DEEP_FIND_JS`]: the element itself, kept in the isolated
+    /// world rather than marked in the page. Finds nothing once the element
+    /// left the page or eight newer extractions have run.
     pub fn css(&self, id: &str) -> String {
-        format!("[data-jev-id=\"{}-{id}\"]", self.stamp)
+        let n = id
+            .strip_prefix('e')
+            .and_then(|n| n.parse::<usize>().ok())
+            .map_or(usize::MAX, |n| n - 1);
+        format!("jev-ref:{}:{n}", self.stamp)
     }
 }
 
@@ -965,7 +986,7 @@ fn act_criteria(page: &PageInfo) -> Map<String, Value> {
 /// One `act` step decision: what to do next, plus the side judgments that
 /// all ride the same fan-out request.
 pub struct StepDecision {
-    /// The chosen id: an element's `data-jev-id`, or a pseudo-action name.
+    /// The chosen id: an element's offered id ("e17"), or a pseudo-action name.
     /// Empty when the page offered no interactive elements.
     pub chosen: String,
     /// True when `chosen` names an extracted element.
@@ -1809,6 +1830,6 @@ mod tests {
         assert_eq!(page.omitted, 12);
         assert_eq!(page.text, "Example page text");
         assert!(parse_extraction(&json!({}), "ab12").is_err());
-        assert_eq!(page.css("e2"), "[data-jev-id=\"ab12-e2\"]");
+        assert_eq!(page.css("e2"), "jev-ref:ab12:1");
     }
 }

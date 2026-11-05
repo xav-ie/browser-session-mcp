@@ -501,6 +501,7 @@ JEV_CLICK=$(call click "$(printf '{"sessionId":"%s","selector":"jev: the Log in 
 check "jev: click resolves via the stub" "$JEV_CLICK" 'confidence 0.91'
 check "jev: click names the picked element" "$JEV_CLICK" '#jev-b'
 check "jev: click really clicked it" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'clicked-jev'
+check "jev: leaves no trace the page can see" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"[document.querySelectorAll(%s).length, typeof globalThis.__bsPicks].join()"}' "$SID" "'[data-jev-id], [data-bs-typed]'")")" '"0,undefined"'
 
 check "jev: type picks the email input" "$(call type "$(printf '{"sessionId":"%s","selector":"jev: the Email field","text":"hi@x.io"}' "$SID")")" 'Typed 7 chars into input #jev-in'
 check "jev: type typed into the picked input" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.getElementById(%s).value"}' "$SID" "'jev-in'")")" 'hi@x.io'
