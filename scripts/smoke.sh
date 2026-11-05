@@ -188,8 +188,9 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     marker = "email" if "email" in goal else "log in"
                     order = sorted((k for k in criteria if k.startswith("e")), key=lambda k: int(k[1:]))
+                    fallback = "__none__" if "__none__" in criteria else order[0]
                     choice = next((k for k in order if marker in criteria[k].lower()),
-                                  order[0])
+                                  fallback)
                     other = next((k for k in criteria if k != choice), None)
                     probs = {choice: 0.91}
                     if other:

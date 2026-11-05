@@ -754,35 +754,48 @@ async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resol
     }
     let checked = page_info.elements.len();
     let started = Instant::now();
-    let keep = narrow(
-        &cfg,
-        &build_state(goal, &page_info.subset(&[])),
-        "Which listed element is the best match for what the agent wants to act on? Pick __none__ if none of them is.",
-        &page_info,
-        1,
-        Map::new(),
-    )
-    .await?
-    .0;
-    if keep.is_empty() {
-        bail!(
-            "Jev found nothing matching \"{goal}\" among the page's {checked} elements, so \
-             nothing was acted on. take_snapshot and target an explicit CSS selector"
+    let pick = |info: &PageInfo| {
+        let state = build_state(goal, info);
+        let mut criteria = Map::new();
+        for e in &info.elements {
+            criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
+        }
+        criteria.insert(
+            "__none__".to_string(),
+            Value::String("None of these elements is what the agent wants.".to_string()),
         );
+        let cfg = &cfg;
+        async move { decide(cfg, &state, &criteria).await }
+    };
+    // What a person sees first (dialog and viewport first). Only a big page
+    // whose first look found nothing good enough is narrowed in groups.
+    let shown = checked.min(CHOICE_LIMIT - 1);
+    let mut page_info = page_info;
+    let mut first = page_info.subset(&(0..shown).collect::<Vec<_>>());
+    first.omitted += checked - shown;
+    let (mut element_id, mut confidence, mut input_tokens, mut model) = pick(&first).await?;
+    if checked > shown && (element_id == "__none__" || confidence < floor) {
+        let keep = narrow(
+            &cfg,
+            &build_state(goal, &page_info.subset(&[])),
+            "Which listed element is the best match for what the agent wants to act on? Pick __none__ if none of them is.",
+            &page_info,
+            1,
+            Map::new(),
+        )
+        .await?
+        .0;
+        if keep.is_empty() {
+            bail!(
+                "Jev found nothing matching \"{goal}\" among the page's {checked} elements, so \
+                 nothing was acted on. take_snapshot and target an explicit CSS selector"
+            );
+        }
+        page_info = page_info.subset(&keep);
+        (element_id, confidence, input_tokens, model) = pick(&page_info).await?;
+    } else {
+        page_info = first;
     }
-    let page_info = page_info.subset(&keep);
-
-    let state = build_state(goal, &page_info);
-    let mut criteria = Map::new();
-    for e in &page_info.elements {
-        criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
-    }
-    criteria.insert(
-        "__none__".to_string(),
-        Value::String("None of these elements is what the agent wants.".to_string()),
-    );
-
-    let (element_id, confidence, input_tokens, model) = decide(&cfg, &state, &criteria).await?;
     if element_id == "__none__" {
         bail!(
             "Jev found nothing matching \"{goal}\" among the page's {checked} elements, so \
@@ -972,7 +985,7 @@ fn act_state_head(
 }
 
 /// Criteria for an `act` step Choice: every element plus the pseudo-actions.
-fn act_criteria(page: &PageInfo) -> Map<String, Value> {
+fn act_criteria(page: &PageInfo, not_listed: bool) -> Map<String, Value> {
     let mut criteria = Map::new();
     for e in &page.elements {
         criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
@@ -980,8 +993,21 @@ fn act_criteria(page: &PageInfo) -> Map<String, Value> {
     for (id, desc) in PSEUDO_ACTIONS {
         criteria.insert((*id).to_string(), Value::String((*desc).to_string()));
     }
+    if not_listed {
+        criteria.insert(
+            NOT_LISTED.to_string(),
+            Value::String(
+                "The right element is not listed here; it is among the further elements on the page."
+                    .to_string(),
+            ),
+        );
+    }
     criteria
 }
+
+/// The option a big page's first `act` request offers for "the right
+/// element is among those not listed"; choosing it narrows the whole page.
+const NOT_LISTED: &str = "not_listed";
 
 /// One `act` step decision: what to do next, plus the side judgments that
 /// all ride the same fan-out request.
@@ -1087,12 +1113,44 @@ pub async fn decide_step(
     goal: &str,
     recent: &[String],
     value_keys: &[String],
+    stop_at: f64,
 ) -> Result<StepDecision> {
     let cfg = config()?;
     let mut page_info = extract_with_retry(page, true).await?;
     let reserved = PSEUDO_ACTIONS.len();
-    let mut gates_json = None;
-    if page_info.elements.len() + reserved > CHOICE_LIMIT {
+    if page_info.elements.len() + reserved <= CHOICE_LIMIT {
+        return step_on(&cfg, goal, page_info, recent, value_keys, None, false).await;
+    }
+    // A big page: first offer what a person sees (dialog and viewport first)
+    // with an option to say the right element isn't listed. Most steps end
+    // here, in one request; only a "not listed" or unsure answer pays for
+    // narrowing the whole page in groups.
+    let shown = CHOICE_LIMIT - reserved - 1;
+    let mut first = page_info.subset(&(0..shown).collect::<Vec<_>>());
+    first.omitted += page_info.elements.len() - shown;
+    // The page-level judgments also go out beside the page's text alone, in
+    // parallel: next to a shortlist that still offers the way to the goal,
+    // an achieved goal can read as still to do (see `page_gate_questions`).
+    let head = act_state_head(goal, &page_info, recent, value_keys).join("\n");
+    let gates_only = async {
+        let body = json!({ "model": cfg.model, "state": head, "questions": page_gate_questions() });
+        post_systemone(&cfg, &body).await
+    };
+    let (step, gates) = tokio::join!(
+        step_on(&cfg, goal, first, recent, value_keys, None, true),
+        gates_only
+    );
+    let mut d = step?;
+    let gates = gates?;
+    d.goal_met = d.goal_met.max(parse_noul(&gates, "goal_met")?);
+    d.login = parse_noul(&gates, "login")?;
+    d.error = parse_noul(&gates, "error")?;
+    d.bot_check = parse_noul(&gates, "bot_check")?;
+    if d.goal_met >= stop_at || (d.chosen != NOT_LISTED && d.confidence >= ACT_MIN_CONFIDENCE) {
+        return Ok(d);
+    }
+    let gates_json;
+    {
         let head = act_state_head(goal, &page_info, recent, value_keys).join("\n");
         let (mut keep, first) = narrow(
             &cfg,
@@ -1103,6 +1161,32 @@ pub async fn decide_step(
             page_gate_questions(),
         )
         .await?;
+        // The group request already judged the page: when it reads the goal
+        // as met (at `stop_at`, the caller's stop threshold), the loop will
+        // stop on it, so skip the step's own request.
+        if let Some(json) = &first {
+            if parse_noul(json, "goal_met")? >= stop_at {
+                return Ok(StepDecision {
+                    chosen: String::new(),
+                    is_element: false,
+                    description: String::new(),
+                    confidence: 0.0,
+                    goal_met: parse_noul(json, "goal_met")?,
+                    stuck: 0.0,
+                    login: parse_noul(json, "login")?,
+                    error: parse_noul(json, "error")?,
+                    irreversible: 0.0,
+                    bot_check: parse_noul(json, "bot_check")?,
+                    candidates: Vec::new(),
+                    operation: "click".to_string(),
+                    field_values: std::collections::HashMap::new(),
+                    value_key: None,
+                    next_best: None,
+                    has_elements: true,
+                    page: page_info,
+                });
+            }
+        }
         gates_json = first;
         // Every group said none: offer the page as it reads, dialog and
         // viewport first, and let the step scroll, wait or go back.
@@ -1111,10 +1195,26 @@ pub async fn decide_step(
         }
         page_info = page_info.subset(&keep);
     }
+    step_on(&cfg, goal, page_info, recent, value_keys, gates_json, false).await
+}
+
+/// The step request over `page_info`'s elements: the element Choice and
+/// everything that rides along. `gates_json` carries page-level judgments
+/// from a group request, when the page was narrowed; `not_listed` adds the
+/// option to say the right element is among those left out.
+async fn step_on(
+    cfg: &Config,
+    goal: &str,
+    page_info: PageInfo,
+    recent: &[String],
+    value_keys: &[String],
+    gates_json: Option<Value>,
+    not_listed: bool,
+) -> Result<StepDecision> {
     let has_elements = !page_info.elements.is_empty();
 
     let state = build_act_state(goal, &page_info, recent, value_keys);
-    let criteria = act_criteria(&page_info);
+    let criteria = act_criteria(&page_info, not_listed);
     let mut questions = Map::new();
     if has_elements {
         questions.insert(
@@ -1204,7 +1304,7 @@ pub async fn decide_step(
         "state": state,
         "questions": questions
     });
-    let json = post_systemone(&cfg, &body).await?;
+    let json = post_systemone(cfg, &body).await?;
     let gates = gates_json.as_ref().unwrap_or(&json);
     // Goal met is asked both ways on a narrowed page and the higher answer
     // counts: the page text alone misses a goal named only by a `values` key
@@ -1682,8 +1782,10 @@ mod tests {
             omitted: 0,
             stamp: "ab12".to_string(),
         };
-        let criteria = act_criteria(&page);
+        let criteria = act_criteria(&page, false);
         assert_eq!(criteria.len(), CHOICE_LIMIT);
+        let page = page.subset(&(0..CHOICE_LIMIT - PSEUDO_ACTIONS.len() - 1).collect::<Vec<_>>());
+        assert_eq!(act_criteria(&page, true).len(), CHOICE_LIMIT);
         assert!(criteria.contains_key("scroll_down"));
         assert!(criteria.contains_key("back"));
     }

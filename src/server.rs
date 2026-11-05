@@ -443,7 +443,15 @@ impl BrowserSessionServer {
                 .filter(|k| !typed_keys.contains(k))
                 .cloned()
                 .collect();
-            let d = match jev::decide_step(&page, &goal, &recent, &untyped).await {
+            // The goal-met level this step would stop at, so a big page's
+            // group request can end the run without a second request.
+            let just_typed = steps.last().is_some_and(|s| s.action == "type");
+            let stop_at = if !steps.is_empty() && !just_typed {
+                ACT_LIKELY_GATE
+            } else {
+                ACT_GATE
+            };
+            let d = match jev::decide_step(&page, &goal, &recent, &untyped, stop_at).await {
                 Ok(d) => d,
                 Err(e) => bail!("act failed at step {step}: {e:#}; {}", trail(&steps)),
             };
@@ -469,7 +477,6 @@ impl BrowserSessionServer {
             // a suggestion before it is opened, and read as done. A goal
             // that typing does finish still ends likely_completed at the
             // next stop.
-            let just_typed = steps.last().is_some_and(|s| s.action == "type");
             if !steps.is_empty() && !just_typed && d.goal_met >= ACT_LIKELY_GATE {
                 return Ok(act_done(
                     "likely_completed",
