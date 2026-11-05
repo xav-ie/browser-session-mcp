@@ -658,58 +658,71 @@ async fn narrow(
     instructions: &str,
     page: &PageInfo,
     reserved: usize,
-) -> Result<Vec<usize>> {
+    extra: Map<String, Value>,
+) -> Result<(Vec<usize>, Option<Value>)> {
     let n = page.elements.len();
     if n + reserved <= CHOICE_LIMIT {
-        return Ok((0..n).collect());
+        return Ok(((0..n).collect(), None));
     }
     let groups = even_groups(n, CHOICE_LIMIT - 1);
-    let requests = groups.chunks(GROUPS_PER_REQUEST).map(|batch| async move {
-        let mut questions = Map::new();
-        for (g, range) in batch.iter().enumerate() {
-            let mut criteria = Map::new();
-            for e in &page.elements[range.clone()] {
-                criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
+    let extra = &extra;
+    let requests = groups
+        .chunks(GROUPS_PER_REQUEST)
+        .enumerate()
+        .map(|(r, batch)| async move {
+            let mut questions = if r == 0 { extra.clone() } else { Map::new() };
+            for (g, range) in batch.iter().enumerate() {
+                let mut criteria = Map::new();
+                for e in &page.elements[range.clone()] {
+                    criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
+                }
+                criteria.insert(
+                    "__none__".to_string(),
+                    Value::String("None of these elements fits.".to_string()),
+                );
+                questions.insert(
+                    format!("g{g}"),
+                    json!({ "type": "choice", "instructions": instructions, "criteria": criteria }),
+                );
             }
-            criteria.insert(
-                "__none__".to_string(),
-                Value::String("None of these elements fits.".to_string()),
-            );
-            questions.insert(
-                format!("g{g}"),
-                json!({ "type": "choice", "instructions": instructions, "criteria": criteria }),
-            );
-        }
-        let body = json!({ "model": cfg.model, "state": state, "questions": questions });
-        let json = post_systemone(cfg, &body).await?;
-        let mut picked = Vec::new();
-        for (g, range) in batch.iter().enumerate() {
-            let mut ids: Vec<&str> = page.elements[range.clone()]
-                .iter()
-                .map(|e| e.id.as_str())
-                .collect();
-            ids.push("__none__");
-            let answer = parse_choice(&json, &format!("g{g}"), &ids)?;
-            let top_two = std::iter::once(answer.chosen.clone())
-                .chain(answer.ranked.into_iter().map(|(id, _)| id))
-                .filter(|id| id != "__none__")
-                .take(2);
-            picked.extend(top_two);
-        }
-        Ok::<_, anyhow::Error>(picked)
-    });
-    let picked: Vec<String> = futures::future::try_join_all(requests)
+            let body = json!({ "model": cfg.model, "state": state, "questions": questions });
+            let json = post_systemone(cfg, &body).await?;
+            let mut picked = Vec::new();
+            for (g, range) in batch.iter().enumerate() {
+                let mut ids: Vec<&str> = page.elements[range.clone()]
+                    .iter()
+                    .map(|e| e.id.as_str())
+                    .collect();
+                ids.push("__none__");
+                let answer = parse_choice(&json, &format!("g{g}"), &ids)?;
+                let top_two = std::iter::once(answer.chosen.clone())
+                    .chain(answer.ranked.into_iter().map(|(id, _)| id))
+                    .filter(|id| id != "__none__")
+                    .take(2);
+                picked.extend(top_two);
+            }
+            Ok::<_, anyhow::Error>((picked, json))
+        });
+    let mut first = None;
+    let mut picked: Vec<String> = Vec::new();
+    for (r, (ids, json)) in futures::future::try_join_all(requests)
         .await?
         .into_iter()
-        .flatten()
-        .collect();
-    Ok(page
+        .enumerate()
+    {
+        picked.extend(ids);
+        if r == 0 {
+            first = Some(json);
+        }
+    }
+    let keep = page
         .elements
         .iter()
         .enumerate()
         .filter(|(_, e)| picked.contains(&e.id))
         .map(|(i, _)| i)
-        .collect())
+        .collect();
+    Ok((keep, first))
 }
 
 async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resolution> {
@@ -726,8 +739,10 @@ async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resol
         "Which listed element is the best match for what the agent wants to act on? Pick __none__ if none of them is.",
         &page_info,
         1,
+        Map::new(),
     )
-    .await?;
+    .await?
+    .0;
     if keep.is_empty() {
         bail!(
             "Jev found nothing matching \"{goal}\" among the page's {checked} elements, so \
@@ -1007,6 +1022,31 @@ impl StepDecision {
     }
 }
 
+/// The judgments about the page itself in an `act` step: goal met, a login,
+/// error or bot check page. On a page narrowed in groups they are also asked
+/// in the group request, beside the page's text alone: next to the
+/// goal-picked shortlist, an achieved goal could read as still to do.
+fn page_gate_questions() -> Map<String, Value> {
+    let mut q = Map::new();
+    q.insert(
+        "goal_met".to_string(),
+        json!({ "type": "noul", "instructions": "The goal has already been fully achieved on the current page." }),
+    );
+    q.insert(
+        "login".to_string(),
+        json!({ "type": "noul", "instructions": "A sign-in wall, login form, or authentication prompt is blocking progress toward the goal." }),
+    );
+    q.insert(
+        "error".to_string(),
+        json!({ "type": "noul", "instructions": "The page shows an error, rejection, or failure message relevant to the goal." }),
+    );
+    q.insert(
+        "bot_check".to_string(),
+        json!({ "type": "noul", "instructions": "The page is a CAPTCHA, a 'verify you are human' check, or another bot challenge instead of the site's content." }),
+    );
+    q
+}
+
 /// Ask Jev for the next `act` step. One fan-out request carries the element
 /// Choice, the goal-met / stuck / login / error / irreversible / bot-check
 /// Nouls, and, speculatively, the value-to-type Choice: up to eight decisions,
@@ -1022,16 +1062,19 @@ pub async fn decide_step(
     let cfg = config()?;
     let mut page_info = extract_with_retry(page, true).await?;
     let reserved = PSEUDO_ACTIONS.len();
+    let mut gates_json = None;
     if page_info.elements.len() + reserved > CHOICE_LIMIT {
         let head = act_state_head(goal, &page_info, recent, value_keys).join("\n");
-        let mut keep = narrow(
+        let (mut keep, first) = narrow(
             &cfg,
             &head,
             "Which listed element is the best next step toward the goal? Pick __none__ if none of them helps.",
             &page_info,
             reserved,
+            page_gate_questions(),
         )
         .await?;
+        gates_json = first;
         // Every group said none: offer the page as it reads, dialog and
         // viewport first, and let the step scroll, wait or go back.
         if keep.is_empty() {
@@ -1054,32 +1097,12 @@ pub async fn decide_step(
             }),
         );
     }
-    questions.insert(
-        "goal_met".to_string(),
-        json!({
-            "type": "noul",
-            "instructions": "The goal has already been fully achieved on the current page."
-        }),
-    );
+    questions.extend(page_gate_questions());
     questions.insert(
         "stuck".to_string(),
         json!({
             "type": "noul",
             "instructions": "None of the listed elements or actions can make any progress toward the goal."
-        }),
-    );
-    questions.insert(
-        "login".to_string(),
-        json!({
-            "type": "noul",
-            "instructions": "A sign-in wall, login form, or authentication prompt is blocking progress toward the goal."
-        }),
-    );
-    questions.insert(
-        "error".to_string(),
-        json!({
-            "type": "noul",
-            "instructions": "The page shows an error, rejection, or failure message relevant to the goal."
         }),
     );
     if has_elements {
@@ -1101,13 +1124,6 @@ pub async fn decide_step(
         json!({
             "type": "noul",
             "instructions": "The best next step toward the goal would place an order, make a payment, send a message, publish, or delete something, which cannot be undone."
-        }),
-    );
-    questions.insert(
-        "bot_check".to_string(),
-        json!({
-            "type": "noul",
-            "instructions": "The page is a CAPTCHA, a 'verify you are human' check, or another bot challenge instead of the site's content."
         }),
     );
     let mut value_criteria = Map::new();
@@ -1137,12 +1153,16 @@ pub async fn decide_step(
         "questions": questions
     });
     let json = post_systemone(&cfg, &body).await?;
-    let goal_met = parse_noul(&json, "goal_met")?;
+    let gates = gates_json.as_ref().unwrap_or(&json);
+    // Goal met is asked both ways on a narrowed page and the higher answer
+    // counts: the page text alone misses a goal named only by a `values` key
+    // ("search for the article"), the shortlist beside a goal it just met.
+    let goal_met = parse_noul(gates, "goal_met")?.max(parse_noul(&json, "goal_met")?);
     let stuck = parse_noul(&json, "stuck")?;
-    let login = parse_noul(&json, "login")?;
-    let error = parse_noul(&json, "error")?;
+    let login = parse_noul(gates, "login")?;
+    let error = parse_noul(gates, "error")?;
     let irreversible = parse_noul(&json, "irreversible")?;
-    let bot_check = parse_noul(&json, "bot_check")?;
+    let bot_check = parse_noul(gates, "bot_check")?;
     let mut candidates = Vec::new();
     let mut chosen = String::new();
     let mut is_element = false;
