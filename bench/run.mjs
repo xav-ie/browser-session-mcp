@@ -7,7 +7,7 @@
 // "likely_done".
 //
 //   BROWSER_URL=http://localhost:9222 TYPESAFE_API_KEY=... node bench/run.mjs \
-//     [--set base,hard,guard,peers,heldout1,heldout2,local|all] [--only id,id] [--concurrency 3] [--out file.json]
+//     [--set base,hard,guard,peers,heldout1,heldout2,mobile,carousel,local|all] [--mobile] [--only id,id] [--concurrency 3] [--out file.json]
 //
 // MCP_BIN defaults to target/release/browser-session. STATE_DIR defaults to
 // a temporary directory.
@@ -18,6 +18,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { HELDOUT1, HELDOUT2 } from "./heldout.mjs";
+import { CAROUSEL, MOBILE } from "./mobile.mjs";
 import { GUARD, HARD, PEERS, TASKS } from "./tasks.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -36,6 +37,8 @@ const SETS = {
   peers: PEERS,
   heldout1: HELDOUT1,
   heldout2: HELDOUT2,
+  mobile: MOBILE,
+  carousel: CAROUSEL,
   local: LOCAL,
 };
 const set = arg("--set", "all");
@@ -44,6 +47,8 @@ const only = arg("--only")?.split(",");
 const tasks = pool.filter((t) => !only || only.includes(t.id));
 const concurrency = Number(arg("--concurrency", 3));
 const out = arg("--out");
+// --mobile opens every task in a touch phone session (useMobileUA, 390x844).
+const mobile = process.argv.includes("--mobile");
 
 // ---- a minimal MCP stdio client ----------------------------------------
 const server = spawn(process.env.MCP_BIN ?? path.join(root, "target/release/browser-session"), ["mcp"], {
@@ -89,7 +94,12 @@ async function runTask(t) {
   const started = Date.now();
   let sessionId;
   try {
-    sessionId = (await call("open_browser_session", {})).sessionId;
+    sessionId = (
+      await call(
+        "open_browser_session",
+        mobile ? { useMobileUA: true, viewport: { width: 390, height: 844 } } : {},
+      )
+    ).sessionId;
     await call("navigate", { sessionId, url: t.url, timeout: 30000 });
     for (const s of t.steps) {
       const t0 = Date.now();

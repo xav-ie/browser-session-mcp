@@ -210,6 +210,8 @@ cheaply and often, and around what to do with an answer that isn't certain.
 - The goal or question, the page's URL and title, and its visible text (an
   open dialog's text first). `act` and selectors send up to 1,500 characters
   of it, `ask` up to 20,000, and `read` all of it, a passage per question.
+  For `act` and selectors, text scrolled sideways out of view (the other
+  slides of a carousel) is left out, so Jev can tell which slide shows.
 - For picks, one line per element: tag, id, role, its label, whether it is
   checked, expanded or selected, and a link's `href`.
 - For `act`, the steps taken so far and the keys of `values`.
@@ -260,6 +262,10 @@ coordinates or JavaScript.
   another site.
 - **Past 5,000 elements**, the rest are left out and Jev is told how many.
 - **Verify the end state.** `completed` is Jev's opinion.
+- **Carousels far down a page.** `act` judges a goal by the first 1,500
+  characters of text, so it can't tell which slide shows in a carousel
+  below that, and on a page of many alike carousels it may use another
+  one's buttons.
 
 ## How it compares
 
@@ -323,6 +329,29 @@ median time:
 
 jev-ultrafast is the fastest: it waits about 50 ms after an action, where
 `act` waits 300 ms for the page to react.
+
+### On phones
+
+In a session opened with `useMobileUA`, `act` taps and swipes like a
+finger. To measure it, we wrote 13 phone tasks (menus, search, forms,
+carousels, and one that should fail) before running `act` on them, and ran
+them as a phone session (390 by 844) and as a desktop session, 3 runs each,
+on 2026-11-06. The tasks are in [`bench/mobile.mjs`](../bench/mobile.mjs)
+(`node bench/run.mjs --set mobile --mobile`).
+
+| | tasks right | wrongly claimed done |
+|---|---|---|
+| phone session | 39 of 39 | 0 |
+| desktop session | 27 of 39 | 3 |
+
+The desktop session misses the three carousel tasks, since it can't swipe
+and the carousel ignores the arrow keys, and opens the wrong menu on
+Wikipedia, which serves desktops another layout; those are the 3 wrong
+claims. The carousel tasks shaped the change that leaves slides out of view
+out of the text: before it, the phone session got 34 of 39. Seven carousel
+tasks written afterwards on other libraries' pages
+([`CAROUSEL`](../bench/mobile.mjs), `--set carousel`) scored 0 to 2 of 7
+with or without it, for the reasons under [Limits](#limits).
 
 ## Tuning
 
