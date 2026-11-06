@@ -361,6 +361,69 @@ impl BrowserSessionServer {
         Ok(ok_text(format!("Scrolled (deltaX={dx}, deltaY={dy})")))
     }
 
+    async fn tap(&self, args: JsonObject) -> Result<Text> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let page = sessions.active_page(&session_id).await?;
+        let (at, label) = if let Some(sel) = optional_str(&args, "selector") {
+            let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
+            let (css, note) = resolve_and_wait(&page, sel, timeout).await?;
+            (element_center(&page, &css).await?, note.unwrap_or(css))
+        } else if let (Some(x), Some(y)) = (optional_f64(&args, "x"), optional_f64(&args, "y")) {
+            ((x, y), format!("({x}, {y})"))
+        } else {
+            bail!("tap requires either `selector` or both `x` and `y`");
+        };
+        touch_tap(&page, at)
+            .await
+            .with_context(|| format!("tapping {label}"))?;
+        Ok(ok_text(format!("Tapped {label}")))
+    }
+
+    async fn swipe(&self, args: JsonObject) -> Result<Text> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let page = sessions.active_page(&session_id).await?;
+        let vp = sessions.viewport(&session_id).await;
+        let (from, label) = if let Some(sel) = optional_str(&args, "selector") {
+            let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
+            let (css, note) = resolve_and_wait(&page, sel, timeout).await?;
+            (element_center(&page, &css).await?, note.unwrap_or(css))
+        } else if let (Some(x), Some(y)) = (optional_f64(&args, "x"), optional_f64(&args, "y")) {
+            ((x, y), format!("({x}, {y})"))
+        } else {
+            let mid = (vp.width as f64 / 2.0, vp.height as f64 / 2.0);
+            (mid, "the middle of the screen".to_string())
+        };
+        let to = if let (Some(x), Some(y)) =
+            (optional_f64(&args, "toX"), optional_f64(&args, "toY"))
+        {
+            (x, y)
+        } else {
+            let direction = optional_str(&args, "direction").ok_or_else(|| {
+                anyhow!("swipe needs a `direction` (left, right, up, down) or both `toX` and `toY`")
+            })?;
+            let along_x = matches!(direction, "left" | "right");
+            let default = 0.6 * if along_x { vp.width } else { vp.height } as f64;
+            let d = optional_f64(&args, "distance").unwrap_or(default);
+            match direction {
+                "left" => (from.0 - d, from.1),
+                "right" => (from.0 + d, from.1),
+                "up" => (from.0, from.1 - d),
+                "down" => (from.0, from.1 + d),
+                other => bail!("unknown direction `{other}` (use left, right, up or down)"),
+            }
+        };
+        let duration = optional_u64(&args, "durationMs").unwrap_or(300);
+        touch_swipe(&page, from, to, duration)
+            .await
+            .with_context(|| format!("swiping from {label}"))?;
+        Ok(ok_text(format!(
+            "Swiped from {label} to ({:.0}, {:.0}) over {duration}ms",
+            to.0, to.1
+        )))
+    }
+
     async fn move_mouse(&self, args: JsonObject) -> Result<Text> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
@@ -517,6 +580,10 @@ impl BrowserSessionServer {
             );
         }
         let confirm_irreversible = optional_bool(&args, "confirmIrreversible").unwrap_or(false);
+        // A mobile session gets touch input: taps for clicks, finger drags,
+        // and swipes as actions of their own.
+        let touch = sessions.is_mobile(&session_id).await;
+        let vp = sessions.viewport(&session_id).await;
         let mut page = page;
         let floor = jev::ACT_MIN_CONFIDENCE;
         let mut steps: Vec<ActStep> = Vec::new();
@@ -551,7 +618,7 @@ impl BrowserSessionServer {
             } else {
                 ACT_GATE
             };
-            let d = match jev::decide_step(&page, &goal, &recent, &untyped, stop_at).await {
+            let d = match jev::decide_step(&page, &goal, &recent, &untyped, stop_at, touch).await {
                 Ok(d) => d,
                 Err(e) => bail!("act failed at step {step}: {e:#}; {}", trail(&steps)),
             };
@@ -635,9 +702,11 @@ impl BrowserSessionServer {
                     extra(vec![], None),
                 ));
             }
-            if !d.has_elements {
-                // Usually a page mid-navigation: give it a moment before
-                // calling the page empty.
+            // A page with no elements is usually mid-navigation: give it a
+            // moment before calling it empty, unless Jev picked an action
+            // that needs no element (a swipe on a carousel of plain slides,
+            // a scroll, a key).
+            if !d.has_elements && (d.chosen == "wait" || d.confidence < floor) {
                 empty_reads += 1;
                 if empty_reads <= ACT_EMPTY_RETRIES {
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -792,11 +861,27 @@ impl BrowserSessionServer {
                             if let Some(target) = target {
                                 let from = element_center(&page, &css).await?;
                                 let to = element_center(&page, &d.page.css(&target)).await?;
-                                drag(&page, from, to).await?;
+                                if touch {
+                                    touch_swipe(&page, from, to, 400).await?;
+                                } else {
+                                    drag(&page, from, to).await?;
+                                }
                                 return Ok(("drag".to_string(), None, Some(d.describe(&target))));
                             }
                         }
+                        "swipe" if touch => {
+                            let from = element_center(&page, &css).await?;
+                            touch_swipe(&page, from, swipe_end(from, &d.direction, vp), 300)
+                                .await?;
+                            return Ok((format!("swipe_{}", d.direction), None, None));
+                        }
                         _ => {}
+                    }
+                    if touch {
+                        touch_tap(&page, element_center(&page, &css).await?)
+                            .await
+                            .with_context(|| format!("tapping {}", el.desc))?;
+                        return Ok(("tap".to_string(), None, None));
                     }
                     click_label(&page, &css, &el.desc).await?;
                     Ok(("click".to_string(), None, None))
@@ -846,6 +931,11 @@ impl BrowserSessionServer {
                     "back" => go_back(&page).await?,
                     "wait" => tokio::time::sleep(Duration::from_millis(500)).await,
                     "press_key" => dispatch_key(&page, &d.key).await?,
+                    swipe if touch && swipe.starts_with("swipe_") => {
+                        let mid = (vp.width as f64 / 2.0, vp.height as f64 / 2.0);
+                        let direction = swipe.trim_start_matches("swipe_");
+                        touch_swipe(&page, mid, swipe_end(mid, direction, vp), 300).await?
+                    }
                     other => bail!("Jev chose `{other}`, which is not one of the offered actions"),
                 }
                 (
@@ -1647,6 +1737,8 @@ tools! {
     "ask" => ask,
     "read" => read,
     "click" => click,
+    "tap" => tap,
+    "swipe" => swipe,
     "type" => type_text,
     "press_key" => press_key,
     "scroll" => scroll,
@@ -2764,6 +2856,76 @@ async fn element_center(page: &Page, selector: &str) -> Result<(f64, f64)> {
     Ok((x, y))
 }
 
+/// Where a swipe from `from` ends: 60% of the screen along `direction`.
+fn swipe_end(from: (f64, f64), direction: &str, vp: Viewport) -> (f64, f64) {
+    let (dx, dy) = (0.6 * vp.width as f64, 0.6 * vp.height as f64);
+    match direction {
+        "right" => (from.0 + dx, from.1),
+        "up" => (from.0, from.1 - dy),
+        "down" => (from.0, from.1 + dy),
+        _ => (from.0 - dx, from.1),
+    }
+}
+
+/// `Input.dispatchTouchEvent` with `touchPoints` always sent. The generated
+/// params drop an empty list, and Chrome rejects a touchEnd without the field
+/// ("Invalid parameters"), though a lift has no points.
+#[derive(Debug, Clone, Serialize)]
+struct TouchEvent {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    #[serde(rename = "touchPoints")]
+    touch_points: Vec<Value>,
+}
+
+impl chromiumoxide::Method for TouchEvent {
+    fn identifier(&self) -> chromiumoxide::types::MethodId {
+        "Input.dispatchTouchEvent".into()
+    }
+}
+
+impl chromiumoxide::Command for TouchEvent {
+    type Response = Value;
+}
+
+/// One CDP touch event; `point` is the finger's position, `None` on lift.
+async fn touch_event(page: &Page, kind: &'static str, point: Option<(f64, f64)>) -> Result<()> {
+    let touch_points = point.map_or_else(Vec::new, |(x, y)| vec![json!({ "x": x, "y": y })]);
+    page.execute(TouchEvent { kind, touch_points })
+        .await
+        .context("Input.dispatchTouchEvent")?;
+    Ok(())
+}
+
+/// Tap a point with a finger: touch down, a moment, lift. The page gets
+/// touch and pointer events (`pointerType: "touch"`) and the click a tap
+/// makes.
+async fn touch_tap(page: &Page, at: (f64, f64)) -> Result<()> {
+    touch_event(page, "touchStart", Some(at)).await?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    touch_event(page, "touchEnd", None).await
+}
+
+/// Drag a finger from one point to another over `duration_ms`, in steps of
+/// about one frame, then lift: a swipe, or a partial drag when short and
+/// slow.
+async fn touch_swipe(
+    page: &Page,
+    from: (f64, f64),
+    to: (f64, f64),
+    duration_ms: u64,
+) -> Result<()> {
+    let steps = (duration_ms / 16).clamp(5, 120);
+    touch_event(page, "touchStart", Some(from)).await?;
+    for i in 1..=steps {
+        let t = i as f64 / steps as f64;
+        let at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+        tokio::time::sleep(Duration::from_millis(duration_ms / steps)).await;
+        touch_event(page, "touchMove", Some(at)).await?;
+    }
+    touch_event(page, "touchEnd", None).await
+}
+
 /// One CDP mouse event at a viewport point.
 async fn mouse_event(
     page: &Page,
@@ -3110,7 +3272,7 @@ fn tool_defs() -> Vec<Tool> {
     vec![
         tool(
             "open_browser_session",
-            "Open a new isolated browser session and return its sessionId; call this first, then pass the id to every other tool. Each session is its own Chrome BrowserContext with separate cookies, storage and tabs, so sessions never see each other, and it starts with one blank tab. Don't open a new session per page: reuse one and use new_page for more tabs. To start logged in, follow with load_browser_state before navigate. Set `viewport` for a specific window size and `useMobileUA` to look like a phone; both are fixed for the session's life. Sessions persist until close_browser_session, or until the reaper role closes ones idle for MAX_IDLE_HOURS (default 24). Fails if Chrome is unreachable at BROWSER_URL.",
+            "Open a new isolated browser session and return its sessionId; call this first, then pass the id to every other tool. Each session is its own Chrome BrowserContext with separate cookies, storage and tabs, so sessions never see each other, and it starts with one blank tab. Don't open a new session per page: reuse one and use new_page for more tabs. To start logged in, follow with load_browser_state before navigate. Set `viewport` for a specific window size and `useMobileUA` to be a phone: a mobile User-Agent and client hints, mobile device metrics (the page's viewport meta applies) and a touch screen (navigator.maxTouchPoints, touch events, pointer: coarse), so sites pick their touch behavior; use tap and swipe on it, and act taps and swipes on its own. Both are fixed for the session's life. Sessions persist until close_browser_session, or until the reaper role closes ones idle for MAX_IDLE_HOURS (default 24). Fails if Chrome is unreachable at BROWSER_URL.",
             object_schema(
                 &[
                     (
@@ -3121,7 +3283,7 @@ fn tool_defs() -> Vec<Tool> {
                     (
                         "useMobileUA",
                         &bool_t,
-                        "Send a mobile User-Agent and client hints instead of desktop ones. Default false.",
+                        "Emulate a phone: a mobile User-Agent and client hints, mobile device metrics and a touch screen. Pair it with a phone-sized viewport such as 390x844. Default false.",
                     ),
                 ],
                 &[],
@@ -3234,7 +3396,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "act",
-            "Act toward a goal on the session's active tab in one call: the server extracts the page's interactive elements (including open shadow roots and same-origin iframes) and visible text, asks the Jev decision model for the next step, does it (click, type, select, hover, right-click, drag, scroll, back, wait, or press a key such as Enter, Escape, Tab or an arrow), and repeats until the goal reads achieved, nothing looks able to make progress, or the step budget runs out. Each step is one cheap Jev request (~150 to 500 ms), not a driving-LLM round trip, so multi-step flows take seconds and fractions of a cent. Pass `values` (e.g. { query: \"Oolong\" }) for anything to type: Jev only sees the keys and picks which field each belongs to; the text goes straight to the page, so secrets never reach a model. JavaScript dialogs are accepted and listed in `dialogs`, and a link that opens a new tab is followed there. Needs TYPESAFE_API_KEY; every step lands on an element the extraction just offered, and when Jev isn't sure of a step it stops with status `uncertain` and the `candidates` it was weighing instead of guessing. `status` is completed, likely_completed (Jev leaned toward done but wasn't sure), uncertain, stuck, needs_login (pair with request_human_takeover or load_browser_state; a run with `values` keeps going at a login form), needs_human (a CAPTCHA or bot check; use request_human_takeover), needs_confirmation (only with confirmIrreversible; `pending` names the click it held back), blocked (an error page), no_progress or max_steps. Returns a per-step trace with confidences. Jev can be eager to call a goal met: verify with take_snapshot or take_screenshot afterwards. For a single action, click/type with a plain-language selector is cheaper.",
+            "Act toward a goal on the session's active tab in one call: the server extracts the page's interactive elements (including open shadow roots and same-origin iframes) and visible text, asks the Jev decision model for the next step, does it (click, type, select, hover, right-click, drag, scroll, back, wait, or press a key such as Enter, Escape, Tab or an arrow; on a mobile session it taps instead of clicking, drags with a finger, and can swipe an element or the screen), and repeats until the goal reads achieved, nothing looks able to make progress, or the step budget runs out. Each step is one cheap Jev request (~150 to 500 ms), not a driving-LLM round trip, so multi-step flows take seconds and fractions of a cent. Pass `values` (e.g. { query: \"Oolong\" }) for anything to type: Jev only sees the keys and picks which field each belongs to; the text goes straight to the page, so secrets never reach a model. JavaScript dialogs are accepted and listed in `dialogs`, and a link that opens a new tab is followed there. Needs TYPESAFE_API_KEY; every step lands on an element the extraction just offered, and when Jev isn't sure of a step it stops with status `uncertain` and the `candidates` it was weighing instead of guessing. `status` is completed, likely_completed (Jev leaned toward done but wasn't sure), uncertain, stuck, needs_login (pair with request_human_takeover or load_browser_state; a run with `values` keeps going at a login form), needs_human (a CAPTCHA or bot check; use request_human_takeover), needs_confirmation (only with confirmIrreversible; `pending` names the click it held back), blocked (an error page), no_progress or max_steps. Returns a per-step trace with confidences. Jev can be eager to call a goal met: verify with take_snapshot or take_screenshot afterwards. For a single action, click/type with a plain-language selector is cheaper.",
             object_schema(
                 &[
                     session_id,
@@ -3337,6 +3499,96 @@ fn tool_defs() -> Vec<Tool> {
             writes(true, true),
         ),
         tool(
+            "tap",
+            "Tap in the session's active tab with a finger: real CDP touch input, so the page gets touch events, pointer events with pointerType \"touch\" and the click a tap makes. Use it on mobile sessions (open_browser_session with useMobileUA, which also makes the page see a touch screen) for anything a phone user would tap; click sends mouse input instead. Pass a CSS `selector` (or plain words, resolved by Jev as for click) to tap the first match's center after waiting up to `timeout` for it, or both `x` and `y` for viewport coordinates. A tap can submit forms or trigger purchases, like a real user's. Returns a confirmation naming what was tapped.",
+            object_schema(
+                &[
+                    session_id,
+                    (
+                        "selector",
+                        &str_t,
+                        "CSS selector of the element to tap; the first match is used. Or describe it in plain words, as for click.",
+                    ),
+                    (
+                        "x",
+                        &num_t,
+                        "Horizontal viewport coordinate in CSS pixels, used with `y` when no selector is given.",
+                    ),
+                    (
+                        "y",
+                        &num_t,
+                        "Vertical viewport coordinate in CSS pixels, used with `x` when no selector is given.",
+                    ),
+                    (
+                        "timeout",
+                        &pos_int_t,
+                        "Milliseconds to wait for `selector` to appear. Default 5000.",
+                    ),
+                ],
+                &["sessionId"],
+            ),
+            writes(true, true),
+        ),
+        tool(
+            "swipe",
+            "Swipe a finger across the session's active tab with real CDP touch input (touchstart, touchmove, touchend, and the matching pointer events), e.g. to close a drawer, move a carousel, pull to refresh or scroll the way a phone does. Start on an element (`selector`, or plain words as for click), at `x`,`y`, or by default the middle of the screen; end `distance` pixels away in `direction` (default 60% of the screen along that axis) or exactly at `toX`,`toY`. `durationMs` sets the speed (default 300): short and slow drags a drawer partway, to check it snaps back. Use it on mobile sessions (open_browser_session with useMobileUA); pages that listen only for mouse events won't react. Returns where the swipe started and ended.",
+            object_schema(
+                &[
+                    session_id,
+                    (
+                        "selector",
+                        &str_t,
+                        "Element to start on (its center): a CSS selector, or plain words as for click.",
+                    ),
+                    (
+                        "x",
+                        &num_t,
+                        "Start, horizontal viewport coordinate, used with `y` when no selector is given.",
+                    ),
+                    (
+                        "y",
+                        &num_t,
+                        "Start, vertical viewport coordinate, used with `x` when no selector is given.",
+                    ),
+                    (
+                        "direction",
+                        &obj(&[
+                            ("type", Value::String("string".into())),
+                            ("enum", json!(["left", "right", "up", "down"])),
+                        ]),
+                        "Which way the finger moves. Needed unless `toX` and `toY` are given.",
+                    ),
+                    (
+                        "distance",
+                        &num_t,
+                        "How far to move in `direction`, in CSS pixels. Default 60% of the screen's width (left, right) or height (up, down).",
+                    ),
+                    (
+                        "toX",
+                        &num_t,
+                        "End, horizontal viewport coordinate, with `toY`; overrides `direction`.",
+                    ),
+                    (
+                        "toY",
+                        &num_t,
+                        "End, vertical viewport coordinate, with `toX`; overrides `direction`.",
+                    ),
+                    (
+                        "durationMs",
+                        &pos_int_t,
+                        "How long the finger takes to move, in milliseconds. Default 300.",
+                    ),
+                    (
+                        "timeout",
+                        &pos_int_t,
+                        "Milliseconds to wait for `selector` to appear. Default 5000.",
+                    ),
+                ],
+                &["sessionId"],
+            ),
+            writes(true, true),
+        ),
+        tool(
             "type",
             "Type text into the first element matching a CSS selector in the session's active tab: waits up to `timeout` for it, clicks it to focus, then sends real key events for each character, so the page's input handlers fire. Plain language works too: a `jev:` prefix (e.g. `jev: the email field`) goes straight to the Jev decision model, and with TYPESAFE_API_KEY set on the server a selector that matches nothing as CSS is retried as a plain-language goal — Jev picks the input from the page's interactive elements (it errors rather than guesses); the text itself always comes from you. Use press_key afterwards for Enter or Tab, and press_key alone for single keys. `clear` empties the field first; without it, text is appended. `delay` paces the characters for pages that react to typing speed. It doesn't check that the element is editable: typing into a button or plain text reports success but changes nothing, so target an input, textarea or contenteditable element. Returns how many characters were typed. Fails if the selector matches nothing within `timeout` and Jev can't (or isn't configured to) resolve it.",
             object_schema(
@@ -3370,14 +3622,14 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "press_key",
-            "Press a key via CDP keyboard input in the session's active tab. `key` is a name (Enter, Tab, Escape, Backspace, ArrowDown, …) or a single character. With a `selector` (CSS; or plain language — a `jev:` goal such as `jev: the password field` goes straight to the Jev decision model, and with TYPESAFE_API_KEY set a selector that matches nothing as CSS is retried as plain language), waits up to `timeout` for it and focuses it first (e.g. type into a field then press Enter); without, presses on whatever is focused, and `timeout` is unused. Use type for whole strings and click to activate buttons. Pressing Enter can submit a form, like a real user. Returns a confirmation. Fails on an unknown key name, or if the selector matches nothing within `timeout` and Jev can't (or isn't configured to) resolve it.",
+            "Press a key via CDP keyboard input in the session's active tab. `key` is a name (Enter, Tab, Escape, Backspace, ArrowDown, Space, …), a single character, or a combination held down together such as `Shift+Tab` or `Control+a` (modifiers: Shift, Control, Alt, Meta). With a `selector` (CSS; or plain language — a `jev:` goal such as `jev: the password field` goes straight to the Jev decision model, and with TYPESAFE_API_KEY set a selector that matches nothing as CSS is retried as plain language), waits up to `timeout` for it and focuses it first (e.g. type into a field then press Enter); without, presses on whatever is focused, and `timeout` is unused. Use type for whole strings and click to activate buttons. Pressing Enter can submit a form, like a real user. Returns a confirmation. Fails on an unknown key name, or if the selector matches nothing within `timeout` and Jev can't (or isn't configured to) resolve it.",
             object_schema(
                 &[
                     session_id,
                     (
                         "key",
                         &str_t,
-                        "Key name in the US layout (Enter, Tab, Escape, Backspace, ArrowDown…) or one character.",
+                        "Key name in the US layout (Enter, Tab, Escape, Backspace, ArrowDown, Space…), one character, or a combination such as Shift+Tab or Control+a.",
                     ),
                     (
                         "selector",

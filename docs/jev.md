@@ -97,7 +97,9 @@ request, judges whether the goal is met, whether a login, error or bot check
 page is in the way, and whether the next click can't be undone. A step can
 click, hover, right-click or drag an element, type into a field, pick a
 `<select>` option, scroll, wait, go back, or press a key (Enter, Escape,
-Tab, Shift+Tab, an arrow, Space and so on).
+Tab, Shift+Tab, an arrow, Space and so on). On a mobile session (opened with
+`useMobileUA`, which makes the page see a touch screen) it taps instead of
+clicking, drags with a finger, and can swipe an element or the screen.
 
 - **Text to type goes in `values`.** Jev sees only the keys (`username`,
   `password`) and says which field each belongs in. The text goes straight to

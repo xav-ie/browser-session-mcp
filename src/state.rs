@@ -164,6 +164,15 @@ impl StateStore {
         self.get(session_id).await?.viewport
     }
 
+    /// Whether the session was opened with `useMobileUA`: it then emulates a
+    /// phone, touch screen included.
+    pub async fn is_mobile(&self, session_id: &str) -> bool {
+        self.get(session_id)
+            .await
+            .and_then(|rec| rec.user_agent_metadata)
+            .is_some_and(|m| m["mobile"] == true)
+    }
+
     pub async fn user_agent_override(&self, session_id: &str) -> Option<UaOverride> {
         let rec = self.get(session_id).await?;
         Some(UaOverride {

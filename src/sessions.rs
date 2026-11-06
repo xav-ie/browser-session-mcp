@@ -11,7 +11,7 @@ use chromiumoxide::Browser;
 use chromiumoxide::Page;
 use chromiumoxide::cdp::browser_protocol::{
     browser::BrowserContextId,
-    emulation::SetDeviceMetricsOverrideParams,
+    emulation::{SetDeviceMetricsOverrideParams, SetTouchEmulationEnabledParams},
     network::SetUserAgentOverrideParams,
     page::GetLayoutMetricsParams,
     target::{
@@ -201,7 +201,7 @@ impl SessionManager {
         }
 
         let vp = viewport.unwrap_or_default();
-        if let Err(err) = self.apply_viewport(&page, vp).await {
+        if let Err(err) = self.apply_viewport(&page, vp, use_mobile_ua).await {
             self.cleanup_failed_open(&session_id, ctx_id).await;
             return Err(err);
         }
@@ -397,6 +397,12 @@ impl SessionManager {
         Ok(self.state.record(session_id).await.unwrap_or_default())
     }
 
+    /// Whether the session emulates a phone (opened with `useMobileUA`), so
+    /// pointing input should be touch.
+    pub async fn is_mobile(&self, session_id: &str) -> bool {
+        self.state.is_mobile(session_id).await
+    }
+
     /// The viewport chosen at `open` (or its default for older sessions).
     pub async fn viewport(&self, session_id: &str) -> Viewport {
         self.state.viewport(session_id).await.unwrap_or_default()
@@ -516,18 +522,30 @@ impl SessionManager {
         // The layout viewport excludes scrollbars, so a scrolling page measures
         // up to a scrollbar's width (15px here) under the emulated size.
         let fits = |actual: i64, want: i64| actual <= want && want - actual <= 20;
+        let mobile = self.state.is_mobile(session_id).await;
+        if mobile {
+            // Touch emulation ends with the CDP session that set it (another
+            // MCP process, a restart), and setting it again is idempotent.
+            apply_touch(page).await?;
+        }
         if fits(layout.client_width, vp.width) && fits(layout.client_height, vp.height) {
             return Ok(());
         }
-        self.apply_viewport(page, vp).await
+        self.apply_viewport(page, vp, mobile).await
     }
 
-    async fn apply_viewport(&self, page: &Page, vp: Viewport) -> Result<()> {
+    /// Size the page and, for a mobile session, emulate a phone: `mobile`
+    /// device metrics (the page's `<meta name=viewport>` applies, scrollbars
+    /// overlay) and a touch screen.
+    async fn apply_viewport(&self, page: &Page, vp: Viewport, mobile: bool) -> Result<()> {
+        if mobile {
+            apply_touch(page).await?;
+        }
         let params = SetDeviceMetricsOverrideParams::builder()
             .width(vp.width)
             .height(vp.height)
             .device_scale_factor(1.0)
-            .mobile(false)
+            .mobile(mobile)
             .build()
             .map_err(|e| anyhow!("SetDeviceMetricsOverrideParams: {e}"))?;
         page.execute(params)
@@ -535,6 +553,24 @@ impl SessionManager {
             .context("Emulation.setDeviceMetricsOverride")?;
         Ok(())
     }
+}
+
+/// How many touch points a mobile session's screen reports, as a phone does.
+pub const TOUCH_POINTS: i64 = 5;
+
+/// Make the page see a touch screen: `navigator.maxTouchPoints`, touch
+/// events and `(pointer: coarse)`, which sites use to pick touch behavior.
+async fn apply_touch(page: &Page) -> Result<()> {
+    page.execute(
+        SetTouchEmulationEnabledParams::builder()
+            .enabled(true)
+            .max_touch_points(TOUCH_POINTS)
+            .build()
+            .map_err(|e| anyhow!("SetTouchEmulationEnabledParams: {e}"))?,
+    )
+    .await
+    .context("Emulation.setTouchEmulationEnabled")?;
+    Ok(())
 }
 
 fn parse_context_id(session_id: &str) -> BrowserContextId {

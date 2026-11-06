@@ -162,7 +162,11 @@ class Handler(BaseHTTPRequestHandler):
                     marker = "dead"
                 else:
                     marker = "name"
-                if "press" in first:
+                if "swipe" in first and "swipe_left" in criteria:
+                    choice = "swipe_left"
+                elif not order:
+                    choice = "wait"
+                elif "press" in first:
                     choice = "press_key"
                 elif marker is None:
                     choice = "back"
@@ -220,6 +224,8 @@ class Handler(BaseHTTPRequestHandler):
             answers["login"] = {"noul": 0.97 if "sign-in wall" in title else 0.02}
             answers["error"] = {"noul": 0.97 if "error page" in title else 0.02}
             answers["irreversible"] = {"noul": 0.97 if "checkout" in title else 0.02}
+            if "direction" in questions:
+                answers["direction"] = {"choice": "left", "confidence": 0.9}
             if "key" in questions:
                 answers["key"] = {"choice": "Tab" if "tab" in first else "Enter", "confidence": 0.9}
             if "operation" in questions:
@@ -696,6 +702,23 @@ check "read: under its heading" "$READ_OUT" '## Section 27'
 check "read: drops the rest" "$READ_OUT" '"kept":1'
 check "read: a short page comes back whole" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "data:text/html,<p>Tiny%20page</p>")")" 'Navigated to'
 check "read: whole, without Jev" "$(call read "$(printf '{"sessionId":"%s","question":"anything"}' "$SID")")" '"filtered":false'
+
+# ---- touch: a mobile session is a touch phone ----------------------------
+MOBILE=$(call open_browser_session '{"useMobileUA":true,"viewport":{"width":390,"height":844}}')
+MSID=$(pluck "$MOBILE" .result.structuredContent.sessionId)
+TOUCH_URL="data:text/html,<title>touch</title><meta name=viewport content='width=device-width'><button id=t style='width:200px;height:120px'>Box</button>"
+check "touch: navigate the mobile session" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$MSID" "$TOUCH_URL")")" 'Navigated to'
+check "touch: the page sees a touch screen" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"[navigator.maxTouchPoints, %s in window, matchMedia(%s).matches].join()"}' "$MSID" "'ontouchstart'" "'(pointer: coarse)'")")" '"5,true,true"'
+check "touch: wire touch handlers" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { const b = document.getElementById(%s); let x0 = 0; b.addEventListener(%s, (e) => { x0 = e.touches[0].clientX; document.title = %s }); document.addEventListener(%s, (e) => { const dx = e.changedTouches[0].clientX - x0; if (dx < -100) document.title = %s }); return 1 })()"}' "$MSID" "'t'" "'touchstart'" "'tapped'" "'touchend'" "'swiped-left'")")" '"result":1'
+check "tap: taps with touch events" "$(call tap "$(printf '{"sessionId":"%s","selector":"#t"}' "$MSID")")" 'Tapped #t'
+check "tap: the page saw a touch" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$MSID")")" 'tapped'
+check "swipe: swipes left from the element" "$(call swipe "$(printf '{"sessionId":"%s","selector":"#t","direction":"left","distance":150}' "$MSID")")" 'Swiped from #t'
+check "swipe: the page saw a left swipe" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$MSID")")" 'swiped-left'
+check "act: wire an act-done touch handler" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.title = %s; document.getElementById(%s).addEventListener(%s, () => { document.title = %s }); return 1 })()"}' "$MSID" "'touch'" "'t'" "'touchend'" "'act-done'")")" '"result":1'
+check "act: taps instead of clicking on a mobile session" "$(call act "$(printf '{"sessionId":"%s","goal":"open the box"}' "$MSID")")" '"action":"tap"'
+check "act: reset for the swipe goal" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title = %s"}' "$MSID" "'touch'")")" 'touch'
+check "act: swipes when the goal calls for it" "$(call act "$(printf '{"sessionId":"%s","goal":"swipe the box away"}' "$MSID")")" '"action":"swipe_left"'
+check "touch: close the mobile session" "$(call close_browser_session "$(printf '{"sessionId":"%s"}' "$MSID")")" 'Closed'
 
 # ---- close ---------------------------------------------------------------
 

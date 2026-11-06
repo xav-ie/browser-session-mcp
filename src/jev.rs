@@ -934,6 +934,50 @@ pub const PSEUDO_ACTIONS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Extra actions a mobile session's `act` offers: swipes across the middle
+/// of the screen, for drawers, carousels and pull-to-refresh that respond to
+/// a finger anywhere.
+pub const TOUCH_ACTIONS: &[(&str, &str)] = &[
+    (
+        "swipe_left",
+        "Swipe a finger left across the middle of the screen, e.g. to close a drawer or move a carousel on.",
+    ),
+    (
+        "swipe_right",
+        "Swipe a finger right across the middle of the screen, e.g. to open a side menu or move a carousel back.",
+    ),
+    (
+        "swipe_up",
+        "Swipe a finger up the screen, e.g. to scroll down the way a phone does or dismiss a sheet.",
+    ),
+    (
+        "swipe_down",
+        "Swipe a finger down the screen, e.g. to scroll up, pull to refresh or close a bottom sheet.",
+    ),
+];
+
+/// The actions an `act` step offers besides elements: the pseudo-actions,
+/// plus swipes on a touch (mobile) session.
+fn step_actions(touch: bool) -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    PSEUDO_ACTIONS
+        .iter()
+        .chain(TOUCH_ACTIONS.iter().filter(move |_| touch))
+}
+
+/// Ways of acting on an element a touch session adds.
+const TOUCH_OPERATIONS: &[(&str, &str)] = &[(
+    "swipe",
+    "Swipe across it with a finger, e.g. to move a carousel or close a drawer it belongs to.",
+)];
+
+/// Directions for a swipe, asked speculatively on touch sessions.
+const DIRECTIONS: &[(&str, &str)] = &[
+    ("left", "Left"),
+    ("right", "Right"),
+    ("up", "Up"),
+    ("down", "Down"),
+];
+
 /// The keys `act`'s press_key action can press, asked speculatively in each
 /// step's request so the answer is ready if the step picks press_key.
 const KEYS: &[(&str, &str)] = &[
@@ -965,6 +1009,7 @@ fn build_act_state(
     page: &PageInfo,
     recent: &[String],
     value_keys: &[String],
+    touch: bool,
 ) -> String {
     let mut lines = act_state_head(goal, page, recent, value_keys);
     if page.elements.is_empty() {
@@ -976,11 +1021,7 @@ fn build_act_state(
             .iter()
             .map(|e| format!("{}: {}", e.id, e.desc)),
     );
-    lines.extend(
-        PSEUDO_ACTIONS
-            .iter()
-            .map(|(id, desc)| format!("{id}: {desc}")),
-    );
+    lines.extend(step_actions(touch).map(|(id, desc)| format!("{id}: {desc}")));
     if page.omitted > 0 {
         lines.push(format!(
             "({} further elements not listed; scroll if the target may be among them)",
@@ -1022,12 +1063,12 @@ fn act_state_head(
 }
 
 /// Criteria for an `act` step Choice: every element plus the pseudo-actions.
-fn act_criteria(page: &PageInfo, not_listed: bool) -> Map<String, Value> {
+fn act_criteria(page: &PageInfo, not_listed: bool, touch: bool) -> Map<String, Value> {
     let mut criteria = Map::new();
     for e in &page.elements {
         criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
     }
-    for (id, desc) in PSEUDO_ACTIONS {
+    for (id, desc) in step_actions(touch) {
         criteria.insert((*id).to_string(), Value::String((*desc).to_string()));
     }
     if not_listed {
@@ -1077,6 +1118,8 @@ pub struct StepDecision {
     /// How to act on a chosen element: one of [`OPERATIONS`]' ids, "click"
     /// unless Jev was sure of another.
     pub operation: String,
+    /// The direction for a swipe on a touch session: left, right, up or down.
+    pub direction: String,
     /// The key for a press_key step (one of [`KEYS`]), "Enter" unless Jev
     /// was sure of another.
     pub key: String,
@@ -1108,8 +1151,7 @@ impl StepDecision {
             .find(|e| e.id == id)
             .map(|e| e.desc.clone())
             .or_else(|| {
-                PSEUDO_ACTIONS
-                    .iter()
+                step_actions(true)
                     .find(|(p, _)| *p == id)
                     .map(|(p, _)| (*p).to_string())
             })
@@ -1154,12 +1196,19 @@ pub async fn decide_step(
     recent: &[String],
     value_keys: &[String],
     stop_at: f64,
+    touch: bool,
 ) -> Result<StepDecision> {
     let cfg = config()?;
     let mut page_info = extract_with_retry(page, true).await?;
-    let reserved = PSEUDO_ACTIONS.len();
+    let reserved = step_actions(touch).count();
+    let input = StepInput {
+        goal,
+        recent,
+        value_keys,
+        touch,
+    };
     if page_info.elements.len() + reserved <= CHOICE_LIMIT {
-        return step_on(&cfg, goal, page_info, recent, value_keys, None, false).await;
+        return step_on(&cfg, input, page_info, None, false).await;
     }
     // A big page: first offer what a person sees (dialog and viewport first)
     // with an option to say the right element isn't listed. Most steps end
@@ -1176,10 +1225,7 @@ pub async fn decide_step(
         let body = json!({ "model": cfg.model, "state": head, "questions": page_gate_questions() });
         post_systemone(&cfg, &body).await
     };
-    let (step, gates) = tokio::join!(
-        step_on(&cfg, goal, first, recent, value_keys, None, true),
-        gates_only
-    );
+    let (step, gates) = tokio::join!(step_on(&cfg, input, first, None, true), gates_only);
     let mut d = step?;
     let gates = gates?;
     d.goal_met = d.goal_met.max(parse_noul(&gates, "goal_met")?);
@@ -1219,6 +1265,7 @@ pub async fn decide_step(
                     bot_check: parse_noul(json, "bot_check")?,
                     candidates: Vec::new(),
                     operation: "click".to_string(),
+                    direction: "left".to_string(),
                     key: "Enter".to_string(),
                     field_values: std::collections::HashMap::new(),
                     value_key: None,
@@ -1236,29 +1283,43 @@ pub async fn decide_step(
         }
         page_info = page_info.subset(&keep);
     }
-    step_on(&cfg, goal, page_info, recent, value_keys, gates_json, false).await
+    step_on(&cfg, input, page_info, gates_json, false).await
 }
 
 /// The step request over `page_info`'s elements: the element Choice and
 /// everything that rides along. `gates_json` carries page-level judgments
 /// from a group request, when the page was narrowed; `not_listed` adds the
 /// option to say the right element is among those left out.
+/// What every request of one `act` step shares.
+#[derive(Clone, Copy)]
+struct StepInput<'a> {
+    goal: &'a str,
+    recent: &'a [String],
+    value_keys: &'a [String],
+    touch: bool,
+}
+
 async fn step_on(
     cfg: &Config,
-    goal: &str,
+    input: StepInput<'_>,
     page_info: PageInfo,
-    recent: &[String],
-    value_keys: &[String],
     gates_json: Option<Value>,
     not_listed: bool,
 ) -> Result<StepDecision> {
+    let StepInput {
+        goal,
+        recent,
+        value_keys,
+        touch,
+    } = input;
     let has_elements = !page_info.elements.is_empty();
 
-    let state = build_act_state(goal, &page_info, recent, value_keys);
-    let criteria = act_criteria(&page_info, not_listed);
+    let state = build_act_state(goal, &page_info, recent, value_keys, touch);
+    let criteria = act_criteria(&page_info, not_listed, touch);
     let mut questions = Map::new();
-    if has_elements {
-        questions.insert(
+    // Always asked, even on a page with no elements: scrolling, waiting,
+    // going back, keys and swipes need none.
+    questions.insert(
             "element".to_string(),
             json!({
                 "type": "choice",
@@ -1266,7 +1327,6 @@ async fn step_on(
                 "criteria": criteria
             }),
         );
-    }
     questions.extend(page_gate_questions());
     questions.insert(
         "stuck".to_string(),
@@ -1277,7 +1337,10 @@ async fn step_on(
     );
     if has_elements {
         let mut ops = Map::new();
-        for (id, desc) in OPERATIONS {
+        for (id, desc) in OPERATIONS
+            .iter()
+            .chain(TOUCH_OPERATIONS.iter().filter(|_| touch))
+        {
             ops.insert((*id).to_string(), Value::String((*desc).to_string()));
         }
         questions.insert(
@@ -1286,6 +1349,20 @@ async fn step_on(
                 "type": "choice",
                 "instructions": "If the best next step acts on one of the listed elements, which way of acting on it does the goal call for?",
                 "criteria": ops
+            }),
+        );
+    }
+    if touch {
+        let mut dirs = Map::new();
+        for (id, desc) in DIRECTIONS {
+            dirs.insert((*id).to_string(), Value::String((*desc).to_string()));
+        }
+        questions.insert(
+            "direction".to_string(),
+            json!({
+                "type": "choice",
+                "instructions": "If the best next step swipes a listed element, which way does the finger move?",
+                "criteria": dirs
             }),
         );
     }
@@ -1368,45 +1445,48 @@ async fn step_on(
     let error = parse_noul(gates, "error")?;
     let irreversible = parse_noul(&json, "irreversible")?;
     let bot_check = parse_noul(gates, "bot_check")?;
-    let mut candidates = Vec::new();
-    let mut chosen = String::new();
-    let mut is_element = false;
-    let mut description = String::new();
-    let mut confidence = 0.0;
-    let mut next_best = None;
-    if has_elements {
-        let ids: Vec<&str> = criteria.keys().map(|k| k.as_str()).collect();
-        let answer = parse_choice(&json, "element", &ids)?;
-        chosen = answer.chosen.clone();
-        confidence = answer.confidence;
-        is_element = chosen.starts_with('e') && page_info.elements.iter().any(|e| e.id == chosen);
-        description = if is_element {
-            page_info
-                .elements
-                .iter()
-                .find(|e| e.id == chosen)
-                .map(|e| e.desc.clone())
-                .unwrap_or_default()
-        } else {
-            PSEUDO_ACTIONS
-                .iter()
-                .find(|(id, _)| *id == chosen)
-                .map(|(_, desc)| (*desc).to_string())
-                .unwrap_or_else(|| chosen.clone())
-        };
-        candidates.push((chosen.clone(), confidence));
-        candidates.extend(answer.ranked.iter().take(2).cloned());
-        next_best = answer
-            .ranked
-            .into_iter()
-            .find(|(id, _)| id.starts_with('e') && page_info.elements.iter().any(|e| e.id == *id));
-    }
+    let ids: Vec<&str> = criteria.keys().map(|k| k.as_str()).collect();
+    let answer = parse_choice(&json, "element", &ids)?;
+    let chosen = answer.chosen.clone();
+    let confidence = answer.confidence;
+    let is_element = chosen.starts_with('e') && page_info.elements.iter().any(|e| e.id == chosen);
+    let description = if is_element {
+        page_info
+            .elements
+            .iter()
+            .find(|e| e.id == chosen)
+            .map(|e| e.desc.clone())
+            .unwrap_or_default()
+    } else {
+        step_actions(true)
+            .find(|(id, _)| *id == chosen)
+            .map(|(_, desc)| (*desc).to_string())
+            .unwrap_or_else(|| chosen.clone())
+    };
+    let mut candidates = vec![(chosen.clone(), confidence)];
+    candidates.extend(answer.ranked.iter().take(2).cloned());
+    let next_best = answer
+        .ranked
+        .into_iter()
+        .find(|(id, _)| id.starts_with('e') && page_info.elements.iter().any(|e| e.id == *id));
     let mut operation = "click".to_string();
     if has_elements {
-        let ids: Vec<&str> = OPERATIONS.iter().map(|(id, _)| *id).collect();
+        let ids: Vec<&str> = OPERATIONS
+            .iter()
+            .chain(TOUCH_OPERATIONS.iter().filter(|_| touch))
+            .map(|(id, _)| *id)
+            .collect();
         let answer = parse_choice(&json, "operation", &ids)?;
         if answer.confidence >= ACT_MIN_CONFIDENCE {
             operation = answer.chosen;
+        }
+    }
+    let mut direction = "left".to_string();
+    if touch {
+        let ids: Vec<&str> = DIRECTIONS.iter().map(|(id, _)| *id).collect();
+        let answer = parse_choice(&json, "direction", &ids)?;
+        if answer.confidence >= ACT_MIN_CONFIDENCE {
+            direction = answer.chosen;
         }
     }
     let key_ids: Vec<&str> = KEYS.iter().map(|(id, _)| *id).collect();
@@ -1454,6 +1534,7 @@ async fn step_on(
         bot_check,
         candidates,
         operation,
+        direction,
         key,
         field_values,
         value_key,
@@ -2090,6 +2171,7 @@ mod tests {
             &page,
             &["typed into the search box".to_string()],
             &["query".to_string()],
+            false,
         );
         assert!(state.starts_with("Goal: \"search for oolong tea\"."));
         assert!(state.contains("Actions already taken:\n- typed into the search box"));
@@ -2110,7 +2192,7 @@ mod tests {
             omitted: 0,
             stamp: "ab12".to_string(),
         };
-        let state = build_act_state("confirm we are on the empty page", &page, &[], &[]);
+        let state = build_act_state("confirm we are on the empty page", &page, &[], &[], false);
         assert!(state.contains("(no interactive elements were found on this page)"));
         assert!(state.contains("Visible text: Nothing here"));
     }
@@ -2131,10 +2213,13 @@ mod tests {
             omitted: 0,
             stamp: "ab12".to_string(),
         };
-        let criteria = act_criteria(&page, false);
+        let criteria = act_criteria(&page, false, false);
         assert_eq!(criteria.len(), CHOICE_LIMIT);
         let page = page.subset(&(0..CHOICE_LIMIT - PSEUDO_ACTIONS.len() - 1).collect::<Vec<_>>());
-        assert_eq!(act_criteria(&page, true).len(), CHOICE_LIMIT);
+        assert_eq!(act_criteria(&page, true, false).len(), CHOICE_LIMIT);
+        let touch_page =
+            page.subset(&(0..CHOICE_LIMIT - step_actions(true).count() - 1).collect::<Vec<_>>());
+        assert_eq!(act_criteria(&touch_page, true, true).len(), CHOICE_LIMIT);
         assert!(criteria.contains_key("scroll_down"));
         assert!(criteria.contains_key("back"));
     }
