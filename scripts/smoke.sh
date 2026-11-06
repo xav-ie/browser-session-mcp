@@ -120,7 +120,7 @@ fi
 # the server's validation and next-best ranking are exercised.
 
 JEV_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-python3 - "$JEV_PORT" "$TMP/jev-states.log" >"$TMP/jev-stub.log" 2>&1 <<'PY' &
+python3 - "$JEV_PORT" >"$TMP/jev-stub.log" 2>&1 <<'PY' &
 import json, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -128,8 +128,6 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         state = body.get("state", "")
-        with open(sys.argv[2], "a") as log:
-            log.write(json.dumps(state) + "\n")
         first = state.split("\n")[0].lower()
         low = state.lower()
         questions = body["questions"]
@@ -685,13 +683,6 @@ check "type: build a shadow input" "$(call evaluate "$(printf '{"sessionId":"%s"
 check "type: jev finds a field in a shadow root" "$(call type "$(printf '{"sessionId":"%s","selector":"jev: the Email field","text":"Gödel ✓"}' "$SID")")" 'Typed 7 chars'
 check "type: non-ASCII text went in" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.getElementById(%s).shadowRoot.getElementById(%s).value"}' "$SID" "'host'" "'deep'")")" 'Gödel ✓'
 
-# A carousel showing its second slide: Jev reads only the slide in view.
-CAROUSEL_URL="data:text/html,<title>carousel</title><div style='width:200px;overflow:hidden'><div style='display:flex;transform:translateX(-200px)'><p style='flex:0 0 200px'>Slide one</p><p style='flex:0 0 200px'>Slide two</p><p style='flex:0 0 200px'>Slide three</p></div></div><button>Log%20in</button>"
-check "jev: navigate to a carousel" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$CAROUSEL_URL")")" 'Navigated to'
-check "jev: click on the carousel page" "$(call click "$(printf '{"sessionId":"%s","selector":"jev: the Log in button"}' "$SID")")" 'confidence 0.91'
-check "jev: page text keeps the slide in view" "$(tail -n 1 "$TMP/jev-states.log" | grep -o 'Visible text: [^\\]*')" 'Slide two'
-check "jev: page text drops the slides out of view" "out=$(tail -n 1 "$TMP/jev-states.log" | grep -o 'Visible text: [^\\]*' | grep -o 'Slide one\|Slide three' | wc -l)" 'out=0'
-
 # ---- ask: questions about the page (against the stub API above) ------------
 ASK_URL="data:text/html,<title>basket</title><p>Your%20cart%20holds%20a%20smoke%20detector</p>"
 check "ask: navigate to the cart page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$ASK_URL")")" 'Navigated to'
@@ -727,6 +718,11 @@ check "act: wire an act-done touch handler" "$(call evaluate "$(printf '{"sessio
 check "act: taps instead of clicking on a mobile session" "$(call act "$(printf '{"sessionId":"%s","goal":"open the box"}' "$MSID")")" '"action":"tap"'
 check "act: reset for the swipe goal" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title = %s"}' "$MSID" "'touch'")")" 'touch'
 check "act: swipes when the goal calls for it" "$(call act "$(printf '{"sessionId":"%s","goal":"swipe the box away"}' "$MSID")")" '"action":"swipe_left"'
+# A sideways swipe goes across the carousel in view, here below the middle
+# of the screen, where a swipe across the middle would miss it.
+check "act: add a carousel low on the screen" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.title = %s; document.body.insertAdjacentHTML(%s, %s); document.getElementById(%s).addEventListener(%s, () => { window.carHit = %s }); return 1 })()"}' "$MSID" "'touch'" "'beforeend'" "'<div id=car style=\\\"position:fixed;left:0;right:0;bottom:20px;height:120px;overflow-x:auto\\\"><div style=\\\"width:2000px;height:100px\\\"></div></div>'" "'car'" "'touchstart'" "'yes'")")" '"result":1'
+check "act: swipes" "$(call act "$(printf '{"sessionId":"%s","goal":"swipe the box away","maxSteps":1}' "$MSID")")" '"action":"swipe_left"'
+check "act: the swipe went across the carousel" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"String(window.carHit)"}' "$MSID")")" '"yes"'
 check "touch: close the mobile session" "$(call close_browser_session "$(printf '{"sessionId":"%s"}' "$MSID")")" 'Closed'
 
 # ---- close ---------------------------------------------------------------

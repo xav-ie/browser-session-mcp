@@ -37,12 +37,12 @@ export const MOBILE = [
     steps: [{ goal: "Open the site's pricing page", assert: "() => location.pathname.includes('pricing')" }] },
 ];
 
-// Carousels on other libraries, written 2026-11-06 after the Swiper tasks
-// shaped the clipped-text change and before act ran on these, to check it
-// carries over. Bootstrap hides its other slides outright, so it gains
-// nothing from the change and shows whether anything else moved.
+// Carousels on other libraries' pages, written 2026-11-06 before act ran
+// on them, to see how act does past one demo carousel. Bootstrap hides its
+// other slides outright; the others keep them in the page.
 const SLICK = "() => document.querySelector('.single-item').slick.currentSlide";
-const OWL = "[...document.querySelector('.owl-carousel').querySelectorAll('.owl-item.active')].map(x => x.innerText.trim()).join('|')";
+// The slides in view, in order: one on a phone, three on a desktop.
+const OWL = "[...document.querySelector('.owl-carousel').querySelectorAll('.owl-item.active')].map(x => x.innerText.trim())";
 const BS = "[...document.querySelectorAll('#carouselExample .carousel-item')].findIndex(x => x.classList.contains('active'))";
 export const CAROUSEL = [
   { id: "c-slick-next", cat: "carousel", url: "https://kenwheeler.github.io/slick/",
@@ -50,13 +50,19 @@ export const CAROUSEL = [
   { id: "c-slick-third", cat: "carousel", url: "https://kenwheeler.github.io/slick/",
     steps: [{ goal: "In the Single Item slider, show slide 3", assert: `() => (${SLICK})() === 2` }] },
   { id: "c-owl-drag", cat: "carousel", url: "https://owlcarousel2.github.io/OwlCarousel2/",
-    steps: [{ goal: "Show the Drag slide in the demo carousel", assert: `() => ${OWL} === 'Drag'` }] },
+    steps: [{ goal: "Show the Drag slide in the demo carousel", assert: `() => ${OWL}.includes('Drag')` }] },
   { id: "c-owl-two", cat: "carousel", url: "https://owlcarousel2.github.io/OwlCarousel2/",
-    steps: [{ goal: "Move the demo carousel forward two slides", assert: `() => ${OWL} === 'Responsive'` }] },
+    steps: [{ goal: "Move the demo carousel forward two slides", assert: `() => ${OWL}[0] === 'Responsive'` }] },
   { id: "c-bs-second", cat: "carousel", url: "https://getbootstrap.com/docs/5.3/components/carousel/",
     steps: [{ goal: "Show the second slide of the first example carousel", assert: `() => ${BS} === 1` }] },
   { id: "c-bs-third", cat: "carousel", url: "https://getbootstrap.com/docs/5.3/components/carousel/",
     steps: [{ goal: "Show the Third slide in the first example carousel", assert: `() => ${BS} === 2` }] },
+  // Added after the first carousel run, also before act ran on them: the
+  // page has one carousel, so the goals can't mean another.
+  { id: "c-owl-css3", cat: "carousel", url: "https://owlcarousel2.github.io/OwlCarousel2/",
+    steps: [{ goal: "Show the CSS3 slide in the demo carousel", assert: `() => ${OWL}.includes('CSS3')` }] },
+  { id: "c-owl-fast", cat: "carousel", url: "https://owlcarousel2.github.io/OwlCarousel2/",
+    steps: [{ goal: "Show the Fast slide in the demo carousel", assert: `() => ${OWL}.includes('Fast')` }] },
   { id: "c-neg-slick-ten", cat: "negative", expect: "fail", url: "https://kenwheeler.github.io/slick/",
     steps: [{ goal: "In the Single Item slider, show slide 10", assert: `() => false` }] },
 ];

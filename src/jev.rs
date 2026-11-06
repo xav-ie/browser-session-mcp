@@ -226,40 +226,11 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   // menu and table of contents) are left out, so a judgment like "is the
   // goal met?" reads what the page is about.
   var norm = function(s) { return String(s || '').replace(/\s+/g, ' ').trim(); };
-  // Text scrolled sideways out of a clipping box (the other slides of a
-  // carousel, the other panels of a swipeable tab strip) is left out too, so
-  // the text says which slide is showing. Lines that also show stay.
-  var linesOf = function(n, into) {
-    String(n.innerText || '').split('\n').forEach(function(l) { l = norm(l); if (l) into.add(l); });
-  };
-  var offside = new Set(), onside = new Set();
-  var boxes = document.body ? document.body.getElementsByTagName('*') : [];
-  for (var b = 0; b < boxes.length && b < MAX * 4; b++) {
-    var box = boxes[b];
-    if (box.scrollWidth <= box.clientWidth + 1) continue;
-    var ox = getComputedStyle(box).overflowX;
-    if (ox === 'visible') continue;
-    var frame = box.getBoundingClientRect();
-    if (!frame.width) continue;
-    // A track wider than the box, or overflowing like it (a carousel's
-    // strip), is gone through; the pieces that fit (its slides) are each
-    // judged in or out of view.
-    var sort = function(el, depth) {
-      for (var k = 0; k < el.children.length; k++) {
-        var item = el.children[k], r = item.getBoundingClientRect();
-        if (!r.width) continue;
-        if (depth < 3 && (r.width > frame.width + 1 || item.scrollWidth > item.clientWidth + 1)) sort(item, depth + 1);
-        else linesOf(item, r.right <= frame.left + 1 || r.left >= frame.right - 1 ? offside : onside);
-      }
-    };
-    sort(box, 0);
-  }
   var textOf = function(root) {
     var chrome = new Set();
     root.querySelectorAll('nav, aside, header, footer, [role="navigation"], [role="complementary"], [role="banner"], [role="contentinfo"]').forEach(function(n) {
-      linesOf(n, chrome);
+      String(n.innerText || '').split('\n').forEach(function(l) { l = norm(l); if (l) chrome.add(l); });
     });
-    offside.forEach(function(l) { if (!onside.has(l)) chrome.add(l); });
     var t = String(root.innerText || '').split('\n').map(norm).filter(function(l) { return l && !chrome.has(l); }).join(' ');
     return t.length > 1500 ? t.slice(0, 1499) + '...' : t;
   };
@@ -969,11 +940,11 @@ pub const PSEUDO_ACTIONS: &[(&str, &str)] = &[
 pub const TOUCH_ACTIONS: &[(&str, &str)] = &[
     (
         "swipe_left",
-        "Swipe a finger left across the middle of the screen, e.g. to close a drawer or move a carousel on.",
+        "Swipe a finger left across the carousel in view (else the middle of the screen), e.g. to move it on or close a drawer.",
     ),
     (
         "swipe_right",
-        "Swipe a finger right across the middle of the screen, e.g. to open a side menu or move a carousel back.",
+        "Swipe a finger right across the carousel in view (else the middle of the screen), e.g. to move it back or open a side menu.",
     ),
     (
         "swipe_up",
