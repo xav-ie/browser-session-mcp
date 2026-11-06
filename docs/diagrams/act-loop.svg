@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1062 366" width="1062" height="366" role="img"><style>
+  text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #1f1430; }
+  .bg { fill: #f7f3fb; }
+  .box { fill: #ffffff; stroke: #d9cde8; stroke-width: 2; }
+  .key { fill: #7c4dbb; fill-opacity: .12; stroke: #7c4dbb; stroke-width: 2.5; }
+  .end { fill: #5b3a86; fill-opacity: .14; stroke: #5b3a86; stroke-width: 2; }
+  .note { fill: #fdf6c3; stroke: #c9b440; stroke-width: 1.5; }
+  .frame { fill: #ffffff; stroke: #d9cde8; stroke-width: 1.5; }
+  .group { fill: none; stroke: #5f5375; stroke-width: 1.5; stroke-dasharray: 6 5; }
+  .title { font-size: 16px; font-weight: 650; }
+  .sub { font-size: 13.5px; fill: #5f5375; }
+  .label { font-size: 13px; font-weight: 550; fill: #5b3a86; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  .edge { fill: none; stroke: #5b3a86; stroke-width: 2; marker-end: url(#arrow); }
+  .both { marker-start: url(#arrow); }
+  .ret { stroke-dasharray: 7 5; }
+  .life { stroke: #d9cde8; stroke-width: 2; stroke-dasharray: 4 5; }
+  .tag { fill: #f7f3fb; }
+  .head { fill: #5b3a86; }
+</style><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head" d="M0 0L10 5L0 10z"/></marker></defs><rect class="bg" width="1062" height="366"/><rect class="box" x="24" y="24" width="220.5" height="88" rx="14"/><text class="title" x="134.3" y="64.1" text-anchor="middle">Your agent</text><text class="sub" x="134.3" y="83.2" text-anchor="middle">act({ goal, values })</text><rect class="end" x="288.5" y="24" width="749.5" height="88" rx="14"/><text class="title" x="663.3" y="55" text-anchor="middle">Stop with a status</text><text class="sub" x="663.3" y="74.1" text-anchor="middle">completed or likely_completed</text><text class="sub" x="663.3" y="92.3" text-anchor="middle">needs_login, needs_human, needs_confirmation, stuck, blocked or uncertain</text><rect class="key" x="24" y="176" width="220.5" height="112" rx="14"/><text class="title" x="134.3" y="219" text-anchor="middle">Read the page</text><text class="sub" x="134.3" y="238.1" text-anchor="middle">its elements, visible</text><text class="sub" x="134.3" y="256.3" text-anchor="middle">text, and the steps so far</text><rect class="key" x="288.5" y="176" width="220.5" height="112" rx="14"/><text class="title" x="398.8" y="209.9" text-anchor="middle">One Jev request</text><text class="sub" x="398.8" y="229" text-anchor="middle">the next step, and: goal</text><text class="sub" x="398.8" y="247.2" text-anchor="middle">met? a wall in the way?</text><text class="sub" x="398.8" y="265.4" text-anchor="middle">can't be undone?</text><rect class="key" x="553" y="176" width="220.5" height="112" rx="14"/><text class="title" x="663.3" y="219" text-anchor="middle">Do it</text><text class="sub" x="663.3" y="238.1" text-anchor="middle">click, type, hover, drag,</text><text class="sub" x="663.3" y="256.3" text-anchor="middle">select, scroll, or a key</text><rect class="key" x="817.5" y="176" width="220.5" height="112" rx="14"/><text class="title" x="927.8" y="219" text-anchor="middle">Check it changed</text><text class="sub" x="927.8" y="238.1" text-anchor="middle">if not, try Jev's next</text><text class="sub" x="927.8" y="256.3" text-anchor="middle">best pick</text><path class="edge" d="M134.3 112L134.3 176"/><path class="edge" d="M398.8 176L398.8 112"/><rect class="tag" x="276.9" y="134" width="243.7" height="19" rx="5"/><text class="label" x="398.8" y="148" text-anchor="middle">when it's done, blocked or unsure</text><path class="edge" d="M244.5 232L288.5 232"/><path class="edge" d="M509 232L553 232"/><path class="edge" d="M773.5 232L817.5 232"/><path class="edge" d="M927.8 288L927.8 328L134.3 328L134.3 288"/><rect class="tag" x="307.4" y="316" width="447.2" height="19" rx="5"/><text class="label" x="531" y="330" text-anchor="middle">next step, until maxSteps or three actions in a row do nothing</text></svg>

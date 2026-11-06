@@ -136,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
         # The element Choice, whenever the request carries one.
         if "element" in questions:
             criteria = questions["element"]["criteria"]
-            if "goal_met" not in questions and "__none__" in criteria:
+            if "goal_met" not in questions and any(k.startswith("o") for k in criteria):
                 # second-stage <select> pick: the option mentioning blue
                 keys = sorted((k for k in criteria if k.startswith("o")),
                               key=lambda k: int(k[1:]))
@@ -162,7 +162,9 @@ class Handler(BaseHTTPRequestHandler):
                     marker = "dead"
                 else:
                     marker = "name"
-                if marker is None:
+                if "press" in first:
+                    choice = "press_key"
+                elif marker is None:
                     choice = "back"
                 else:
                     choice = next((k for k in order if marker in descs[k]), order[0])
@@ -172,21 +174,25 @@ class Handler(BaseHTTPRequestHandler):
                     probs[other] = 0.09
                 answers["element"] = {"choice": choice, "confidence": 0.91,
                                       "probabilities": probs}
+                if "unsure" in first:
+                    # no distribution, so only the floor decides
+                    answers["element"] = {"choice": choice, "confidence": 0.2}
             else:
                 # plain jev:/fallback resolve; the unsure and bogus paths
                 # deliberately carry no probabilities so distribution
                 # validation is skipped and the floor/valid-id checks fire
                 goal = first
                 if "unsure" in goal:
-                    order = sorted(criteria, key=lambda k: int(k[1:]))
+                    order = sorted((k for k in criteria if k.startswith("e")), key=lambda k: int(k[1:]))
                     answers["element"] = {"choice": order[0], "confidence": 0.2}
                 elif "bogus" in goal:
                     answers["element"] = {"choice": "e999", "confidence": 0.91}
                 else:
                     marker = "email" if "email" in goal else "log in"
-                    order = sorted(criteria, key=lambda k: int(k[1:]))
+                    order = sorted((k for k in criteria if k.startswith("e")), key=lambda k: int(k[1:]))
+                    fallback = "__none__" if "__none__" in criteria else order[0]
                     choice = next((k for k in order if marker in criteria[k].lower()),
-                                  order[0])
+                                  fallback)
                     other = next((k for k in criteria if k != choice), None)
                     probs = {choice: 0.91}
                     if other:
@@ -213,15 +219,64 @@ class Handler(BaseHTTPRequestHandler):
             answers["stuck"] = {"noul": 0.97 if "impossible" in first else 0.02}
             answers["login"] = {"noul": 0.97 if "sign-in wall" in title else 0.02}
             answers["error"] = {"noul": 0.97 if "error page" in title else 0.02}
-            if "value_key" in questions:
-                vkeys = questions["value_key"]["criteria"]
-                vchoice = "name" if "name" in vkeys else "__none__"
-                vother = next((k for k in vkeys if k != vchoice), None)
-                vprobs = {vchoice: 0.91}
-                if vother:
-                    vprobs[vother] = 0.09
-                answers["value_key"] = {"choice": vchoice, "confidence": 0.91,
-                                        "probabilities": vprobs}
+            answers["irreversible"] = {"noul": 0.97 if "checkout" in title else 0.02}
+            if "key" in questions:
+                answers["key"] = {"choice": "Tab" if "tab" in first else "Enter", "confidence": 0.9}
+            if "operation" in questions:
+                op = ("hover" if "hover" in first else "right_click" if "right-click" in first
+                      else "drag" if "drag" in first else "click")
+                answers["operation"] = {"choice": op, "confidence": 0.9}
+            answers["bot_check"] = {"noul": 0.97 if "bot check" in title else 0.02}
+            for q, spec in questions.items():
+                if q.startswith("value_e") or q == "value_key":
+                    vkeys = spec["criteria"]
+                    vchoice = "name" if "name" in vkeys else "__none__"
+                    vother = next((k for k in vkeys if k != vchoice), None)
+                    vprobs = {vchoice: 0.91}
+                    if vother:
+                        vprobs[vother] = 0.09
+                    answers[q] = {"choice": vchoice, "confidence": 0.91,
+                                  "probabilities": vprobs}
+
+        # Group questions narrowing a big page: each group's "log in" element,
+        # or __none__.
+        for q, spec in questions.items():
+            if q.startswith("g") and q[1:].isdigit():
+                gcrit = spec["criteria"]
+                hit = next((k for k in gcrit if "log in" in str(gcrit[k]).lower()), "__none__")
+                answers[q] = {"choice": hit, "confidence": 0.9}
+
+        # act's follow-up drop target for a drag.
+        if "target" in questions:
+            tcrit = questions["target"]["criteria"]
+            tpick = next((k for k in tcrit if "drop" in str(tcrit[k]).lower()), next(iter(tcrit)))
+            answers["target"] = {"choice": tpick, "confidence": 0.9}
+
+        # act's follow-up value question about one chosen field.
+        if "value_key" in questions and "goal_met" not in questions:
+            vkeys = questions["value_key"]["criteria"]
+            vchoice = "name" if "name" in vkeys else "__none__"
+            answers["value_key"] = {"choice": vchoice, "confidence": 0.91}
+
+        # ask: a yes/no Noul, or a Choice over the caller's options.
+        if "answer" in questions:
+            q = questions["answer"]
+            if q["type"] == "noul":
+                answers["answer"] = {"noul": 0.93 if "smoke" in low else 0.04}
+            else:
+                opts = list(q["criteria"])
+                pick = next((k for k in opts if str(q["criteria"][k]).lower() in low), opts[0])
+                rest = [k for k in opts if k != pick]
+                probs = {pick: 0.8}
+                for k in rest:
+                    probs[k] = 0.2 / len(rest)
+                answers["answer"] = {"choice": pick, "confidence": 0.8,
+                                     "probabilities": probs}
+
+        # read: one Noul per passage; the ones about smoke are relevant.
+        for q, spec in questions.items():
+            if q.startswith("p") and q[1:].isdigit() and spec["type"] == "noul":
+                answers[q] = {"noul": 0.9 if "smoke" in spec["instructions"].lower() else 0.05}
 
         resp = json.dumps({
             "model": "jev-stub",
@@ -471,6 +526,7 @@ JEV_CLICK=$(call click "$(printf '{"sessionId":"%s","selector":"jev: the Log in 
 check "jev: click resolves via the stub" "$JEV_CLICK" 'confidence 0.91'
 check "jev: click names the picked element" "$JEV_CLICK" '#jev-b'
 check "jev: click really clicked it" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'clicked-jev'
+check "jev: leaves no trace the page can see" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"[document.querySelectorAll(%s).length, typeof globalThis.__bsPicks].join()"}' "$SID" "'[data-jev-id], [data-bs-typed]'")")" '"0,undefined"'
 
 check "jev: type picks the email input" "$(call type "$(printf '{"sessionId":"%s","selector":"jev: the Email field","text":"hi@x.io"}' "$SID")")" 'Typed 7 chars into input #jev-in'
 check "jev: type typed into the picked input" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.getElementById(%s).value"}' "$SID" "'jev-in'")")" 'hi@x.io'
@@ -540,7 +596,7 @@ check "act: blocked on an error page" "$(call act "$(printf '{"sessionId":"%s","
 EMPTY_URL="data:text/html,<title>empty-page</title><p>Nothing%20here</p>"
 check "act: navigate to the empty page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$EMPTY_URL")")" 'Navigated to'
 check "act: goal-met without elements" "$(call act "$(printf '{"sessionId":"%s","goal":"confirm we are on the empty page"}' "$SID")")" 'Goal was already met'
-check "act: bails when there is nothing to act on" "$(call act "$(printf '{"sessionId":"%s","goal":"click the thing"}' "$SID")")" 'no interactive elements'
+check "act: waits, then stops when there is nothing to act on" "$(call act "$(printf '{"sessionId":"%s","goal":"click the thing"}' "$SID")")" 'Stuck after 0 steps'
 
 # Repeated no-effect clicks end in no_progress.
 DEAD_URL="data:text/html,<title>dead-page</title><button id=dead-btn>Poke</button>"
@@ -548,6 +604,98 @@ check "act: navigate to the dead page" "$(call navigate "$(printf '{"sessionId":
 ACT_DEAD=$(call act "$(printf '{"sessionId":"%s","goal":"poke the dead thing"}' "$SID")")
 check "act: no_progress after dead clicks" "$ACT_DEAD" 'no visible effect'
 check "act: no_progress status is reported" "$ACT_DEAD" 'no_progress'
+
+# Low confidence hands the decision back instead of erroring.
+check "act: navigate back to the loop page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$ACT_URL")")" 'Navigated to'
+ACT_UNSURE=$(call act "$(printf '{"sessionId":"%s","goal":"do the unsure thing"}' "$SID")")
+check "act: uncertain on a low-confidence step" "$ACT_UNSURE" '"status":"uncertain"'
+check "act: uncertain lists candidates" "$ACT_UNSURE" '"candidates"'
+
+# A bot check stops with needs_human.
+BOT_URL="data:text/html,<title>bot%20check</title><button>Verify</button>"
+check "act: navigate to the bot check" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$BOT_URL")")" 'Navigated to'
+check "act: needs_human on a bot check" "$(call act "$(printf '{"sessionId":"%s","goal":"open my account"}' "$SID")")" '"status":"needs_human"'
+
+# confirmIrreversible holds back a click that can't be undone.
+BUY_URL="data:text/html,<title>checkout</title><button id=buy>Do%20it</button>"
+check "act: navigate to checkout" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$BUY_URL")")" 'Navigated to'
+check "act: wire the buy button" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).addEventListener(%s, () => { document.title = %s }); return 1 })()"}' "$SID" "'buy'" "'click'" "'bought'")")" '"result":1'
+ACT_BUY=$(call act "$(printf '{"sessionId":"%s","goal":"type the name and submit","confirmIrreversible":true}' "$SID")")
+check "act: needs_confirmation before an irreversible click" "$ACT_BUY" '"status":"needs_confirmation"'
+check "act: names the pending click" "$ACT_BUY" '"pending"'
+check "act: nothing was bought" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'checkout'
+
+# A confirm() dialog is accepted and reported instead of hanging the loop.
+DIALOG_URL="data:text/html,<title>dialog</title><button id=dlg>Do%20it</button>"
+check "act: navigate to the dialog page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$DIALOG_URL")")" 'Navigated to'
+check "act: wire a confirm dialog" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).addEventListener(%s, () => { document.title = confirm(%s) ? %s : %s }); return 1 })()"}' "$SID" "'dlg'" "'click'" "'Sure?'" "'act-done'" "'refused'")")" '"result":1'
+ACT_DLG=$(call act "$(printf '{"sessionId":"%s","goal":"type the name and submit"}' "$SID")")
+check "act: accepts a confirm dialog" "$ACT_DLG" 'Completed the goal in 1 step'
+check "act: reports the dialog" "$ACT_DLG" 'sure?'
+
+# A page with more elements than fit one Jev question: 600 buttons, the
+# target last. They are narrowed in even groups first, so it is still found.
+BIG_URL="data:text/html,<title>big</title><div id=big></div>"
+check "jev: navigate to the big page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$BIG_URL")")" 'Navigated to'
+check "jev: build 600 buttons" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { const b = document.getElementById(%s); for (let i = 0; i < 599; i++) b.insertAdjacentHTML(%s, %s + i + %s); b.insertAdjacentHTML(%s, %s); document.getElementById(%s).addEventListener(%s, () => { document.title = %s }); return 1 })()"}' "$SID" "'big'" "'beforeend'" "'<button>Item '" "'</button>'" "'beforeend'" "'<button id=last>Log in</button>'" "'last'" "'click'" "'big-clicked'")")" '"result":1'
+check "jev: finds the target past the first group" "$(call click "$(printf '{"sessionId":"%s","selector":"jev: the Log in button"}' "$SID")")" '600 offered'
+check "jev: clicked the last button" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'big-clicked'
+check "jev: nothing matching is an error, not a guess" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.getElementById(%s).remove()"}' "$SID" "'last'")")" 'result'
+check "jev: reports that nothing matched" "$(call click "$(printf '{"sessionId":"%s","selector":"jev: the Log in button"}' "$SID")")" 'found nothing matching'
+
+# Hover, right-click and drag, each on its own page so the stub's default
+# pick (the first element) is the one to act on.
+HOVER_URL="data:text/html,<title>hover</title><button id=hv>Card</button>"
+check "act: navigate to the hover page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$HOVER_URL")")" 'Navigated to'
+check "act: wire a hover handler" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).addEventListener(%s, () => { document.title = %s }); return 1 })()"}' "$SID" "'hv'" "'mouseover'" "'act-done'")")" '"result":1'
+check "act: hovers when the goal calls for it" "$(call act "$(printf '{"sessionId":"%s","goal":"hover over the card"}' "$SID")")" '"action":"hover"'
+
+RC_URL="data:text/html,<title>menu</title><button id=rc>Box</button>"
+check "act: navigate to the context menu page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$RC_URL")")" 'Navigated to'
+check "act: wire a context menu handler" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).addEventListener(%s, (e) => { e.preventDefault(); document.title = %s }); return 1 })()"}' "$SID" "'rc'" "'contextmenu'" "'act-done'")")" '"result":1'
+check "act: right-clicks when the goal calls for it" "$(call act "$(printf '{"sessionId":"%s","goal":"right-click the box"}' "$SID")")" '"action":"right_click"'
+
+DRAG_URL="data:text/html,<title>drag</title><div id=src draggable=true>Box%20A</div><p>gap</p><div id=dst tabindex=0 style=height:60px>Drop%20zone</div>"
+check "act: navigate to the drag page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$DRAG_URL")")" 'Navigated to'
+check "act: wire an HTML5 drop zone" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { const d = document.getElementById(%s); d.addEventListener(%s, (e) => e.preventDefault()); d.addEventListener(%s, (e) => { e.preventDefault(); document.title = %s }); document.getElementById(%s).addEventListener(%s, (e) => e.dataTransfer.setData(%s, %s)); return 1 })()"}' "$SID" "'dst'" "'dragover'" "'drop'" "'act-done'" "'src'" "'dragstart'" "'text/plain'" "'a'")")" '"result":1'
+ACT_DRAG=$(call act "$(printf '{"sessionId":"%s","goal":"drag box A onto the drop zone"}' "$SID")")
+check "act: drags onto the chosen target" "$ACT_DRAG" '"action":"drag"'
+check "act: the HTML5 drop fired" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" 'act-done'
+
+# act presses any key, here Tab to move focus; press_key takes combinations.
+TAB_URL="data:text/html,<title>tab</title><input id=a autofocus><input id=b>"
+check "act: navigate to the tab page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$TAB_URL")")" 'Navigated to'
+check "act: wire a focus handler" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).focus(); document.getElementById(%s).addEventListener(%s, () => { document.title = %s }); return 1 })()"}' "$SID" "'a'" "'b'" "'focus'" "'act-done'")")" '"result":1'
+check "act: presses Tab when the goal calls for it" "$(call act "$(printf '{"sessionId":"%s","goal":"press tab to move to the next field"}' "$SID")")" '"target":"Tab"'
+check "press_key: Shift+Tab moves focus back" "$(call press_key "$(printf '{"sessionId":"%s","key":"Shift+Tab"}' "$SID")")" 'Pressed Shift+Tab'
+check "press_key: focus really moved back" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.activeElement.id"}' "$SID")")" '"a"'
+
+# Typing text with no key on a US keyboard, and picking inside a shadow root.
+SHADOW_URL="data:text/html,<title>shadow</title><button>Cancel</button><div id=host></div>"
+check "type: navigate to the shadow page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$SHADOW_URL")")" 'Navigated to'
+check "type: build a shadow input" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).attachShadow({mode: %s}).innerHTML = %s; return 1 })()"}' "$SID" "'host'" "'open'" "'<input id=deep placeholder=Email>'")")" '"result":1'
+check "type: jev finds a field in a shadow root" "$(call type "$(printf '{"sessionId":"%s","selector":"jev: the Email field","text":"Gödel ✓"}' "$SID")")" 'Typed 7 chars'
+check "type: non-ASCII text went in" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.getElementById(%s).shadowRoot.getElementById(%s).value"}' "$SID" "'host'" "'deep'")")" 'Gödel ✓'
+
+# ---- ask: questions about the page (against the stub API above) ------------
+ASK_URL="data:text/html,<title>basket</title><p>Your%20cart%20holds%20a%20smoke%20detector</p>"
+check "ask: navigate to the cart page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$ASK_URL")")" 'Navigated to'
+check "ask: a yes/no question" "$(call ask "$(printf '{"sessionId":"%s","question":"Is there an item in the cart?"}' "$SID")")" '"answer":"yes"'
+ASK_PICK=$(call ask "$(printf '{"sessionId":"%s","question":"Which page is this?","options":["product page","cart","checkout"]}' "$SID")")
+check "ask: picks the option that fits" "$ASK_PICK" '"answer":"cart"'
+check "ask: lists each option's probability" "$ASK_PICK" '"probabilities"'
+check "ask: rejects a single option" "$(call ask "$(printf '{"sessionId":"%s","question":"Which?","options":["only"]}' "$SID")")" '2 to 255 entries'
+
+# ---- read: only the relevant passages (against the stub API above) ---------
+READ_URL="data:text/html,<title>long</title><main id=m></main>"
+check "read: navigate to a long page" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$READ_URL")")" 'Navigated to'
+check "read: fill it with 40 sections" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { const m = document.getElementById(%s); for (let i = 0; i < 40; i++) m.insertAdjacentHTML(%s, %s + i + %s + (i === 27 ? %s : %s).repeat(12) + %s); return document.body.innerText.length })()"}' "$SID" "'m'" "'beforeend'" "'<h2>Section '" "'</h2><p>'" "'The smoke detector chirps when its battery is low. '" "'Nothing much happens in this part of the page. '" "'</p>'")")" '"result":'
+READ_OUT=$(call read "$(printf '{"sessionId":"%s","question":"Why does the alarm chirp?"}' "$SID")")
+check "read: keeps the relevant section" "$READ_OUT" 'smoke detector chirps'
+check "read: under its heading" "$READ_OUT" '## Section 27'
+check "read: drops the rest" "$READ_OUT" '"kept":1'
+check "read: a short page comes back whole" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "data:text/html,<p>Tiny%20page</p>")")" 'Navigated to'
+check "read: whole, without Jev" "$(call read "$(printf '{"sessionId":"%s","question":"anything"}' "$SID")")" '"filtered":false'
 
 # ---- close ---------------------------------------------------------------
 

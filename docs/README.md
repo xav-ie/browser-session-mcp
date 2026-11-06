@@ -20,5 +20,12 @@ people want them:
    [systemd without Nix](deployment.md#running-the-daemons-without-nix-systemd),
    the full [env-var reference](deployment.md#environment), and
    [operational notes](deployment.md#operational-notes).
-4. **[Development](development.md)**: read before sending a change: the
+4. **[Picking elements with Jev](jev.md)**: read when you want agents to
+   [describe elements instead of writing CSS](jev.md#plain-language-selectors),
+   run a whole goal with [`act`](jev.md#act-a-whole-goal-in-one-call), or
+   [`ask`](jev.md#ask-questions-about-the-page) and
+   [`read`](jev.md#read-only-the-relevant-parts) the page:
+   [what Jev sees](jev.md#what-jev-sees), [how it compares](jev.md#how-it-compares)
+   and [tuning](jev.md#tuning).
+5. **[Development](development.md)**: read before sending a change: the
    checks CI runs, regenerating the diagrams, and how releases are cut.

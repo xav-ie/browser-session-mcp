@@ -14,7 +14,7 @@ const read = (file) => readFileSync(path.join(root, file), "utf8");
 const write = (file, text) => writeFileSync(path.join(root, file), text);
 const DIR = "docs/diagrams";
 const palette = JSON.parse(read(`${DIR}/palette.json`));
-const DOCS = ["README.md", "docs/how-it-works.md", "docs/workflows.md", "docs/development.md"];
+const DOCS = ["README.md", "docs/how-it-works.md", "docs/workflows.md", "docs/development.md", "docs/jev.md"];
 
 // --- primitives -------------------------------------------------------------------
 const W = 1062;
@@ -115,6 +115,10 @@ const label = (x, y, s, anchor = "middle") => {
   return rect("tag", left, y - 12, w, 19, 5) + text("label", x, y + 2, s, anchor);
 };
 
+// A line of sub text on a background tag, for text that arrows cross.
+const note = (x, y, s) =>
+  rect("tag", x - 6, y - 14, textWidth(s, SIZE.sub) + 12, 20, 5) + text("sub", x, y, s);
+
 const arrow = (points, cls = "edge") =>
   `<path class="${cls}" d="M${points.map(([x, y]) => `${n(x)} ${n(y)}`).join("L")}"/>`;
 
@@ -186,7 +190,7 @@ const diagrams = {
     const group = { x: M, y: 150, w: W - 2 * M, h: 196 };
     const rw = (group.w - 32 - 3 * 16) / 4;
     const role = (i, t) => ({ x: group.x + 16 + i * (rw + 16), y: group.y + 44, w: rw, h: 104, kind: "key", text: t });
-    const mcp = role(0, ["mcp", "the 35 tools, over stdio; restart it any time"]);
+    const mcp = role(0, ["mcp", "the 37 tools, over stdio; restart it any time"]);
     const listener = role(1, ["listener", "records console and network traffic, per visit"]);
     const reaper = role(2, ["reaper", "on a timer, closes sessions left idle"]);
     const takeover = role(3, ["takeover", "serves the page a person logs in through"]);
@@ -204,8 +208,7 @@ const diagrams = {
       h: chrome.y + chrome.h + M,
       body:
         rect("group", group.x, group.y, group.w, group.h, 16) +
-        text("title", group.x + 18, group.y + 28, "browser-session: one binary, four roles") +
-        text("sub", group.x + 18, group.y + group.h - 16, "They share one state dir: sessions, visit logs, saved cookies, takeover tickets.") +
+        text("title", group.x + group.w / 2, group.y + 28, "browser-session: one binary, four roles", "middle") +
         rect("box", chrome.x, chrome.y, chrome.w, chrome.h, 14) +
         text("title", chrome.x + 18, chrome.y + 30, "Chrome, with the DevTools Protocol on :9222") +
         text("sub", chrome.x + 18, chrome.y + 50, "yours to run: headless or not, local or remote; one Chrome holds every session") +
@@ -220,6 +223,9 @@ const diagrams = {
         label(at(mcp).bottom[0], 384, "drives pages") +
         label(at(listener).bottom[0], 384, "watches every tab") +
         label(at(reaper).bottom[0], 384, "cleans up") +
+        // Drawn after the arrows, on a background tag, so they pass under it
+        // like the labels.
+        note(group.x + 18, group.y + group.h - 16, "They share one state dir: sessions, visit logs, saved cookies, takeover tickets.") +
         label(at(takeover).bottom[0], 384, "live view and input"),
       alt: "Your AI agent sends MCP tool calls with a sessionId to the mcp role. The browser-session binary runs as four roles that share one state dir: mcp drives pages, listener watches every tab and records console messages and requests per visit, reaper closes idle sessions on a timer, and takeover serves the page a person opens to log in, with a live view and input to Chrome. All four talk to one Chrome over the DevTools Protocol on port 9222, which holds every session as its own isolated context with its own cookies, storage and tabs",
     };
@@ -273,6 +279,66 @@ const diagrams = {
     return {
       ...d,
       alt: "Sequence: the agent calls request_human_takeover and gets a one-time link back, which it shows to a person. The person opens the link; the takeover page streams the live Chrome tab and forwards their input. They log in with their password, passkey or 2FA straight into Chrome, and the agent never sees it. They click Done, and the agent's await_human_takeover call returns completed: true",
+    };
+  },
+
+  "jev-pick"() {
+    const d = sequence(
+      [
+        { id: "agent", text: ["Your agent"] },
+        { id: "mcp", kind: "key", text: ["browser-session mcp"] },
+        { id: "page", text: ["The page, in Chrome"] },
+        { id: "jev", text: ["Jev", "TypeSafe's API"] },
+      ],
+      [
+        { from: "agent", to: "mcp", label: "click(\"the login button\")" },
+        { from: "mcp", to: "page", label: "collect interactive elements" },
+        { from: "page", to: "mcp", label: "all of them, viewport first", ret: true },
+        { from: "mcp", to: "page", label: "keep a hidden reference to each" },
+        { from: "mcp", to: "jev", label: "one Choice: goal, page text, element list" },
+        { from: "jev", to: "mcp", label: "e17, confidence 0.97", ret: true },
+        { note: "Under the floor (0.5, or 0.85 on the fallback) it errors instead of guessing.", over: ["mcp", "jev"] },
+        { from: "mcp", to: "page", label: "trusted CDP click on e17" },
+        { from: "mcp", to: "agent", label: "Clicked button \"Sign in\"", ret: true },
+      ],
+    );
+    return {
+      ...d,
+      alt: "Sequence: the agent calls click with the plain-language selector the login button. The mcp server collects the page's interactive elements, those in a dialog and the viewport first, and keeps a reference to each where the page's scripts can't see it. It sends Jev one Choice request with the goal, the page's text and the element list, and Jev answers e17 with confidence 0.97. Under the confidence floor, 0.5 or 0.85 on the fallback, it errors instead of guessing. The server clicks e17 with trusted CDP input and tells the agent it clicked the Sign in button",
+    };
+  },
+
+  "act-loop"() {
+    const gap = 44;
+    const bw = (W - 2 * M - 3 * gap) / 4;
+    const y = 176;
+    const h = 112;
+    const step = (i, kind, t) => ({ x: M + i * (bw + gap), y, w: bw, h, kind, text: t });
+    const read = step(0, "key", ["Read the page", "its elements, visible text, and the steps so far"]);
+    const decide = step(1, "key", ["One Jev request", "the next step, and: goal met? a wall in the way? can't be undone?"]);
+    const act = step(2, "key", ["Do it", "click, type, hover, drag, select, scroll, or a key"]);
+    const check = step(3, "key", ["Check it changed", "if not, try Jev's next best pick"]);
+    const agent = { x: read.x, y: M, w: read.w, h: 88, text: ["Your agent", "act({ goal, values })"] };
+    const stop = {
+      x: decide.x,
+      y: M,
+      w: check.x + check.w - decide.x,
+      h: 88,
+      kind: "end",
+      text: ["Stop with a status", "completed or likely_completed", "needs_login, needs_human, needs_confirmation, stuck, blocked or uncertain"],
+    };
+    const loopY = y + h + 40;
+    return {
+      h: loopY + 14 + M,
+      body:
+        [agent, stop, read, decide, act, check].map(box).join("") +
+        arrow([at(agent).bottom, at(read).top]) +
+        arrow([at(decide).top, [at(decide).top[0], stop.y + stop.h]]) +
+        label(at(decide).top[0], (y + stop.y + stop.h) / 2 + 2, "when it's done, blocked or unsure") +
+        [read, decide, act].map((b, i) => arrow([at(b).right, at([decide, act, check][i]).left])).join("") +
+        arrow([at(check).bottom, [at(check).bottom[0], loopY], [at(read).bottom[0], loopY], at(read).bottom]) +
+        label((at(read).bottom[0] + at(check).bottom[0]) / 2, loopY, "next step, until maxSteps or three actions in a row do nothing"),
+      alt: "Your agent calls act with a goal and values. act reads the page: its elements, visible text and the steps so far. It sends one Jev request that picks the next step and judges whether the goal is met, whether a wall is in the way and whether the click can't be undone. It does the step: click, type, hover, drag, select, scroll, or a key press. It checks the page changed, and if not tries Jev's next best pick. Then it loops back to read the page, until maxSteps or three actions in a row do nothing. When Jev's judgments say it's done, blocked or unsure, it stops with a status: completed or likely_completed; needs_login, needs_human or needs_confirmation; stuck, blocked or uncertain",
     };
   },
 

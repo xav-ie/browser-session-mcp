@@ -37,7 +37,7 @@ credentials.
   keyboard input. Stealth can be switched on and off per session.
 - **Test like a slow phone.** Throttle a session's CPU and network, and run
   your own script before the page's to time what happens from the first byte.
-- **[35 tools](#all-35-tools)** for tabs, navigation, clicks and typing,
+- **[37 tools](#all-37-tools)** for tabs, navigation, clicks and typing,
   screenshots, accessibility snapshots, logs, CPU profiles and throttling.
 
 ## Quick start
@@ -147,69 +147,31 @@ has the details and the code.
 
 ## Picking elements with Jev
 
-`take_snapshot` returns the page as text without element references, so
-acting on it means writing CSS selectors by hand. With a
-[Jev](https://typesafe.ai) key configured, the acting tools also accept
-plain language: describe the element and the Jev decision model picks it.
+<img align="right" src="docs/logo/jev-enabled.svg" width="120" alt="A holographic purple sticker reading jev inside, in the style of the old Intel inside stickers">
+
+Set `TYPESAFE_API_KEY` and agents stop writing CSS selectors. Describe the
+element in plain words and [Jev](https://typesafe.ai), a small decision model,
+picks it in a few hundred milliseconds for a fraction of a cent, instead of a
+large model reading the whole page to name a selector.
 
 ```
-click({ sessionId, selector: "the login button" })        ← plain words
-click({ sessionId, selector: "jev: the login button" })   ← straight to Jev
-type({ sessionId, selector: "the email field", text: "xavier@example.com" })
+click({ sessionId, selector: "the login button" })
+type({ sessionId, selector: "the email field", text: "me@example.com" })
+act({ sessionId, goal: "add the cheapest oolong to the cart" })
+ask({ sessionId, question: "Is the oolong in the cart?" })
+read({ sessionId, question: "What is the return policy?" })
 ```
 
-No syntax to remember: a selector is first used as CSS, and if it matches
-nothing within `timeout` it is retried as a plain-language goal via Jev —
-the automatic fallback, which also rescues mistyped CSS selectors when Jev
-recognizes the intent. A `jev:` prefix skips the CSS step and goes straight
-to Jev. Either way, the confirmation names the element that was picked.
+A selector is tried as CSS first, so nothing changes for agents that already
+write CSS. `act` runs a whole multi step goal on the server, one Jev call per
+step, and reports whether it finished, got stuck or hit a login wall. `ask`
+answers a yes/no or multiple choice question about the page, and `read`
+returns only the parts of a long page that answer a question. Text to
+type stays out of the model, and every miss is an error, never a guess.
+[Picking elements with Jev](docs/jev.md) covers the benefits, what Jev sees,
+and tuning.
 
-Each Jev resolution extracts the page's interactive elements from the DOM
-(in-viewport first, capped at 240 — Jev's Choice limit is 255), stamps them
-with `data-jev-id` attributes, and sends one Choice request to TypeSafe's
-API (~150–500ms, $0.042 per million input tokens — a fraction of a cent per
-action). The chosen element is then clicked or typed into through the same
-trusted-CDP paths as a CSS selector.
-
-Jev only picks the element — it never generates text, coordinates or
-scripts — and everything fails closed: with no key the fallback is simply
-skipped and the original CSS error returned; an empty page, confidence
-below the floor, or a malformed response is an error, not a guess.
-Confidence is held to a higher bar on the automatic fallback
-(`JEV_FALLBACK_MIN_CONFIDENCE`, default 0.85) than on explicit `jev:` goals
-(`JEV_MIN_CONFIDENCE`, default 0.5): when the caller passed CSS that matched
-nothing, a Jev guess should only act if it is clearly right. Elements are
-chosen from the page as it is when the call runs; `wait_for` content first on
-pages that are still loading (`wait_for` itself takes CSS selectors and text
-only).
-
-`act` runs the same machinery as a server-side loop for a whole goal: each
-step is one Jev request that picks the next element — or a scroll/wait/back
-action — and simultaneously judges whether the goal is met or the page is a
-dead end (both gates at 0.85), so a multi-step flow costs seconds and
-fractions of a cent instead of a driving-LLM round trip per click. Every
-decision also sees the page's visible text (a modal's text first when one
-is open), so goals can reference content that is not a button label.
-Pass `values` for anything to type: Jev sees only their keys and picks which
-field each belongs to in the same request that picks the element; the text
-goes straight through CDP, never to a model. The loop verifies each action
-had an effect (a fingerprint of URL, title, visible text and form state
-moved), retries with Jev's next-best element
-when one does not, and validates the probability distribution of every
-answer. It returns a per-step trace and stops at `maxSteps` (default 8)
-with a status: `completed`, `stuck`, `needs_login` (a sign-in wall — pair
-it with `request_human_takeover` or `load_browser_state`; skipped when
-`values` were passed, since then the caller supplied what to type), `blocked` (the
-page showed an error), or `no_progress` (repeated actions had no visible
-effect). It still fails closed — but Jev can be eager to call a goal met,
-so verify the final page yourself.
-
-Set `TYPESAFE_API_KEY` (from [console.typesafe.ai](https://console.typesafe.ai))
-to enable it. `JEV_MODEL`, `JEV_BASE_URL`, `JEV_TIMEOUT_MS`,
-`JEV_MIN_CONFIDENCE` and `JEV_FALLBACK_MIN_CONFIDENCE` tune it — see
-[Deployment](docs/deployment.md#environment).
-
-## All 35 tools
+## All 37 tools
 
 Most tools take a `sessionId` first. Tools marked ⚙ need one of the optional
 background roles from [Deployment](docs/deployment.md).
@@ -221,7 +183,7 @@ can type their results.
 | Sessions | `open_browser_session`, `close_browser_session`, `list_browser_sessions` |
 | Tabs | `new_page`, `list_pages`, `switch_tab`, `close_tab` |
 | Navigation | `navigate` |
-| Seeing the page | `take_screenshot`, `take_snapshot` (the accessibility tree as text) |
+| Seeing the page | `take_screenshot`, `take_snapshot` (the accessibility tree as text), `ask`, `read` |
 | Acting on it | `act`, `click`, `type`, `press_key`, `scroll`, `move_mouse`, `wait_for`, `evaluate` |
 | Logs ⚙ | `list_visits`, `list_console_messages`, `list_network_requests` |
 | Profiling | `start_profiling`, `stop_profiling` |
@@ -250,10 +212,12 @@ can type their results.
 **Seeing the page**
 - `take_screenshot({ sessionId, fullPage? })`: a PNG
 - `take_snapshot({ sessionId })`: the accessibility tree as indented text
+- `ask({ sessionId, question, options? })` → `{ answer, probability, probabilities? }`: asks Jev about the page as it is now, yes/no or which of your `options` fits, in one cheap call
+- `read({ sessionId, question, maxChars? })` → `{ text, pageChars, passages, kept, filtered }`: only the passages of the page that help answer `question`, under their headings; a page under 8,000 characters comes back whole
 
 **Acting on it** (real CDP input, not synthetic JavaScript events)
 - `act({ sessionId, goal, values?, maxSteps? })` → `{ status, goal, steps, url, title }`: a Jev-driven loop toward a goal — click, type (from `values`), select, scroll, wait or back per step, checking goal-met, dead-end, login and error walls each round until it finishes, gets stuck or runs out of budget
-- `click({ sessionId, selector | x,y, timeout? })`: `selector` may be plain language or a `jev:<goal>` — the Jev decision model picks the element (see [Picking elements with Jev](#picking-elements-with-jev))
+- `click({ sessionId, selector | x,y, timeout? })`: `selector` may be plain language or a `jev:<goal>` — the Jev decision model picks the element (see [Picking elements with Jev](docs/jev.md))
 - `type({ sessionId, selector, text, delay?, clear?, timeout? })`: `selector` may be plain language or a `jev:` goal; the text itself always comes from you
 - `press_key({ sessionId, key, selector?, timeout? })`: `key` is a name (Enter, Tab, ArrowDown…) or a character; `selector` may be plain language or a `jev:` goal and is optional
 - `scroll({ sessionId, deltaY?, deltaX?, x?, y? })`
@@ -296,6 +260,8 @@ can type their results.
 
 - **[Workflows](docs/workflows.md):** handing a login to a person, and saving
   cookies to reuse.
+- **[Picking elements with Jev](docs/jev.md):** plain-language selectors and
+  the `act` goal loop, what they cost, and what the model sees.
 - **[How it works](docs/how-it-works.md):** why a session outlives its
   connection, the four roles, how stealth works, and what's on disk.
 - **[Deployment](docs/deployment.md):** building from source, the NixOS module,
