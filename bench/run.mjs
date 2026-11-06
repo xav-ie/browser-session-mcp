@@ -7,7 +7,7 @@
 // "likely_done".
 //
 //   BROWSER_URL=http://localhost:9222 TYPESAFE_API_KEY=... node bench/run.mjs \
-//     [--set base,hard,guard,peers,local|all] [--only id,id] [--concurrency 3] [--out file.json]
+//     [--set base,hard,guard,peers,heldout1,heldout2,local|all] [--only id,id] [--concurrency 3] [--out file.json]
 //
 // MCP_BIN defaults to target/release/browser-session. STATE_DIR defaults to
 // a temporary directory.
@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { HELDOUT1, HELDOUT2 } from "./heldout.mjs";
 import { GUARD, HARD, PEERS, TASKS } from "./tasks.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -28,7 +29,15 @@ const arg = (k, d) => {
 // same convention as jev-browser's harness, so both can run one task file.
 const localFile = path.join(path.dirname(fileURLToPath(import.meta.url)), "tasks.local.mjs");
 const LOCAL = existsSync(localFile) ? (await import(localFile)).LOCAL : [];
-const SETS = { base: TASKS, hard: HARD, guard: GUARD, peers: PEERS, local: LOCAL };
+const SETS = {
+  base: TASKS,
+  hard: HARD,
+  guard: GUARD,
+  peers: PEERS,
+  heldout1: HELDOUT1,
+  heldout2: HELDOUT2,
+  local: LOCAL,
+};
 const set = arg("--set", "all");
 const pool = set === "all" ? Object.values(SETS).flat() : set.split(",").flatMap((s) => SETS[s] ?? []);
 const only = arg("--only")?.split(",");
