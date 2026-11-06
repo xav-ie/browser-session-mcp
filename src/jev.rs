@@ -940,11 +940,11 @@ pub const PSEUDO_ACTIONS: &[(&str, &str)] = &[
 pub const TOUCH_ACTIONS: &[(&str, &str)] = &[
     (
         "swipe_left",
-        "Swipe a finger left across the middle of the screen, e.g. to close a drawer or move a carousel on.",
+        "Swipe a finger left across the carousel in view (else the middle of the screen), e.g. to move it on or close a drawer.",
     ),
     (
         "swipe_right",
-        "Swipe a finger right across the middle of the screen, e.g. to open a side menu or move a carousel back.",
+        "Swipe a finger right across the carousel in view (else the middle of the screen), e.g. to move it back or open a side menu.",
     ),
     (
         "swipe_up",

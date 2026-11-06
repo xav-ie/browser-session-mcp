@@ -932,9 +932,9 @@ impl BrowserSessionServer {
                     "wait" => tokio::time::sleep(Duration::from_millis(500)).await,
                     "press_key" => dispatch_key(&page, &d.key).await?,
                     swipe if touch && swipe.starts_with("swipe_") => {
-                        let mid = (vp.width as f64 / 2.0, vp.height as f64 / 2.0);
                         let direction = swipe.trim_start_matches("swipe_");
-                        touch_swipe(&page, mid, swipe_end(mid, direction, vp), 300).await?
+                        let from = swipe_start(&page, direction, vp).await;
+                        touch_swipe(&page, from, swipe_end(from, direction, vp), 300).await?
                     }
                     other => bail!("Jev chose `{other}`, which is not one of the offered actions"),
                 }
@@ -2854,6 +2854,33 @@ async fn element_center(page: &Page, selector: &str) -> Result<(f64, f64)> {
     let x = arr[0].as_f64().ok_or_else(|| anyhow!("bad x coord"))?;
     let y = arr[1].as_f64().ok_or_else(|| anyhow!("bad y coord"))?;
     Ok((x, y))
+}
+
+/// Where `act`'s sideways swipe starts: the middle of the in-view part of
+/// the largest box on screen that scrolls sideways (a carousel), else the
+/// middle of the screen. A carousel below the middle would miss a swipe
+/// across it.
+async fn swipe_start(page: &Page, direction: &str, vp: Viewport) -> (f64, f64) {
+    let mid = (vp.width as f64 / 2.0, vp.height as f64 / 2.0);
+    if !matches!(direction, "left" | "right") {
+        return mid;
+    }
+    const FIND: &str = "function() { var best = null, area = 0; \
+        var all = document.body ? document.body.getElementsByTagName('*') : []; \
+        for (var i = 0; i < all.length && i < 20000; i++) { var el = all[i]; \
+          if (el.scrollWidth <= el.clientWidth + 1) continue; \
+          if (getComputedStyle(el).overflowX === 'visible') continue; \
+          var r = el.getBoundingClientRect(); \
+          var w = Math.min(r.right, innerWidth) - Math.max(r.left, 0); \
+          var h = Math.min(r.bottom, innerHeight) - Math.max(r.top, 0); \
+          if (w > 40 && h > 40 && w * h > area) { area = w * h; \
+            best = [Math.max(r.left, 0) + w / 2, Math.max(r.top, 0) + h / 2]; } } \
+        return best; }";
+    iso_eval_function(page, FIND)
+        .await
+        .ok()
+        .and_then(|v| Some((v.get(0)?.as_f64()?, v.get(1)?.as_f64()?)))
+        .unwrap_or(mid)
 }
 
 /// Where a swipe from `from` ends: 60% of the screen along `direction`.

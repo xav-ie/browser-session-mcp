@@ -260,6 +260,10 @@ coordinates or JavaScript.
   another site.
 - **Past 5,000 elements**, the rest are left out and Jev is told how many.
 - **Verify the end state.** `completed` is Jev's opinion.
+- **Carousels.** The page text holds every slide, shown or not, so `act`
+  often can't tell which slide shows, and a carousel past the first 1,500
+  characters isn't in the text at all. On a page of many alike carousels
+  it may press another one's buttons.
 
 ## How it compares
 
@@ -323,6 +327,27 @@ median time:
 
 jev-ultrafast is the fastest: it waits about 50 ms after an action, where
 `act` waits 300 ms for the page to react.
+
+### On phones
+
+In a session opened with `useMobileUA`, `act` taps and swipes like a
+finger. To measure it, we wrote 13 phone tasks (menus, search, forms,
+carousels, and one that should fail) before running `act` on them, and ran
+them as a phone session (390 by 844) and as a desktop session, 3 runs each,
+on 2026-11-06. The tasks are in [`bench/mobile.mjs`](../bench/mobile.mjs)
+(`node bench/run.mjs --set mobile --mobile`).
+
+| | tasks right | wrongly claimed done |
+|---|---|---|
+| phone session | 39 of 39 | 0 |
+| desktop session | 27 of 39 | 3 |
+
+The desktop session misses the three carousel tasks, since it can't swipe
+and the carousel ignores the arrow keys, and opens the wrong menu on
+Wikipedia, which serves desktops another layout; those are the 3 wrong
+claims. Nine carousel tasks written afterwards on other libraries' pages
+([`CAROUSEL`](../bench/mobile.mjs), `--set carousel`) show the limit: 5 of
+27 right on a phone, for the reasons under [Limits](#limits).
 
 ## Tuning
 
