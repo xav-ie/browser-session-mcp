@@ -1,4 +1,81 @@
 # Changelog
+## 0.1.17 (2026-11-06)
+
+### Features
+
+#### act can hover, drag, right-click and press any key
+
+Besides clicking and typing, an `act` step can hover an element, right-click
+it, drag it onto another (HTML5 drag-and-drop included), or press a key:
+Enter, Escape, Tab, Shift+Tab, the arrows, Space, Backspace, Delete, Page
+Up/Down, Home or End. It accepts JavaScript dialogs (listed in `dialogs`)
+instead of hanging on them, follows a link that opens a new tab, and waits
+out a page mid-navigation. It reaches elements in open shadow roots and
+same-origin iframes, and elements only a script makes clickable, such as
+sortable table headers.
+
+#### act finishes far more tasks, and says how sure it is
+
+On jev-browser's 40-task suite, `act` went from about 12 tasks right to
+about 34. On two held-out sets it was never tuned on, it trails jev-browser
+on the first and matches it on the second (see `docs/jev.md`). `bench/`
+reruns all three.
+
+It types every value a form needs, asking which value belongs in each
+field, and clears a field the way a person does, so React inputs no longer
+get text appended. Each decision reads the page's main content and heading
+rather than its menus. New statuses report what happened: `likely_completed`
+when Jev rates the goal probably met (and the run stops there rather than
+acting past it), `uncertain` with the `candidates` Jev was weighing instead
+of an error, `needs_human` on a CAPTCHA or bot check, and, with the new
+`confirmIrreversible` option, `needs_confirmation` before an order, payment,
+send or delete.
+
+#### ask: questions about the page in one cheap call
+
+The new `ask` tool asks Jev about the active tab as it is now, judged on its
+URL, title and visible text. Without `options` it answers yes or no with the
+probability of yes ("Is an error message showing?"); with `options` it picks
+the one that fits and gives each one's probability ("Which page is this?":
+product page, cart, checkout). It lets a script branch on what a page shows
+without a large model, and checks what `act` did. Needs `TYPESAFE_API_KEY`.
+
+#### Plain-language picks reach every element, and start sooner
+
+A pick used to see at most 240 elements, so a target further down a long
+page could never be chosen. Jev now first sees what a person would (dialog
+and viewport first) with the option to say the right element isn't there;
+only then is the whole page offered, in even groups under its 255-option
+limit. Jev can also answer "none of these", which is an error, not a guess.
+Selectors that are plain words, like "the login button", go to Jev after one
+CSS check instead of waiting out the whole `timeout`.
+
+#### read: only the parts of a page that answer a question
+
+The new `read` tool returns just the passages of the active tab that help
+answer a question, under their headings, instead of the whole page. Jev
+rates every passage in parallel requests, so a 118,000-character Wikipedia
+article comes back as about 12,000 characters in under half a second.
+Navigation, sidebars, headers and footers are left out, and a page under
+8,000 characters comes back whole without asking Jev. Needs
+`TYPESAFE_API_KEY`.
+
+### Fixes
+
+#### Picking elements leaves nothing in the page
+
+Plain-language picks and `act` used to stamp a `data-jev-id` attribute on
+every element they offered, a change page scripts could notice. The offered
+elements are now remembered in the isolated world, where the page can't see
+them.
+
+#### Typing accented text, and key combinations
+
+`type` (and `act`) used to fail with "Key not found" on text with no key on
+a US keyboard, such as accented letters; that text is now inserted the way
+an input method does it. `press_key` accepts combinations such as
+`Shift+Tab` or `Control+a`.
+
 ## 0.1.16 (2026-11-04)
 
 ### Features
