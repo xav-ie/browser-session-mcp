@@ -287,7 +287,8 @@ the same kinds of tasks on other pages: the first after the main work, the
 second after the last fixes the first one prompted, each before running
 `act` on it. Both harnesses ran each set alternating, on one machine with
 the same Jev model (`jev-1.14.0`), 5 runs each, on 2026-11-05. The harness
-is in [`bench/`](../bench).
+and the held-out sets are in [`bench/`](../bench) (`node bench/run.mjs --set
+heldout1`).
 
 | | original 40 tasks | held-out set 1 (15 tasks) | held-out set 2 (14 tasks) |
 |---|---|---|---|
@@ -314,9 +315,9 @@ median time:
 
 | task | browser-session-mcp | [jkudish/jev-browser](https://github.com/jkudish/jev-browser) | [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) |
 |---|---|---|---|
-| Wikipedia: from Coffee to the Espresso article | 10/10, 0.99 s | 10/10, 1.89 s | 10/10, 0.90 s |
-| Wikipedia: search for Ristretto | 10/10, 1.37 s | 10/10, 1.55 s | 10/10, 1.02 s |
-| Wikipedia: search for Gödel's incompleteness theorems | 10/10, 1.51 s | 10/10, 1.78 s | 10/10, 1.26 s |
+| Wikipedia: from Coffee to the Espresso article | 10/10, 0.97 s | 10/10, 1.88 s | 9/10, 0.86 s |
+| Wikipedia: search for Ristretto | 10/10, 1.42 s | 10/10, 1.55 s | 10/10, 1.00 s |
+| Wikipedia: search for Gödel's incompleteness theorems | 10/10, 1.48 s | 10/10, 1.69 s | 10/10, 1.36 s |
 
 jev-ultrafast is the fastest: it waits about 50 ms after an action, where
 `act` waits 300 ms for the page to react.
