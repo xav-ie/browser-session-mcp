@@ -37,7 +37,7 @@ credentials.
   keyboard input. Stealth can be switched on and off per session.
 - **Test like a slow phone.** Throttle a session's CPU and network, and run
   your own script before the page's to time what happens from the first byte.
-- **[37 tools](#all-37-tools)** for tabs, navigation, clicks and typing,
+- **[39 tools](#all-39-tools)** for tabs, navigation, clicks and typing,
   screenshots, accessibility snapshots, logs, CPU profiles and throttling.
 
 ## Quick start
@@ -171,7 +171,7 @@ type stays out of the model, and every miss is an error, never a guess.
 [Picking elements with Jev](docs/jev.md) covers the benefits, what Jev sees,
 and tuning.
 
-## All 37 tools
+## All 39 tools
 
 Most tools take a `sessionId` first. Tools marked ⚙ need one of the optional
 background roles from [Deployment](docs/deployment.md).
@@ -184,7 +184,7 @@ can type their results.
 | Tabs | `new_page`, `list_pages`, `switch_tab`, `close_tab` |
 | Navigation | `navigate` |
 | Seeing the page | `take_screenshot`, `take_snapshot` (the accessibility tree as text), `ask`, `read` |
-| Acting on it | `act`, `click`, `type`, `press_key`, `scroll`, `move_mouse`, `wait_for`, `evaluate` |
+| Acting on it | `act`, `click`, `tap`, `swipe`, `type`, `press_key`, `scroll`, `move_mouse`, `wait_for`, `evaluate` |
 | Logs ⚙ | `list_visits`, `list_console_messages`, `list_network_requests` |
 | Profiling | `start_profiling`, `stop_profiling` |
 | Stealth | `set_stealth`, `get_stealth` |
@@ -196,7 +196,7 @@ can type their results.
 <summary><b>Every tool with its arguments</b></summary>
 
 **Sessions**
-- `open_browser_session({ viewport?, useMobileUA? })` → `{ sessionId, pageCount, activeUrl }`
+- `open_browser_session({ viewport?, useMobileUA? })` → `{ sessionId, pageCount, activeUrl }`: `useMobileUA` makes it a touch phone (mobile UA, device metrics and a touch screen)
 - `close_browser_session({ sessionId })`: safe to call twice
 - `list_browser_sessions()`
 
@@ -218,6 +218,8 @@ can type their results.
 **Acting on it** (real CDP input, not synthetic JavaScript events)
 - `act({ sessionId, goal, values?, maxSteps? })` → `{ status, goal, steps, url, title }`: a Jev-driven loop toward a goal — click, type (from `values`), select, scroll, wait or back per step, checking goal-met, dead-end, login and error walls each round until it finishes, gets stuck or runs out of budget
 - `click({ sessionId, selector | x,y, timeout? })`: `selector` may be plain language or a `jev:<goal>` — the Jev decision model picks the element (see [Picking elements with Jev](docs/jev.md))
+- `tap({ sessionId, selector | x,y, timeout? })`: a finger tap (touch events), for mobile sessions
+- `swipe({ sessionId, selector? | x,y?, direction? | toX,toY, distance?, durationMs? })`: a finger swipe, e.g. to close a drawer or move a carousel; short and slow drags partway
 - `type({ sessionId, selector, text, delay?, clear?, timeout? })`: `selector` may be plain language or a `jev:` goal; the text itself always comes from you
 - `press_key({ sessionId, key, selector?, timeout? })`: `key` is a name (Enter, Tab, ArrowDown…) or a character; `selector` may be plain language or a `jev:` goal and is optional
 - `scroll({ sessionId, deltaY?, deltaX?, x?, y? })`
