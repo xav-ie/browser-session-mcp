@@ -284,6 +284,19 @@ pub async fn run(browser_url: &str, desktop: Option<UaOverride>) -> Result<()> {
                     .as_ref()
                     .and_then(session_ua)
                     .or_else(|| desktop.clone());
+                // A mobile session's new tabs report a touch screen from their
+                // first load, so pages pick their touch behavior.
+                if ua.as_ref().is_some_and(|u| u.metadata["mobile"] == true) {
+                    ws.send(
+                        cdp.msg(
+                            "Emulation.setTouchEmulationEnabled",
+                            json!({ "enabled": true, "maxTouchPoints": crate::sessions::TOUCH_POINTS }),
+                            Some(session),
+                        )
+                        .1,
+                    )
+                    .await?;
+                }
                 if let Some(ua) = ua {
                     ws.send(
                         cdp.msg(
