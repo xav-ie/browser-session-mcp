@@ -2,26 +2,19 @@
 default: minor
 ---
 
-# act finishes far more tasks
+# act finishes far more tasks, and says how sure it is
 
-On Ying-Kai Liao's jev-browser task suite (40 live tasks), `act` went from
-11 or 12 right to 34 or 35, ahead of jev-browser itself (32 or 33) on the
-same machine and model.
+On jev-browser's 40-task suite, `act` went from about 12 tasks right to
+about 34. On two held-out sets it was never tuned on, it trails jev-browser
+on the first and matches it on the second (see `docs/jev.md`). `bench/`
+reruns all three.
 
-`act` now types every value in a form, not just the first: keys already typed
-are no longer offered again, and a field with no matching guess gets its own
-question. It stops as `likely_completed` once Jev rates the goal at least
-even odds met, instead of acting past it. When Jev isn't sure of a step, `act` stops with status `uncertain`
-and the `candidates` it was weighing instead of erroring, and reports
-`likely_completed` when the goal probably is met. It accepts JavaScript
-dialogs (listed in `dialogs`) instead of hanging on them, follows links that
-open a new tab, can press Enter and Escape, hover, right-click and drag (HTML5 drag-and-drop
-included), waits on a page that is still
-loading, and picks elements inside open shadow roots, same-origin iframes and
-script-only click targets such as sortable table headers. A bot check stops
-it with `needs_human`, and the new `confirmIrreversible` option stops before
-an order, payment, send or delete with `needs_confirmation`.
-
-Typing (`type` and `act`) now handles text with no key on a US keyboard,
-such as accented letters, which used to fail with "Key not found".
-`bench/` runs Ying-Kai Liao's jev-browser task suite against the server.
+It types every value a form needs, asking which value belongs in each
+field, and clears a field the way a person does, so React inputs no longer
+get text appended. Each decision reads the page's main content and heading
+rather than its menus. New statuses report what happened: `likely_completed`
+when Jev rates the goal probably met (and the run stops there rather than
+acting past it), `uncertain` with the `candidates` Jev was weighing instead
+of an error, `needs_human` on a CAPTCHA or bot check, and, with the new
+`confirmIrreversible` option, `needs_confirmation` before an order, payment,
+send or delete.
