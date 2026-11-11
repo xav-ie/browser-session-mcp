@@ -114,7 +114,7 @@ an input method does it. `press_key` accepts combinations such as
 `list_network_requests` now shows requests made by a tab's cross-site iframes
 and its workers, logged under the tab's current visit. These run as separate
 DevTools targets and were missing before, which hid sandboxed third-party code
-such as Shopify's checkout web pixels. The iframe's own document request is
+such as a checkout page's analytics scripts. The iframe's own document request is
 still not logged, since Chrome sends it before the iframe can be attached.
 
 #### Throttle a session's CPU and network, and run init scripts
