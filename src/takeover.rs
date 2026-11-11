@@ -269,7 +269,7 @@ pub async fn write_ticket(token: &str, ticket: &Ticket) -> Result<()> {
     Ok(())
 }
 
-async fn read_ticket(token: &str) -> Result<Ticket> {
+pub async fn read_ticket(token: &str) -> Result<Ticket> {
     if !valid_token(token) {
         return Err(anyhow!("invalid token"));
     }

@@ -9,19 +9,15 @@
 //   BROWSER_URL=http://localhost:9222 TYPESAFE_API_KEY=... node bench/run.mjs \
 //     [--set base,hard,guard,peers,heldout1,heldout2,mobile,carousel,local|all] [--mobile] [--only id,id] [--concurrency 3] [--out file.json]
 //
-// MCP_BIN defaults to target/release/browser-session. STATE_DIR defaults to
-// a temporary directory.
-import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+// MCP_BIN and STATE_DIR: see tests/mcp.mjs.
+import { existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { HELDOUT1, HELDOUT2 } from "./heldout.mjs";
+import { connect } from "../tests/mcp.mjs";
 import { CAROUSEL, MOBILE } from "./mobile.mjs";
 import { GUARD, HARD, PEERS, TASKS } from "./tasks.mjs";
 
-const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const arg = (k, d) => {
   const i = process.argv.indexOf(k);
   return i > 0 ? process.argv[i + 1] : d;
@@ -50,33 +46,7 @@ const out = arg("--out");
 // --mobile opens every task in a touch phone session (useMobileUA, 390x844).
 const mobile = process.argv.includes("--mobile");
 
-// ---- a minimal MCP stdio client ----------------------------------------
-const server = spawn(process.env.MCP_BIN ?? path.join(root, "target/release/browser-session"), ["mcp"], {
-  env: { STATE_DIR: mkdtempSync(path.join(tmpdir(), "bs-bench-")), ...process.env },
-  stdio: ["pipe", "pipe", "inherit"],
-});
-const pending = new Map();
-let nextId = 1;
-readline.createInterface({ input: server.stdout }).on("line", (line) => {
-  const msg = JSON.parse(line);
-  const p = pending.get(msg.id);
-  if (!p) return;
-  pending.delete(msg.id);
-  msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result);
-});
-const send = (method, params) =>
-  new Promise((resolve, reject) => {
-    const id = nextId++;
-    pending.set(id, { resolve, reject });
-    server.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-  });
-await send("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "bench", version: "0" } });
-server.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
-const call = async (name, args) => {
-  const r = await send("tools/call", { name, arguments: args });
-  if (r.isError) throw new Error(r.content?.[0]?.text ?? "tool error");
-  return r.structuredContent ?? {};
-};
+const { call, close } = await connect();
 
 // ---- tasks ---------------------------------------------------------------
 async function check(sessionId, assert) {
@@ -152,7 +122,7 @@ await Promise.all(
     while (next < tasks.length) results.push(await runTask(tasks[next++]));
   }),
 );
-server.kill();
+close();
 
 const correct = results.filter((r) => r.correct).length;
 const falseDone = results.filter((r) => r.falseDone).length;

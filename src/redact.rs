@@ -15,8 +15,10 @@
 //! - While a human takeover is active for the session, no body is recorded at
 //!   all, and query values on auth URLs are masked as above.
 //!
-//! The log records no headers or response bodies, so there is nothing else to
-//! redact.
+//! - Headers: credential ones (`Authorization`, `Cookie`, `Set-Cookie`,
+//!   tokens, API keys) are masked; during a takeover none are kept.
+//! - Response bodies: masked like request bodies, [`REDACTED`] on auth URLs,
+//!   and none during a takeover.
 use crate::logs::NetworkEntry;
 use serde_json::Value;
 use url::form_urlencoded;
@@ -70,12 +72,35 @@ pub fn network_entry(entry: &mut NetworkEntry, takeover_active: bool) {
     }
     if takeover_active {
         entry.post_data = None;
-    } else if let Some(body) = entry.post_data.as_mut() {
+        entry.response_body = None;
+        entry.request_headers = None;
+        entry.response_headers = None;
+        return;
+    }
+    for body in [entry.post_data.as_mut(), entry.response_body.as_mut()]
+        .into_iter()
+        .flatten()
+    {
         *body = if auth {
             REDACTED.to_string()
         } else {
             body_text(body)
         };
+    }
+    for headers in [
+        entry.request_headers.as_mut(),
+        entry.response_headers.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(map) = headers.as_object_mut() {
+            for (name, value) in map.iter_mut() {
+                if is_secret_key(name) {
+                    *value = Value::String(REDACTED.to_string());
+                }
+            }
+        }
     }
 }
 
@@ -188,8 +213,51 @@ mod tests {
             status: Some(200),
             failure: None,
             post_data: body.map(Into::into),
-            redirected_to: None,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn credential_headers_are_masked_and_others_kept() {
+        let mut e = entry("GET", "https://example.com/api/items", None);
+        e.request_headers = Some(serde_json::json!({
+            "Authorization": "Bearer abc", "Cookie": "sid=1", "X-Api-Key": "k",
+            "X-CSRF-Token": "t", "Accept": "application/json",
+        }));
+        e.response_headers =
+            Some(serde_json::json!({ "Set-Cookie": "sid=2", "Content-Type": "application/json" }));
+        e.response_body = Some(r#"{"items":[1],"accessToken":"xyz"}"#.into());
+        network_entry(&mut e, false);
+        let req = e.request_headers.unwrap();
+        for k in ["Authorization", "Cookie", "X-Api-Key", "X-CSRF-Token"] {
+            assert_eq!(req[k], REDACTED, "{k}");
+        }
+        assert_eq!(req["Accept"], "application/json");
+        let resp = e.response_headers.unwrap();
+        assert_eq!(resp["Set-Cookie"], REDACTED);
+        assert_eq!(resp["Content-Type"], "application/json");
+        let body = e.response_body.unwrap();
+        assert!(
+            body.contains("\"items\":[1]") && !body.contains("xyz"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn takeover_keeps_no_headers_or_bodies() {
+        let mut e = entry("POST", "https://example.com/api/items", Some("{}"));
+        e.request_headers = Some(serde_json::json!({ "Accept": "*/*" }));
+        e.response_body = Some("{}".into());
+        network_entry(&mut e, true);
+        assert!(e.post_data.is_none() && e.request_headers.is_none() && e.response_body.is_none());
+    }
+
+    #[test]
+    fn auth_response_body_is_redacted() {
+        let mut e = entry("POST", "https://example.com/oauth/token", None);
+        e.response_body = Some(r#"{"id_token":"abc","expires_in":3600}"#.into());
+        network_entry(&mut e, false);
+        assert_eq!(e.response_body.unwrap(), REDACTED);
     }
 
     #[test]

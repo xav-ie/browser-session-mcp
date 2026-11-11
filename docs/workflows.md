@@ -35,16 +35,15 @@ const { url, token } = (
 // → present `url`; the user opens it, sees a live view of the page, logs in
 //   themselves (passkey/password/2FA), and clicks "Done".
 
-// Wait for them to finish — IN A BACKGROUND TASK, polling with a short timeout.
-// One long await can exceed the MCP client's request timeout (and you'd miss
-// the Done signal); the human may take minutes. Poll until completed:
-let done = false;
-while (!done) {
-  done = (
-    await tools.browser_session_mcp.await_human_takeover({ token, timeout: 4000 })
-  ).structuredContent.completed;
-}
-// Now authenticated — continue (and optionally save_browser_state to reuse it).
+// Wait for them to finish, ideally in a background task. Each call waits up
+// to 25 s by default, under hosts' per-call limits; the person may take
+// minutes, so call again until completed (or request a new link if expired):
+let r;
+do {
+  r = (await tools.browser_session_mcp.await_human_takeover({ token })).structuredContent;
+} while (!r.completed && !r.expired);
+// Now authenticated (r.url says where); continue. A session opened with a
+// `name` has already saved this login for next time.
 await tools.browser_session_mcp.navigate({
   sessionId: sid,
   url: "https://tagmanager.google.com",
@@ -73,7 +72,18 @@ useless once the real user has it, and only the claimant can click Done.
 
 ## Saved cookie state
 
-For sites where you don't want to log in every session:
+The easiest way: open the session with a `name`. While it is open, opening the
+same name returns it; after it closes (or Chrome restarts), opening the name
+starts a new session with the login saved under it. The login is saved when a
+takeover finishes and when the session closes.
+
+```ts
+const sid = (await tools.browser_session_mcp.open_browser_session({ name: "github" }))
+  .structuredContent.sessionId;
+// Log in once (a takeover); every later task opens "github" and is in.
+```
+
+By hand, for sites where you don't want to log in every session:
 
 <!-- diagram:saved-state -->
 <picture>

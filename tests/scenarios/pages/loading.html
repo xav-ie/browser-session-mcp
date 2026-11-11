@@ -1,0 +1,16 @@
+<!doctype html>
+<!-- Content that appears a while after a click, with a page global that
+     tracks it, as analytics data layers do. -->
+<meta charset="utf-8">
+<title>Loading</title>
+<button id="start">Start</button>
+<div id="finish" hidden>Hello World!</div>
+<script>
+  window.dataLayer = [];
+  document.getElementById("start").onclick = () => {
+    setTimeout(() => {
+      document.getElementById("finish").hidden = false;
+      dataLayer.push({ event: "view_item" });
+    }, 1200);
+  };
+</script>

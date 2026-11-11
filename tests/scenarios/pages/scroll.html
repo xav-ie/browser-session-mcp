@@ -1,0 +1,13 @@
+<!doctype html>
+<!-- Smooth scrolling, as many themes set: a target far down the page, and a
+     button that is in the page but hidden. -->
+<meta charset="utf-8">
+<title>Long page</title>
+<style>
+  html { scroll-behavior: smooth; }
+  .spacer { height: 3000px; }
+</style>
+<button id="hidden" style="display: none" onclick="document.title = 'hidden clicked'">Hidden</button>
+<div class="spacer"></div>
+<button id="far" onclick="document.title = 'far clicked'">Far down</button>
+<div class="spacer"></div>

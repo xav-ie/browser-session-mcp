@@ -21,7 +21,7 @@ import Base from "../layouts/base.astro";
     <button
       id="keys"
       popovertarget="vault"
-      title="Fill username or password"
+      title="Fill username, password or one-time code"
     ></button>
     <button
       id="done"
@@ -36,7 +36,10 @@ import Base from "../layouts/base.astro";
     {/* A real login form so your local password manager recognizes it and
         autofills. Values are read same-origin and typed into the remote page's
         focused field over CDP. */}
-    <p>Autofill here, then send each into the field focused on the page.</p>
+    <p>
+      Autofill here, then send each into the field focused on the page; each
+      send presses Tab after, to move on to the next field.
+    </p>
     <div class="row">
       <input
         id="vu"
@@ -58,6 +61,19 @@ import Base from "../layouts/base.astro";
         placeholder="password"
       />
       <button type="button" data-for="vp">
+        <span>send</span>
+      </button>
+    </div>
+    <div class="row">
+      <input
+        id="vo"
+        type="text"
+        name="one-time-code"
+        inputmode="numeric"
+        autocomplete="one-time-code"
+        placeholder="one-time code"
+      />
+      <button type="button" data-for="vo">
         <span>send</span>
       </button>
     </div>

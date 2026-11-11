@@ -83,6 +83,33 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     // label; unlabeled ones often sit next to bare text instead
     // (`<input type=checkbox> checkbox 1`).
     var toggle = tag === 'input' && (el.type === 'checkbox' || el.type === 'radio');
+    // The text a person sees on it. A web component's button often holds
+    // only a <slot>, its text living in the light DOM outside it, so
+    // innerText is empty (an admin UI built of web components); the slotted and
+    // shadow-root text is read instead.
+    var shown = function() {
+      var t = String(el.innerText || '');
+      if (t.trim()) return t;
+      var parts = [], size = 0;
+      var walk = function(n, d) {
+        if (d > 8 || size > 160) return;
+        if (n.nodeType === 3) { parts.push(n.textContent); size += n.textContent.length; return; }
+        if (n.nodeType !== 1 || /^(STYLE|SCRIPT|TEMPLATE)$/.test(n.tagName)) return;
+        var kids = n.tagName === 'SLOT' ? n.assignedNodes({ flatten: true }) :
+          n.shadowRoot ? n.shadowRoot.childNodes : n.childNodes;
+        for (var k = 0; k < kids.length; k++) walk(kids[k], d + 1);
+      };
+      walk(el, 0);
+      return parts.join(' ');
+    };
+    var labelledBy = function() {
+      var ids = String(el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+      var root = el.getRootNode();
+      return ids.map(function(id) {
+        var n = root.getElementById ? root.getElementById(id) : document.getElementById(id);
+        return n ? n.textContent : '';
+      }).join(' ').trim();
+    };
     var adjacent = function() {
       var n = el.nextSibling;
       while (n && n.nodeType === 3 && !n.textContent.trim()) n = n.nextSibling;
@@ -98,15 +125,15 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     if (el.type === 'password') {
       p.push('(value hidden)');
     } else if (typed) {
-      var name = el.getAttribute('aria-label') || el.getAttribute('placeholder') ||
+      var name = el.getAttribute('aria-label') || labelledBy() || el.getAttribute('placeholder') ||
         el.getAttribute('title') ||
         (el.labels && el.labels[0] ? el.labels[0].innerText : '');
       if (name) p.push('"' + clamp(name, 80) + '"');
     } else {
-      var label = el.getAttribute('aria-label') || el.getAttribute('placeholder') ||
+      var label = el.getAttribute('aria-label') || labelledBy() || el.getAttribute('placeholder') ||
         el.getAttribute('title') ||
         (el.labels && el.labels[0] ? el.labels[0].innerText : '') ||
-        el.innerText || (toggle ? adjacent() : el.value || el.getAttribute('value')) || '';
+        shown().trim() || (toggle ? adjacent() : el.value || el.getAttribute('value')) || '';
       if (label) p.push('"' + clamp(label, 80) + '"');
     }
     if (typed || el.type === 'password') {

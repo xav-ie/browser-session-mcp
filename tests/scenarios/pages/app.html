@@ -1,0 +1,14 @@
+<!doctype html>
+<!-- A page that renders itself after loading: blank at the load event, then
+     it fetches its data (slowly) and fills in, as client-rendered apps do. -->
+<meta charset="utf-8">
+<title>App</title>
+<div id="root"></div>
+<script>
+  addEventListener("load", () => {
+    setTimeout(async () => {
+      const data = await (await fetch("/slow.json")).json();
+      document.getElementById("root").textContent = `${data.count} products`;
+    }, 200);
+  });
+</script>
