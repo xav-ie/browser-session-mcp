@@ -34,7 +34,7 @@ pub enum LogLine {
     #[serde(rename = "console")]
     Console(ConsoleEntry),
     #[serde(rename = "network")]
-    Network(NetworkEntry),
+    Network(Box<NetworkEntry>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -55,7 +55,7 @@ pub struct ConsoleEntry {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct NetworkEntry {
     pub t: String,
     pub method: String,
@@ -72,6 +72,33 @@ pub struct NetworkEntry {
     /// hop is logged as its own entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirected_to: Option<String>,
+    /// Chrome's id for the request.
+    #[serde(rename = "requestId", default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Request headers, credential ones masked.
+    #[serde(
+        rename = "requestHeaders",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub request_headers: Option<serde_json::Value>,
+    /// Response headers, credential ones masked.
+    #[serde(
+        rename = "responseHeaders",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub response_headers: Option<serde_json::Value>,
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// A small text or JSON response body (fetch/XHR and documents, up to
+    /// 64 KB), credential keys masked.
+    #[serde(
+        rename = "responseBody",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub response_body: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +159,7 @@ impl LogWriter {
         entry: NetworkEntry,
     ) -> Result<()> {
         let path = visit_file(&self.logs_dir, session_id, seq, target_id)?;
-        let line = serde_json::to_string(&LogLine::Network(entry))?;
+        let line = serde_json::to_string(&LogLine::Network(Box::new(entry)))?;
         append_line(&path, &line).await
     }
 
@@ -202,7 +229,7 @@ pub struct ReadOpts {
 
 pub enum SessionLogEntry {
     Console(ConsoleEntry),
-    Network(NetworkEntry),
+    Network(Box<NetworkEntry>),
 }
 
 pub async fn read_session_logs(

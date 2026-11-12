@@ -1,0 +1,47 @@
+<!doctype html>
+<!-- A product page as storefronts build them: color swatches are labels for
+     hidden radios, a newsletter popup opens a moment after load inside a web
+     component's shadow root (as popup vendors render them), fades out when
+     closed, a cookie banner sits over the bottom of the screen, and the
+     closed cart drawer waits off screen. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>Travel Hoodie</title>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 24px; min-height: 900px; }
+  .swatches input { position: absolute; opacity: 0; }
+  .swatches label { display: inline-block; padding: 8px 14px; border: 1px solid #999; margin-right: 6px; cursor: pointer; }
+  .swatches input:checked + label { border: 2px solid #000; }
+  #add { position: fixed; bottom: 30px; left: 24px; padding: 12px 24px; }
+  #cart { position: fixed; top: 0; left: 100%; width: 400px; height: 100vh; background: #fff; transition: left .3s; }
+  #cookie-banner { position: fixed; left: 0; right: 0; bottom: 0; height: 90px; background: #222; color: #fff; padding: 12px 24px; box-sizing: border-box; }
+</style>
+<h1>Travel Hoodie</h1>
+<div class="swatches">
+  <input type="radio" name="color" id="color-obsidian" checked><label for="color-obsidian">Obsidian</label>
+  <input type="radio" name="color" id="color-steel-grey"><label for="color-steel-grey">Steel Grey</label>
+  <input type="radio" name="color" id="color-sand"><label for="color-sand">Sand</label>
+</div>
+<button id="add" onclick="document.title = 'added'">Add to cart</button>
+<div id="cookie-banner">We use cookies. <button id="cookie-accept" onclick="this.parentNode.remove()">Accept</button></div>
+<div id="cart" role="dialog" aria-label="Your bag">Your bag is empty.</div>
+<div id="popup-root"></div>
+<script>
+  setTimeout(() => {
+    const root = document.getElementById("popup-root").attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <style>
+        .veil { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; transition: opacity .3s; }
+        .card { background: #fff; padding: 32px; }
+      </style>
+      <div class="veil" id="a91f2c">
+        <div class="card" role="dialog" aria-label="Popup">Get 10% off your first order
+          <button class="close" aria-label="Close">×</button></div>
+      </div>`;
+    root.querySelector(".close").addEventListener("click", () => {
+      const veil = root.querySelector(".veil");
+      veil.style.opacity = "0";
+      setTimeout(() => veil.remove(), 300);
+    });
+  }, 600);
+</script>

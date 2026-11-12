@@ -536,6 +536,8 @@ check "jev: leaves no trace the page can see" "$(call evaluate "$(printf '{"sess
 
 check "jev: type picks the email input" "$(call type "$(printf '{"sessionId":"%s","selector":"jev: the Email field","text":"hi@x.io"}' "$SID")")" 'Typed 7 chars into input #jev-in'
 check "jev: type typed into the picked input" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.getElementById(%s).value"}' "$SID" "'jev-in'")")" 'hi@x.io'
+check "jev: press_key repeats on the picked field" "$(call press_key "$(printf '{"sessionId":"%s","selector":"jev: the Email field","key":"x","repeat":3}' "$SID")")" 'Pressed x on'
+check "jev: the repeated key went into it" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.getElementById(%s).value"}' "$SID" "'jev-in'")")" 'hi@x.ioxxx'
 
 check "jev: unknown id fails closed" "$(call click "$(printf '{"sessionId":"%s","selector":"jev: bogus target"}' "$SID")")" 'not one of the offered'
 check "jev: low confidence fails closed" "$(call click "$(printf '{"sessionId":"%s","selector":"jev: unsure target"}' "$SID")")" 'below the 0.50 floor'
@@ -702,6 +704,57 @@ check "read: under its heading" "$READ_OUT" '## Section 27'
 check "read: drops the rest" "$READ_OUT" '"kept":1'
 check "read: a short page comes back whole" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "data:text/html,<p>Tiny%20page</p>")")" 'Navigated to'
 check "read: whole, without Jev" "$(call read "$(printf '{"sessionId":"%s","question":"anything"}' "$SID")")" '"filtered":false'
+
+# ---- what actions report, waits, screenshots, names, devices, shadow DOM --
+COVER_URL="data:text/html,<title>cover</title><button id=under>Under</button><input id=f><div id=veil style='position:fixed;inset:0;background:rgba(0,0,0,.3)'>Join%20our%20newsletter</div>"
+check "report: navigate to a covered button" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "$COVER_URL")")" 'Navigated to'
+check "report: wire the button" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { document.getElementById(%s).addEventListener(%s, () => { document.title = %s }); return 1 })()"}' "$SID" "'under'" "'click'" "'clicked'")")" '"result":1'
+check "report: a covered click fails, naming the cover" "$(call click "$(printf '{"sessionId":"%s","selector":"#under"}' "$SID")")" 'is covered by div#veil'
+check "report: the covered button wasn't clicked" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" '"cover"'
+check "report: remove the cover" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(document.getElementById(%s).remove(), 1)"}' "$SID" "'veil'")")" '"result":1'
+REPORT=$(call click "$(printf '{"sessionId":"%s","selector":"#under"}' "$SID")")
+check "report: click says where the page is" "$REPORT" '"navigated":false'
+check "report: click names the focused element" "$REPORT" '"focused":"button#under'
+check "report: the click landed" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" '"clicked"'
+check "report: a click off the screen fails" "$(call click "$(printf '{"sessionId":"%s","x":5000,"y":10}' "$SID")")" 'outside the screen'
+check "report: press_key names where focus went" "$(call press_key "$(printf '{"sessionId":"%s","key":"Tab"}' "$SID")")" '"focused":"input#f"'
+check "wait_for: a plain pause" "$(call wait_for "$(printf '{"sessionId":"%s","ms":50}' "$SID")")" 'Waited 50ms'
+check "wait_for: until an expression is truthy" "$(call wait_for "$(printf '{"sessionId":"%s","expression":"document.title.length"}' "$SID")")" 'became 7'
+check "wait_for: an expression that stays false times out" "$(call wait_for "$(printf '{"sessionId":"%s","expression":"window.never","timeout":300}' "$SID")")" 'to be truthy'
+SHOT=$(call take_screenshot "$(printf '{"sessionId":"%s","save":true,"selector":"#under","scale":0.5}' "$SID")")
+check "screenshot: saved to a file" "$SHOT" 'Saved'
+SHOT_PATH=$(printf '%s' "$SHOT" | grep -o '/[^"]*\.png' | head -1)
+check "screenshot: the file is a PNG" "$(head -c 8 "$SHOT_PATH" 2>/dev/null | od -An -c | tr -d ' \n')" 'PNG'
+
+# A named session is reused while open, and keeps its login after closing.
+STATE_ORIGIN="http://127.0.0.1:$JEV_PORT/"
+NAMED=$(call open_browser_session '{"name":"smoke-named"}')
+NID=$(pluck "$NAMED" .result.structuredContent.sessionId)
+check "names: opens a named session" "$NAMED" 'as \"smoke-named\"'
+check "names: opening the name again reuses it" "$(call open_browser_session '{"name":"smoke-named"}')" "Reusing session $NID"
+check "names: visit a site" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$NID" "$STATE_ORIGIN")")" 'Navigated to'
+check "names: log in (set a cookie)" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(document.cookie = %s, 1)"}' "$NID" "'smoke_login=yes; max-age=3600'")")" '"result":1'
+check "names: close saves the login" "$(call close_browser_session "$(printf '{"sessionId":"%s"}' "$NID")")" 'Closed'
+NAMED2=$(call open_browser_session '{"name":"smoke-named"}')
+NID2=$(pluck "$NAMED2" .result.structuredContent.sessionId)
+check "names: reopening restores the login" "$NAMED2" 'with the login saved as'
+check "names: back on the site" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$NID2" "$STATE_ORIGIN")")" 'Navigated to'
+check "names: still logged in" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.cookie"}' "$NID2")")" 'smoke_login=yes'
+check "names: close the reopened session" "$(call close_browser_session "$(printf '{"sessionId":"%s"}' "$NID2")")" 'Closed'
+check "names: forget the saved login" "$(call delete_browser_state '{"name":"smoke-named"}')" 'smoke-named'
+
+# A device: its own User-Agent and pixel ratio.
+DEV=$(call open_browser_session '{"userAgent":"SmokeAgent/1.0 (iPhone)","viewport":{"width":400,"height":700,"deviceScaleFactor":2}}')
+DID=$(pluck "$DEV" .result.structuredContent.sessionId)
+check "device: navigate" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$DID" "data:text/html,<p>device</p>")")" 'Navigated to'
+check "device: the page sees the User-Agent and pixel ratio" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"navigator.userAgent + %s + devicePixelRatio"}' "$DID" "'|'")")" 'SmokeAgent/1.0 (iPhone)|2'
+check "device: close" "$(call close_browser_session "$(printf '{"sessionId":"%s"}' "$DID")")" 'Closed'
+
+# A web component's button holds only a <slot>; Jev reads its slotted text.
+check "shadow: navigate" "$(call navigate "$(printf '{"sessionId":"%s","url":"%s"}' "$SID" "data:text/html,<title>shadow</title><button>Cancel</button>")")" 'Navigated to'
+check "shadow: add a slotted button" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"(() => { customElements.define(%s, class extends HTMLElement { constructor() { super(); this.attachShadow({ mode: %s }).innerHTML = %s; this.shadowRoot.querySelector(%s).addEventListener(%s, () => { document.title = %s }); } }); document.body.insertAdjacentHTML(%s, %s); return 1 })()"}' "$SID" "'x-btn'" "'open'" "'<button><slot></slot></button>'" "'button'" "'click'" "'shadow-clicked'" "'beforeend'" "'<x-btn>Log in</x-btn>'")")" '"result":1'
+check "shadow: jev finds the slotted button" "$(call click "$(printf '{"sessionId":"%s","selector":"jev: the Log in button"}' "$SID")")" 'Clicked'
+check "shadow: the slotted button was clicked" "$(call evaluate "$(printf '{"sessionId":"%s","expression":"document.title"}' "$SID")")" '"shadow-clicked"'
 
 # ---- touch: a mobile session is a touch phone ----------------------------
 MOBILE=$(call open_browser_session '{"useMobileUA":true,"viewport":{"width":390,"height":844}}')

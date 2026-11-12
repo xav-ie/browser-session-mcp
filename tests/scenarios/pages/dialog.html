@@ -1,0 +1,29 @@
+<!doctype html>
+<!-- A modal that keeps keyboard focus inside it while open (a focus trap),
+     as a try-on or login modal does. -->
+<meta charset="utf-8">
+<title>Size guide</title>
+<style>
+  dialog { padding: 24px; }
+</style>
+<a href="#top" id="skip">Skip to content</a>
+<button id="open">Size guide</button>
+<dialog id="guide" aria-label="Size guide">
+  <label>Height <input id="height"></label>
+  <button id="apply">Apply</button>
+  <button id="close">Close</button>
+</dialog>
+<script>
+  const d = document.getElementById("guide");
+  document.getElementById("open").onclick = () => d.showModal();
+  document.getElementById("close").onclick = () => d.close();
+  // Tab and Shift+Tab cycle inside the dialog.
+  d.addEventListener("keydown", (e) => {
+    if (e.key !== "Tab") return;
+    const items = [...d.querySelectorAll("input, button")];
+    const i = items.indexOf(document.activeElement);
+    const next = (i + (e.shiftKey ? -1 : 1) + items.length) % items.length;
+    items[next].focus();
+    e.preventDefault();
+  });
+</script>

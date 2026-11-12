@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- An admin editor: once edited, leaving asks "Leave site? Changes you made
+     may not be saved", and Delete asks for confirmation first. -->
+<meta charset="utf-8">
+<title>Edit product</title>
+<label>Title <input id="title"></label>
+<button id="delete">Delete</button>
+<script>
+  let dirty = false;
+  document.getElementById("title").addEventListener("input", () => (dirty = true));
+  addEventListener("beforeunload", (e) => {
+    if (dirty) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
+  document.getElementById("delete").onclick = () => {
+    if (confirm("Delete 3 products?")) document.title = "deleted";
+  };
+</script>

@@ -236,6 +236,8 @@
                       # jsonschema: smoke.sh checks every result against its outputSchema.
                       (pkgs.python3.withPackages (ps: [ ps.jsonschema ]))
                       pkgs.curl
+                      # tests/scenarios/run.mjs
+                      pkgs.nodejs
                     ];
                   };
                 testScript = ''
@@ -260,6 +262,15 @@
                       "CHROME_BIN=${pkgs.ungoogled-chromium}/bin/chromium "
                       "MCP_BIN=${config.packages.browser-session-mcp-ci}/bin/browser-session "
                       "bash ${./scripts/smoke.sh} 2>&1"
+                  )
+
+                  # --- scenarios: real-use problems on local pages ---
+                  machine.succeed(
+                      "env "
+                      "CHROME_BIN=${pkgs.ungoogled-chromium}/bin/chromium "
+                      "MCP_BIN=${config.packages.browser-session-mcp-ci}/bin/browser-session "
+                      "TAKEOVER_BASE_URL=http://127.0.0.1:1 "
+                      "node ${./tests}/scenarios/run.mjs 2>&1"
                   )
                 '';
               };

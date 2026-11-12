@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- A slow page: a heavy script blocks the main thread just after the first
+     paint, and a banner arrives late and pushes the content down. -->
+<meta charset="utf-8">
+<title>Slow page</title>
+<h1>Slow page</h1>
+<p>Content that a late banner pushes down.</p>
+<script>
+  // After the first paint, as a heavy tag or framework hydrating would.
+  setTimeout(() => {
+    const start = performance.now();
+    while (performance.now() - start < 300) {}
+  }, 100);
+  setTimeout(() => {
+    const banner = document.createElement("div");
+    banner.style.height = "200px";
+    banner.textContent = "Free shipping today";
+    document.body.prepend(banner);
+  }, 600);
+</script>

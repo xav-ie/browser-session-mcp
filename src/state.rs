@@ -56,6 +56,10 @@ pub struct SessionRecord {
     /// report which version it has applied.
     #[serde(rename = "emulationRev", default, skip_serializing_if = "is_zero")]
     pub emulation_rev: u64,
+    /// The name given at `open_browser_session`: a later open with the same
+    /// name reuses the session, and its login is saved under the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -140,6 +144,33 @@ impl StateStore {
             .cache
             .insert(session_id.to_string(), rec.clone());
         Some(rec)
+    }
+
+    pub async fn set_name(&self, session_id: &str, name: &str) {
+        let name = name.to_string();
+        self.update(session_id, |rec| rec.name = Some(name)).await;
+    }
+
+    pub async fn name(&self, session_id: &str) -> Option<String> {
+        self.get(session_id).await.and_then(|r| r.name)
+    }
+
+    /// Sessions recorded under `name`, live or not: this process's and the
+    /// ones on disk.
+    pub async fn named(&self, name: &str) -> Vec<String> {
+        let mut ids: HashSet<String> = read_sessions(&self.dir)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, r)| r.name.as_deref() == Some(name))
+            .map(|(id, _)| id)
+            .collect();
+        for (id, r) in &self.inner.lock().await.cache {
+            if r.name.as_deref() == Some(name) {
+                ids.insert(id.clone());
+            }
+        }
+        ids.into_iter().collect()
     }
 
     pub async fn touch(&self, session_id: &str) {
@@ -396,6 +427,7 @@ mod tests {
             Viewport {
                 width: 800,
                 height: 600,
+                scale: 1.0,
             },
         )
         .await;

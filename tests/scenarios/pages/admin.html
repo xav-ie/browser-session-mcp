@@ -1,0 +1,21 @@
+<!doctype html>
+<!-- An admin page built of web components: each button's text sits in the
+     light DOM and shows through a <slot>, so the real <button> in the shadow
+     root has no text of its own. -->
+<meta charset="utf-8">
+<title>Admin</title>
+<script>
+  customElements.define("ui-button", class extends HTMLElement {
+    constructor() {
+      super();
+      this.attachShadow({ mode: "open" }).innerHTML = "<button part=button><slot></slot></button>";
+      this.shadowRoot.querySelector("button").addEventListener("click", () => {
+        document.title = "clicked " + this.textContent.trim();
+      });
+    }
+  });
+</script>
+<h1>Gift cards</h1>
+<ui-button>Export</ui-button>
+<ui-button>Add gift card product</ui-button>
+<ui-button>Create gift card</ui-button>

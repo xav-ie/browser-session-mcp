@@ -93,6 +93,21 @@ impl ServerHandler for BrowserSessionServer {
     ) -> Result<CallToolResponse, McpError> {
         let args = request.arguments.unwrap_or_default();
         let name = request.name.as_ref();
+        // One call drives a session at a time, across processes: two agents
+        // (or two calls of one) on the same page fight over it.
+        let _lock = match args.get("sessionId").and_then(Value::as_str) {
+            Some(id) if !UNLOCKED_TOOLS.contains(&name) => match SessionLock::acquire(id, name)
+                .await
+            {
+                Ok(lock) => Some(lock),
+                Err(err) => {
+                    return Ok(
+                        CallToolResult::error(vec![ContentBlock::text(format!("{err:#}"))]).into(),
+                    );
+                }
+            },
+            _ => None,
+        };
         match self.dispatch(name, args).await {
             Ok(result) => Ok(result.into()),
             Err(err) => {
@@ -108,16 +123,138 @@ impl ServerHandler for BrowserSessionServer {
     }
 }
 
+/// Tools that only read logs or settings, so they never wait on a session's
+/// lock.
+const UNLOCKED_TOOLS: &[&str] = &[
+    "list_visits",
+    "list_console_messages",
+    "list_network_requests",
+    "get_stealth",
+    "get_emulation",
+    "list_browser_sessions",
+];
+
+/// How long a call waits for another call on its session to finish.
+const LOCK_WAIT_MS: u64 = 15_000;
+
+/// A session's lock: an exclusive lock on `$STATE_DIR/locks/<id>.lock`,
+/// released when dropped. The file says which call holds it.
+struct SessionLock {
+    _file: std::fs::File,
+}
+
+impl SessionLock {
+    async fn acquire(session_id: &str, tool: &str) -> Result<Self> {
+        let dir = crate::state_dir().join("locks");
+        let path = logs::session_dir(&dir, session_id)?.with_extension("lock");
+        let (session_id, tool) = (session_id.to_string(), tool.to_string());
+        tokio::task::spawn_blocking(move || -> Result<Self> {
+            use std::io::{Seek, Write};
+            std::fs::create_dir_all(&dir).context("creating the locks folder")?;
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .context("opening the session lock")?;
+            let deadline = std::time::Instant::now() + Duration::from_millis(LOCK_WAIT_MS);
+            loop {
+                match file.try_lock() {
+                    Ok(()) => break,
+                    Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        let holder = std::fs::read_to_string(&path).unwrap_or_default();
+                        let (held_tool, since) = holder.split_once(' ').unwrap_or(("another call", "0"));
+                        let secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs())
+                            .saturating_sub(since.trim().parse().unwrap_or(0));
+                        bail!(
+                            "session {session_id} is in use by another call ({held_tool}, running for {secs}s); \
+                             one call drives a session at a time, so wait for it or use another session"
+                        );
+                    }
+                    Err(std::fs::TryLockError::Error(e)) => return Err(e).context("locking the session"),
+                }
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            file.set_len(0).ok();
+            file.rewind().ok();
+            write!(file, "{tool} {now}").ok();
+            Ok(Self { _file: file })
+        })
+        .await
+        .context("waiting for the session lock")?
+    }
+}
+
 impl BrowserSessionServer {
     // --- lifecycle ---
 
     async fn open_session(&self, args: JsonObject) -> Result<Structured<SessionInfo>> {
         let sessions = self.ctx.sessions().await?;
-        let viewport = optional_viewport(&args, "viewport")?;
-        let use_mobile = optional_bool(&args, "useMobileUA").unwrap_or(false);
-        let info = sessions.open(viewport, use_mobile).await?;
+        let device = match optional_str(&args, "device") {
+            Some(d) => Some(crate::devices::find(d).ok_or_else(|| {
+                anyhow!(
+                    "unknown device `{d}` (use one of {})",
+                    crate::devices::names()
+                )
+            })?),
+            None => None,
+        };
+        // A preset sets the screen, pixel ratio, User-Agent and touch;
+        // explicit `viewport`, `useMobileUA` and `userAgent` override it.
+        let viewport = optional_viewport(&args, "viewport")?.or(device.map(|d| Viewport {
+            width: d.width,
+            height: d.height,
+            scale: d.scale,
+        }));
+        let use_mobile =
+            optional_bool(&args, "useMobileUA").unwrap_or(device.is_some_and(|d| d.mobile));
+        let name = optional_str(&args, "name").map(str::to_string);
+        // A named session is reused while it lives, and otherwise starts
+        // with the login last saved under its name, so a login outlives
+        // the task, the session and a Chrome restart.
+        if let Some(name) = &name {
+            if let Some(id) = sessions.find_named(name).await? {
+                let info = sessions
+                    .list()
+                    .await?
+                    .into_iter()
+                    .find(|s| s.session_id == id)
+                    .ok_or_else(|| anyhow!("session {id} closed while reopening it"))?;
+                return Ok(ok_text_struct(
+                    format!(
+                        "Reusing session {id}, already open as \"{name}\" (on {}); its viewport and phone setting stay as they were.",
+                        info.active_url.as_deref().unwrap_or("a blank tab")
+                    ),
+                    info,
+                ));
+            }
+        }
+        let custom_ua = optional_str(&args, "userAgent").or(device.and_then(|d| d.user_agent));
+        let info = sessions.open(viewport, use_mobile, custom_ua).await?;
+        let Some(name) = name else {
+            return Ok(ok_text_struct(
+                format!("Opened session {}", info.session_id),
+                info,
+            ));
+        };
+        sessions.set_name(&info.session_id, &name).await;
+        let restored = match self.load_login(&info.session_id, &name).await {
+            Ok(state) => format!(
+                ", with the login saved as \"{name}\" ({} cookies)",
+                state.cookies.len()
+            ),
+            Err(_) => String::new(),
+        };
         Ok(ok_text_struct(
-            format!("Opened session {}", info.session_id),
+            format!("Opened session {} as \"{name}\"{restored}", info.session_id),
             info,
         ))
     }
@@ -126,10 +263,17 @@ impl BrowserSessionServer {
         let session_id = required_str(&args, "sessionId")?.to_string();
         // Best-effort — closing an unknown sessionId is not an error.
         if let Ok(sm) = self.ctx.sessions().await {
+            // A named session keeps its login for the next open.
+            if let Some(name) = sm.name(&session_id).await {
+                let _ = self.save_login(&session_id, &name).await;
+            }
             let _ = sm.close(&session_id).await;
         }
         let writer = logs::LogWriter::new(self.logs_dir.clone());
         let _ = writer.close_session(&session_id).await;
+        if let Ok(dir) = logs::session_dir(&crate::state_dir().join("locks"), &session_id) {
+            let _ = tokio::fs::remove_file(dir.with_extension("lock")).await;
+        }
         Ok(ok_text(format!("Closed session {session_id}")))
     }
 
@@ -242,6 +386,19 @@ impl BrowserSessionServer {
             .map_err(|e| anyhow!("NavigateParams: {e}"))?;
         // chromiumoxide's goto already resolves after the load event; no
         // separate wait_for_navigation needed.
+        let until = optional_str(&args, "waitUntil")
+            .unwrap_or("load")
+            .to_string();
+        if !matches!(until.as_str(), "load" | "networkidle") {
+            bail!("unknown waitUntil `{until}` (use load or networkidle)");
+        }
+        // Watched from before the navigation, so requests the page starts
+        // while loading are counted.
+        let inflight = if until == "networkidle" {
+            Some(InFlight::watch(&page).await?)
+        } else {
+            None
+        };
         let goto_fut = page.goto(nav);
         if let Some(ms) = timeout_ms {
             tokio::time::timeout(Duration::from_millis(ms), goto_fut)
@@ -251,9 +408,44 @@ impl BrowserSessionServer {
         } else {
             goto_fut.await.context("Page.navigate")?;
         }
+        // After the load event, a page that renders itself can still be
+        // blank: optionally wait for its requests to go quiet, or for text.
+        let settle_ms = optional_u64(&args, "settleTimeout")
+            .unwrap_or(10_000)
+            .min(MAX_PAUSE_MS);
+        let mut note = String::new();
+        if let Some(inflight) = &inflight {
+            if !inflight.idle(settle_ms).await {
+                note = format!(
+                    " (requests were still going after {settle_ms}ms; the page may poll continuously)"
+                );
+            }
+        }
+        if let Some(text) = optional_str(&args, "text") {
+            let body = format!(
+                "function() {{ return !!(document.body && document.body.innerText.includes({})); }}",
+                serde_json::to_string(text).unwrap_or_default()
+            );
+            wait_until(
+                || async {
+                    Ok(iso_eval_function(&page, &body)
+                        .await?
+                        .as_bool()
+                        .unwrap_or(false))
+                },
+                settle_ms,
+            )
+            .await
+            .with_context(|| {
+                format!("the page loaded, but \"{text}\" didn't appear within {settle_ms}ms")
+            })?;
+        }
         let resolved_url = page.url().await?.unwrap_or(url);
+        for d in sessions.take_dialogs(&session_id) {
+            note.push_str(&format!(" The page asked ({d}) and it was accepted."));
+        }
         Ok(ok_text_struct(
-            format!("Navigated to {resolved_url}"),
+            format!("Navigated to {resolved_url}{note}"),
             NavigateOut { url: resolved_url },
         ))
     }
@@ -264,20 +456,73 @@ impl BrowserSessionServer {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let full_page = optional_bool(&args, "fullPage").unwrap_or(false);
+        let save = optional_bool(&args, "save").unwrap_or(false);
+        let scale = optional_f64(&args, "scale").unwrap_or(1.0);
+        if !(0.05..=4.0).contains(&scale) {
+            bail!("`scale` must be between 0.05 and 4");
+        }
         let page = sessions.active_page(&session_id).await?;
-        let params = ScreenshotParams::builder()
+        // One element (scrolled into view), or the screen; `scale` resizes
+        // either. Clip coordinates are the document's, not the screen's.
+        let clip = if let Some(sel) = optional_str(&args, "selector") {
+            let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
+            let (css, _) = resolve_and_wait(&page, sel, timeout).await?;
+            let (x, y, w, h) = element_box(&page, &css)
+                .await?
+                .ok_or_else(|| anyhow!("`{sel}` is not visible, so there is nothing to capture"))?;
+            Some((x, y, w, h))
+        } else if scale != 1.0 && !full_page {
+            let vp = sessions.viewport(&session_id).await;
+            let scroll =
+                iso_eval_function(&page, "function() { return [scrollX, scrollY]; }").await?;
+            let at = |i: usize| scroll.get(i).and_then(Value::as_f64).unwrap_or(0.0);
+            Some((at(0), at(1), vp.width as f64, vp.height as f64))
+        } else {
+            None
+        };
+        let mut params = ScreenshotParams::builder()
             .format(CaptureScreenshotFormat::Png)
-            .full_page(full_page)
-            .build();
+            .full_page(full_page && clip.is_none());
+        if let Some((x, y, width, height)) = clip {
+            params = params.clip(chromiumoxide::cdp::browser_protocol::page::Viewport {
+                x,
+                y,
+                width,
+                height,
+                scale,
+            });
+        }
         let bytes = page
-            .screenshot(params)
+            .screenshot(params.build())
             .await
             .context("Page.captureScreenshot")?;
         let len = bytes.len();
+        if save {
+            // Saved under the state folder, which the host shares, so a
+            // caller that can't take an image (a sandbox) gets a path; not
+            // with the session's logs, which closing it deletes.
+            let dir = logs::session_dir(&crate::state_dir().join("screenshots"), &session_id)?;
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .context("creating the screenshots folder")?;
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis());
+            let path = dir.join(format!("{ms}.png"));
+            tokio::fs::write(&path, &bytes)
+                .await
+                .context("saving the screenshot")?;
+            return Ok(Screenshot {
+                text: format!("Saved {len} bytes PNG to {}", path.display()),
+                png_base64: None,
+                saved: Some((path, len)),
+            });
+        }
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(Screenshot {
             text: format!("Captured {len} bytes PNG."),
-            png_base64: b64,
+            png_base64: Some(b64),
+            saved: None,
         })
     }
 
@@ -291,34 +536,41 @@ impl BrowserSessionServer {
 
     // --- interact ---
 
-    async fn click(&self, args: JsonObject) -> Result<Text> {
+    async fn click(&self, args: JsonObject) -> Result<Structured<AfterAction>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let page = sessions.active_page(&session_id).await?;
         // CDP Input (trusted events): reliably fires handlers AND grants user
         // activation, so it can open popups/new tabs that a synthetic JS
         // `.click()` cannot. Target a selector's center or explicit x/y.
-        let (x, y, label) = if let Some(sel) = optional_str(&args, "selector") {
+        let (x, y, label, target) = if let Some(sel) = optional_str(&args, "selector") {
             let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
             let (css, note) = resolve_and_wait(&page, sel, timeout).await?;
             let (x, y) = element_center(&page, &css).await?;
-            (x, y, note.unwrap_or(css))
+            (x, y, note.unwrap_or(css.clone()), Some(css))
         } else if let (Some(x), Some(y)) = (optional_f64(&args, "x"), optional_f64(&args, "y")) {
-            (x, y, format!("({x}, {y})"))
+            (x, y, format!("({x}, {y})"), None)
         } else {
             bail!("click requires either `selector` or both `x` and `y`");
         };
+        let before = page_url(&page).await;
+        let hit = check_point(&page, (x, y), target.as_deref(), &label).await?;
         page.click(Point::new(x, y))
             .await
             .with_context(|| format!("clicking {label}"))?;
-        Ok(ok_text(format!("Clicked {label}")))
+        let after = after_action(&page, before, Some(hit), (&sessions, &session_id)).await;
+        Ok(ok_text_struct(
+            after.render(&format!("Clicked {label}")),
+            after,
+        ))
     }
 
-    async fn press_key(&self, args: JsonObject) -> Result<Text> {
+    async fn press_key(&self, args: JsonObject) -> Result<Structured<AfterAction>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let key = required_str(&args, "key")?.to_string();
         let page = sessions.active_page(&session_id).await?;
+        let before = page_url(&page).await;
         // None unless Jev picked the element; names what was chosen.
         let mut note = None;
         if let Some(sel) = optional_str(&args, "selector") {
@@ -329,14 +581,37 @@ impl BrowserSessionServer {
             focus_element(&page, &css)
                 .await
                 .with_context(|| format!("locating {sel}"))?;
+        }
+        // Repeated presses (a Tab walk) report focus after each, in one call
+        // instead of one call per press.
+        let repeat = optional_u64(&args, "repeat")
+            .unwrap_or(1)
+            .clamp(1, MAX_KEY_REPEAT);
+        let mut trail = Vec::new();
+        for i in 0..repeat {
             dispatch_key(&page, &key)
                 .await
                 .with_context(|| format!("pressing {key}"))?;
-        } else {
-            dispatch_key(&page, &key).await?;
+            if repeat > 1 && i + 1 < repeat {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                trail.push(focused_now(&page).await);
+            }
         }
         let on = note.map(|n| format!(" on {n}")).unwrap_or_default();
-        Ok(ok_text(format!("Pressed {key}{on}")))
+        let mut after = after_action(&page, before, None, (&sessions, &session_id)).await;
+        let times = if repeat > 1 {
+            format!(" {repeat} times")
+        } else {
+            String::new()
+        };
+        if repeat > 1 {
+            trail.push(after.focused.clone());
+            after.focus_trail = Some(trail);
+        }
+        Ok(ok_text_struct(
+            after.render(&format!("Pressed {key}{on}{times}")),
+            after,
+        ))
     }
 
     async fn scroll(&self, args: JsonObject) -> Result<Text> {
@@ -361,26 +636,36 @@ impl BrowserSessionServer {
         Ok(ok_text(format!("Scrolled (deltaX={dx}, deltaY={dy})")))
     }
 
-    async fn tap(&self, args: JsonObject) -> Result<Text> {
+    async fn tap(&self, args: JsonObject) -> Result<Structured<AfterAction>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let page = sessions.active_page(&session_id).await?;
-        let (at, label) = if let Some(sel) = optional_str(&args, "selector") {
+        let (at, label, target) = if let Some(sel) = optional_str(&args, "selector") {
             let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
             let (css, note) = resolve_and_wait(&page, sel, timeout).await?;
-            (element_center(&page, &css).await?, note.unwrap_or(css))
+            (
+                element_center(&page, &css).await?,
+                note.unwrap_or(css.clone()),
+                Some(css),
+            )
         } else if let (Some(x), Some(y)) = (optional_f64(&args, "x"), optional_f64(&args, "y")) {
-            ((x, y), format!("({x}, {y})"))
+            ((x, y), format!("({x}, {y})"), None)
         } else {
             bail!("tap requires either `selector` or both `x` and `y`");
         };
+        let before = page_url(&page).await;
+        let hit = check_point(&page, at, target.as_deref(), &label).await?;
         touch_tap(&page, at)
             .await
             .with_context(|| format!("tapping {label}"))?;
-        Ok(ok_text(format!("Tapped {label}")))
+        let after = after_action(&page, before, Some(hit), (&sessions, &session_id)).await;
+        Ok(ok_text_struct(
+            after.render(&format!("Tapped {label}")),
+            after,
+        ))
     }
 
-    async fn swipe(&self, args: JsonObject) -> Result<Text> {
+    async fn swipe(&self, args: JsonObject) -> Result<Structured<AfterAction>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let page = sessions.active_page(&session_id).await?;
@@ -415,13 +700,18 @@ impl BrowserSessionServer {
             }
         };
         let duration = optional_u64(&args, "durationMs").unwrap_or(300);
+        let before = page_url(&page).await;
         touch_swipe(&page, from, to, duration)
             .await
             .with_context(|| format!("swiping from {label}"))?;
-        Ok(ok_text(format!(
-            "Swiped from {label} to ({:.0}, {:.0}) over {duration}ms",
-            to.0, to.1
-        )))
+        let after = after_action(&page, before, None, (&sessions, &session_id)).await;
+        Ok(ok_text_struct(
+            after.render(&format!(
+                "Swiped from {label} to ({:.0}, {:.0}) over {duration}ms",
+                to.0, to.1
+            )),
+            after,
+        ))
     }
 
     async fn move_mouse(&self, args: JsonObject) -> Result<Text> {
@@ -878,7 +1168,9 @@ impl BrowserSessionServer {
                         _ => {}
                     }
                     if touch {
-                        touch_tap(&page, element_center(&page, &css).await?)
+                        let at = element_center(&page, &css).await?;
+                        check_point(&page, at, Some(&css), &el.desc).await?;
+                        touch_tap(&page, at)
                             .await
                             .with_context(|| format!("tapping {}", el.desc))?;
                         return Ok(("tap".to_string(), None, None));
@@ -890,10 +1182,21 @@ impl BrowserSessionServer {
                 // A page that re-rendered between the pick and the action
                 // has dropped the picked element; decide again on the new
                 // page rather than failing the whole run.
+                // A target something covers (a popup, a banner) isn't
+                // clicked; the next step reads what is in the way.
+                let mut blocked = None;
                 let (action, typed, dropped_on) = match attempt {
                     Ok(done) => done,
                     Err(e) if format!("{e:#}").contains("not found") => {
                         ("missed".to_string(), None, None)
+                    }
+                    Err(e) if format!("{e:#}").contains("is covered by") => {
+                        blocked = format!("{e:#}")
+                            .split(" is covered by ")
+                            .nth(1)
+                            .and_then(|r| r.split(" at (").next())
+                            .map(str::to_string);
+                        ("blocked".to_string(), None, None)
                     }
                     Err(e) => return Err(e),
                 };
@@ -918,9 +1221,12 @@ impl BrowserSessionServer {
                             "{step}. typed the value for {k} into {}",
                             el.desc.trim_end_matches(" (empty)")
                         ),
-                        None => match &dropped_on {
-                            Some(t) => format!("{step}. dragged {} onto {t}", el.desc),
-                            None => format!("{step}. {action} {}", el.desc),
+                        None => match (&dropped_on, &blocked) {
+                            (Some(t), _) => format!("{step}. dragged {} onto {t}", el.desc),
+                            (None, Some(b)) => {
+                                format!("{step}. could not click {}: {b} covers it", el.desc)
+                            }
+                            (None, None) => format!("{step}. {action} {}", el.desc),
                         },
                     },
                 )
@@ -1074,9 +1380,16 @@ impl BrowserSessionServer {
         let session_id = required_str(&args, "sessionId")?.to_string();
         let selector = optional_str(&args, "selector").map(str::to_string);
         let text = optional_str(&args, "text").map(str::to_string);
+        let expression = optional_str(&args, "expression").map(str::to_string);
         let timeout = optional_u64(&args, "timeout").unwrap_or(10_000);
-        if selector.is_none() && text.is_none() {
-            bail!("wait_for requires either `selector` or `text`.");
+        if selector.is_none() && text.is_none() && expression.is_none() {
+            // A plain pause: some hosts (Executor's sandbox) have no timer.
+            let Some(ms) = optional_u64(&args, "ms") else {
+                bail!("wait_for requires `selector`, `text`, `expression` or `ms`.");
+            };
+            let ms = ms.min(MAX_PAUSE_MS);
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            return Ok(ok_text(format!("Waited {ms}ms")));
         }
         if let Some(s) = selector.as_deref().filter(|s| s.starts_with("jev:")) {
             bail!(
@@ -1088,6 +1401,40 @@ impl BrowserSessionServer {
         if let Some(s) = selector {
             wait_for_selector(&page, &s, timeout).await?;
             return Ok(ok_text(format!("Matched selector {s}")));
+        }
+        if let Some(expr) = expression {
+            // Run like `evaluate` (main world, or isolated on stealth
+            // sessions), until the value is truthy.
+            let stealth = takeover::is_stealth(&session_id).await;
+            let wrapped = wrap_expression(&page, &expr, stealth).await?;
+            let last = std::sync::Mutex::new(Value::Null);
+            let (last, page, wrapped) = (&last, &page, &wrapped);
+            let found = wait_until(
+                || async move {
+                    let v = if stealth {
+                        iso_eval_function(page, wrapped).await
+                    } else {
+                        main_world_eval(page, wrapped).await
+                    }
+                    .unwrap_or(Value::Null);
+                    let truthy = match &v {
+                        Value::Null => false,
+                        Value::Bool(b) => *b,
+                        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+                        Value::String(s) => !s.is_empty(),
+                        _ => true,
+                    };
+                    *last.lock().expect("unpoisoned") = v;
+                    Ok(truthy)
+                },
+                timeout,
+            )
+            .await;
+            let last = last.lock().expect("unpoisoned").clone();
+            found.with_context(|| {
+                format!("waiting for `{expr}` to be truthy (last value: {last})")
+            })?;
+            return Ok(ok_text(format!("`{expr}` became {last}")));
         }
         let needle = text.unwrap();
         let body = format!(
@@ -1133,6 +1480,64 @@ impl BrowserSessionServer {
         .context("evaluate")?;
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
         Ok(ok_text_struct(text, EvaluateOut { result: value }))
+    }
+
+    async fn measure_page(&self, args: JsonObject) -> Result<Structured<crate::measure::Measure>> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let page = sessions.active_page(&session_id).await?;
+        let timeout = optional_u64(&args, "timeout")
+            .unwrap_or(20_000)
+            .min(MAX_PAUSE_MS);
+        // A fresh load, watched from its start so its requests are counted.
+        let inflight = InFlight::watch(&page).await?;
+        let load = async {
+            match optional_str(&args, "url") {
+                Some(url) => {
+                    let nav = NavigateParams::builder()
+                        .url(url.to_string())
+                        .build()
+                        .map_err(|e| anyhow!("NavigateParams: {e}"))?;
+                    page.goto(nav).await.context("Page.navigate").map(|_| ())
+                }
+                None => page.reload().await.context("Page.reload").map(|_| ()),
+            }
+        };
+        tokio::time::timeout(Duration::from_millis(timeout), load)
+            .await
+            .map_err(|_| anyhow!("the page didn't finish loading within {timeout}ms"))??;
+        inflight.idle(timeout).await;
+        drop(inflight);
+        let v = iso_eval_function(&page, crate::measure::COLLECT_JS).await?;
+        let rec = sessions.record(&session_id).await?;
+        let vp = sessions.viewport(&session_id).await;
+        let device = format!(
+            "{}x{} at {}x{}",
+            vp.width,
+            vp.height,
+            vp.scale,
+            if sessions.is_mobile(&session_id).await {
+                ", a touch phone"
+            } else {
+                ""
+            }
+        );
+        let throttling = EmulationOut::from(rec)
+            .describe()
+            .trim_end_matches('.')
+            .to_string();
+        let mut merged = v;
+        merged["url"] = json!(
+            current_url_title(&page)
+                .await
+                .map(|(u, _)| u)
+                .unwrap_or_default()
+        );
+        merged["conditions"] = json!(format!("{device}; {throttling}"));
+        let mut out: crate::measure::Measure =
+            serde_json::from_value(merged).context("reading the page's timing records")?;
+        out.rate();
+        Ok(ok_text_struct(out.render(), out))
     }
 
     // --- profiling ---
@@ -1233,22 +1638,53 @@ impl BrowserSessionServer {
 
     async fn await_human_takeover(&self, args: JsonObject) -> Result<Structured<TakeoverDoneOut>> {
         let token = required_str(&args, "token")?.to_string();
-        // How long to block. Default 5 min; capped at 30 to match the max link TTL.
+        // How long to block. Default 25 s, under the per-call limit hosts like
+        // Executor set, so a caller polls in a loop instead of having its call
+        // cut off; at most 30 min, the longest link.
         let timeout_ms = optional_u64(&args, "timeout")
-            .unwrap_or(300_000)
+            .unwrap_or(25_000)
             .min(1_800_000);
+        let ticket = takeover::read_ticket(&token).await.ok();
         let completed = takeover::wait_for_done(&token, Duration::from_millis(timeout_ms)).await?;
+        let expired = !completed
+            && ticket
+                .as_ref()
+                .is_some_and(|t| t.expires_at_ms <= takeover::expiry_ms(0));
+        let mut where_ = None;
         if completed {
             takeover::cleanup(&token).await;
+            if let (Some(t), Ok(sessions)) = (&ticket, self.ctx.sessions().await) {
+                // A named session saves the login right away.
+                if let Some(name) = sessions.name(&t.session_id).await {
+                    let _ = self.save_login(&t.session_id, &name).await;
+                }
+                if let Ok(page) = sessions.active_page(&t.session_id).await {
+                    where_ = current_url_title(&page).await;
+                }
+            }
         }
         let body = if completed {
-            "Human signalled done — the session is authenticated; resuming."
+            match &where_ {
+                Some((url, title)) => {
+                    format!("The person finished; the session is now on {url} ({title}).")
+                }
+                None => "The person finished; resuming.".to_string(),
+            }
+        } else if expired {
+            "The link expired before the person finished; issue a new request_human_takeover."
+                .to_string()
         } else {
-            "Timed out waiting for the human to finish. The link may still be valid; call await_human_takeover again or issue a new request_human_takeover."
+            "Not finished yet; call await_human_takeover again with the same token.".to_string()
         };
         Ok(ok_text_struct(
-            body.to_string(),
-            TakeoverDoneOut { completed, token },
+            body,
+            TakeoverDoneOut {
+                completed,
+                expired,
+                url: where_.as_ref().map(|(u, _)| u.clone()),
+                title: where_.map(|(_, t)| t),
+                token,
+            },
         ))
     }
 
@@ -1322,16 +1758,40 @@ impl BrowserSessionServer {
         let _ = sessions.context_id_for(&session_id).await?;
         let visit = optional_u32(&args, "visit");
         let limit = optional_usize(&args, "limit").unwrap_or(500);
-        let entries = logs::read_session_logs(
+        let details = optional_bool(&args, "details").unwrap_or(false);
+        let url_contains = optional_str(&args, "urlContains").map(str::to_string);
+        let mut entries = logs::read_session_logs(
             &self.logs_dir,
             &session_id,
             ReadOpts {
                 kind: Some(LogKind::Network),
-                limit: Some(limit),
+                limit: if url_contains.is_some() {
+                    None
+                } else {
+                    Some(limit)
+                },
                 visit,
             },
         )
         .await?;
+        if let Some(needle) = &url_contains {
+            entries.retain(
+                |e| matches!(e, SessionLogEntry::Network(n) if n.url.contains(needle.as_str())),
+            );
+            let skip = entries.len().saturating_sub(limit);
+            entries.drain(..skip);
+        }
+        // Headers and bodies only when asked: a page makes hundreds of
+        // requests, and most questions are about a few.
+        if !details {
+            for e in &mut entries {
+                if let SessionLogEntry::Network(n) = e {
+                    n.request_headers = None;
+                    n.response_headers = None;
+                    n.response_body = None;
+                }
+            }
+        }
         let body = if entries.is_empty() {
             "(no network requests)".to_string()
         } else {
@@ -1357,6 +1817,18 @@ impl BrowserSessionServer {
                             Some(to) => format!("  -> {to}"),
                             None => String::new(),
                         };
+                        let mut body = body;
+                        if let Some(h) = &n.request_headers {
+                            body.push_str(&format!("\n    request headers: {h}"));
+                        }
+                        if let Some(h) = &n.response_headers {
+                            body.push_str(&format!("\n    response headers: {h}"));
+                        }
+                        if let Some(b) = &n.response_body {
+                            let short: String = b.chars().take(2000).collect();
+                            let more = if b.chars().count() > 2000 { "…" } else { "" };
+                            body.push_str(&format!("\n    response: {short}{more}"));
+                        }
                         Some(format!("{} {} [{status}]{redirect}{body}", n.method, n.url))
                     }
                     _ => None,
@@ -1367,7 +1839,7 @@ impl BrowserSessionServer {
         let requests = entries
             .into_iter()
             .filter_map(|e| match e {
-                SessionLogEntry::Network(n) => Some(n),
+                SessionLogEntry::Network(n) => Some(*n),
                 _ => None,
             })
             .collect();
@@ -1499,10 +1971,28 @@ impl BrowserSessionServer {
     // --- saved browser states ---
 
     async fn save_state(&self, args: JsonObject) -> Result<Structured<SavedOut>> {
-        let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let name = required_str(&args, "name")?.to_string();
-        let ctx_id = sessions.context_id_for(&session_id).await?;
+        let state = self.save_login(&session_id, &name).await?;
+        Ok(ok_text_struct(
+            format!("Saved {} cookies as \"{name}\".", state.cookies.len()),
+            SavedOut {
+                cookie_count: state.cookies.len(),
+                name: state.name,
+                saved_at: state.saved_at,
+            },
+        ))
+    }
+
+    /// Save a session's cookies under `name`: `save_browser_state`, and a
+    /// named session's login when a takeover finishes or it closes.
+    async fn save_login(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> Result<crate::saved_states::SavedState> {
+        let sessions = self.ctx.sessions().await?;
+        let ctx_id = sessions.context_id_for(session_id).await?;
         let result = sessions
             .browser()
             .execute(
@@ -1519,23 +2009,19 @@ impl BrowserSessionServer {
             .into_iter()
             .map(|c| serde_json::to_value(&c).unwrap_or(Value::Null))
             .collect();
-        let state = self.saved_states.save(&name, cookies_json.clone()).await?;
-        Ok(ok_text_struct(
-            format!("Saved {} cookies as \"{name}\".", state.cookies.len()),
-            SavedOut {
-                cookie_count: state.cookies.len(),
-                name: state.name,
-                saved_at: state.saved_at,
-            },
-        ))
+        self.saved_states.save(name, cookies_json).await
     }
 
-    async fn load_state(&self, args: JsonObject) -> Result<Structured<LoadedOut>> {
+    /// Load cookies saved under `name` into a session: `load_browser_state`,
+    /// and a named session's login when it opens.
+    async fn load_login(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> Result<crate::saved_states::SavedState> {
         let sessions = self.ctx.sessions().await?;
-        let session_id = required_str(&args, "sessionId")?.to_string();
-        let name = required_str(&args, "name")?.to_string();
-        let ctx_id = sessions.context_id_for(&session_id).await?;
-        let state = self.saved_states.load(&name).await?;
+        let ctx_id = sessions.context_id_for(session_id).await?;
+        let state = self.saved_states.load(name).await?;
         if !state.cookies.is_empty() {
             // Storage.setCookies expects CookieParam; the saved cookies came
             // from Network.Cookie. Strip fields that don't exist on
@@ -1569,6 +2055,13 @@ impl BrowserSessionServer {
                 .await
                 .context("Storage.setCookies")?;
         }
+        Ok(state)
+    }
+
+    async fn load_state(&self, args: JsonObject) -> Result<Structured<LoadedOut>> {
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let name = required_str(&args, "name")?.to_string();
+        let state = self.load_login(&session_id, &name).await?;
         Ok(ok_text_struct(
             format!("Loaded {} cookies from \"{name}\".", state.cookies.len()),
             LoadedOut {
@@ -1668,7 +2161,10 @@ impl<T: Serialize + JsonSchema + 'static> ToolOutput for Structured<T> {
 /// A PNG image plus a caption; declares no outputSchema.
 struct Screenshot {
     text: String,
-    png_base64: String,
+    /// None when the image was saved to a file instead.
+    png_base64: Option<String>,
+    /// Where it was saved, when it was.
+    saved: Option<(PathBuf, usize)>,
 }
 
 impl ToolOutput for Screenshot {
@@ -1677,10 +2173,15 @@ impl ToolOutput for Screenshot {
     }
 
     fn into_result(self) -> CallToolResult {
-        CallToolResult::success(vec![
-            ContentBlock::text(self.text),
-            ContentBlock::image(self.png_base64, "image/png".to_string()),
-        ])
+        let mut blocks = vec![ContentBlock::text(self.text)];
+        if let Some(png) = self.png_base64 {
+            blocks.push(ContentBlock::image(png, "image/png".to_string()));
+        }
+        let mut result = CallToolResult::success(blocks);
+        if let Some((path, bytes)) = self.saved {
+            result.structured_content = Some(json!({ "path": path, "bytes": bytes }));
+        }
+        result
     }
 }
 
@@ -1745,6 +2246,7 @@ tools! {
     "move_mouse" => move_mouse,
     "wait_for" => wait_for,
     "evaluate" => evaluate,
+    "measure_page" => measure_page,
     "start_profiling" => start_profiling,
     "stop_profiling" => stop_profiling,
     "list_visits" => list_visits,
@@ -1917,8 +2419,15 @@ struct TakeoverOut {
 
 #[derive(Serialize, JsonSchema)]
 struct TakeoverDoneOut {
-    /// True once the person clicked Done; false on timeout.
+    /// True once the person clicked Done; false while still waiting.
     completed: bool,
+    /// True when the link expired unfinished: request a new one.
+    expired: bool,
+    /// Where the session is once finished.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
     token: String,
 }
 
@@ -2118,7 +2627,18 @@ fn optional_viewport(args: &JsonObject, field: &str) -> Result<Option<Viewport>>
         .and_then(|v| v.as_i64())
         .filter(|n| *n > 0)
         .ok_or_else(|| anyhow!("{field}.height must be a positive integer"))?;
-    Ok(Some(Viewport { width, height }))
+    let scale = match obj.get("deviceScaleFactor") {
+        None => 1.0,
+        Some(v) => v
+            .as_f64()
+            .filter(|n| (0.5..=4.0).contains(n))
+            .ok_or_else(|| anyhow!("{field}.deviceScaleFactor must be a number from 0.5 to 4"))?,
+    };
+    Ok(Some(Viewport {
+        width,
+        height,
+        scale,
+    }))
 }
 
 /// Evaluate a JS *function declaration* in the tab's isolated world and
@@ -2250,7 +2770,7 @@ async fn raw_call(
         .map_err(|e| anyhow!("CallFunctionOn builder: {e}"))?;
     let resp = page.execute(call).await?;
     if let Some(exc) = resp.result.exception_details.as_ref() {
-        return Ok(Err(anyhow!("JS exception: {}", exc.text)));
+        return Ok(Err(anyhow!("JS exception: {}", exception_message(exc))));
     }
     Ok(Ok(resp.result.result.value.clone().unwrap_or(Value::Null)))
 }
@@ -2307,7 +2827,7 @@ async fn main_world_eval(page: &Page, function_declaration: &str) -> Result<Valu
         )
         .await?;
     if let Some(exc) = resp.result.exception_details.as_ref() {
-        bail!("JS exception: {}", exc.text);
+        bail!("JS exception: {}", exception_message(exc));
     }
     Ok(resp.result.result.value.clone().unwrap_or(Value::Null))
 }
@@ -2715,6 +3235,7 @@ async fn current_url_title(page: &Page) -> Option<(String, String)> {
 /// errors — the shared path of `act`'s element clicks.
 async fn click_label(page: &Page, css: &str, label: &str) -> Result<()> {
     let (x, y) = element_center(page, css).await?;
+    check_point(page, (x, y), Some(css), label).await?;
     page.click(Point::new(x, y))
         .await
         .with_context(|| format!("clicking {label}"))?;
@@ -2733,6 +3254,8 @@ async fn type_into(page: &Page, css: &str, text: &str, clear: bool, delay_ms: u6
     }
     if clear {
         clear_field(page, css).await;
+    } else {
+        caret_to_end(page, css).await;
     }
     type_chars(page, text, delay_ms)
         .await
@@ -2770,6 +3293,23 @@ async fn clear_field(page: &Page, css: &str) {
            const s = el.ownerDocument.getSelection(); s.removeAllRanges(); s.addRange(r); }} \
          else {{ try {{ el.select(); if (el.selectionStart === null) el.value = ''; }} \
            catch (e) {{ el.value = ''; }} }} return true; }}",
+        deep = jev::DEEP_FIND_JS,
+        sel = serde_json::to_string(css).unwrap_or_else(|_| "''".to_string()),
+    );
+    let _ = iso_eval_function(page, &decl).await;
+}
+
+/// Put the caret after a field's text. The click that focuses a field puts
+/// it wherever the click landed, often mid-text in a field the page filled
+/// itself (a handle made from a title), and typing then splits that text.
+/// Best effort.
+async fn caret_to_end(page: &Page, css: &str) {
+    let decl = format!(
+        "function() {{ {deep} const h = __bsDeep({sel}); if (!h) return false; const el = h.el; \
+         if (el.isContentEditable) {{ const r = el.ownerDocument.createRange(); r.selectNodeContents(el); r.collapse(false); \
+           const s = el.ownerDocument.getSelection(); s.removeAllRanges(); s.addRange(r); }} \
+         else {{ try {{ const n = String(el.value || '').length; el.setSelectionRange(n, n); }} catch (e) {{}} }} \
+         return true; }}",
         deep = jev::DEEP_FIND_JS,
         sel = serde_json::to_string(css).unwrap_or_else(|_| "''".to_string()),
     );
@@ -2840,8 +3380,8 @@ impl Drop for DialogGuard {
 async fn element_center(page: &Page, selector: &str) -> Result<(f64, f64)> {
     let decl = format!(
         "function() {{ {deep} let h = __bsDeep({sel}); if (!h) return null; \
-         h.el.scrollIntoView({{block:'center',inline:'center'}}); h = __bsDeep({sel}); \
-         const r = h.el.getBoundingClientRect(); \
+         h.el.scrollIntoView({{block:'center',inline:'center',behavior:'instant'}}); h = __bsDeep({sel}); \
+         const r = h.el.getBoundingClientRect(); if (!r.width && !r.height) return null; \
          return [h.ox + r.left + r.width/2, h.oy + r.top + r.height/2]; }}",
         deep = jev::DEEP_FIND_JS,
         sel = serde_json::to_string(selector).unwrap_or_else(|_| "''".to_string())
@@ -2854,6 +3394,268 @@ async fn element_center(page: &Page, selector: &str) -> Result<(f64, f64)> {
     let x = arr[0].as_f64().ok_or_else(|| anyhow!("bad x coord"))?;
     let y = arr[1].as_f64().ok_or_else(|| anyhow!("bad y coord"))?;
     Ok((x, y))
+}
+
+/// An element's box in document coordinates (for a screenshot clip), after
+/// scrolling it into view; `None` when it has no size.
+async fn element_box(page: &Page, selector: &str) -> Result<Option<(f64, f64, f64, f64)>> {
+    let decl = format!(
+        "function() {{ {deep} let h = __bsDeep({sel}); if (!h) return null; \
+         h.el.scrollIntoView({{block:'center',inline:'center',behavior:'instant'}}); h = __bsDeep({sel}); \
+         const r = h.el.getBoundingClientRect(); if (!r.width || !r.height) return null; \
+         return [h.ox + r.left + scrollX, h.oy + r.top + scrollY, r.width, r.height]; }}",
+        deep = jev::DEEP_FIND_JS,
+        sel = serde_json::to_string(selector).unwrap_or_else(|_| "''".to_string())
+    );
+    let v = iso_eval_function(page, &decl).await?;
+    Ok(v.as_array().filter(|a| a.len() == 4).map(|a| {
+        let n = |i: usize| a[i].as_f64().unwrap_or(0.0);
+        (n(0), n(1), n(2), n(3))
+    }))
+}
+
+/// A thrown error's message: `text` alone is often just "Uncaught" or
+/// "Uncaught (in promise)", and the error itself ("SyntaxError: ... is not a
+/// valid selector") is in the exception's description, with its stack.
+fn exception_message(exc: &chromiumoxide::cdp::js_protocol::runtime::ExceptionDetails) -> String {
+    let thrown = exc.exception.as_ref().and_then(|e| {
+        e.description
+            .clone()
+            .or_else(|| e.value.as_ref().map(|v| v.to_string()))
+    });
+    match thrown {
+        Some(d) => {
+            let d: String = d.lines().take(4).collect::<Vec<_>>().join("\n");
+            format!("{}: {d}", exc.text.trim_end_matches(':').trim())
+        }
+        None => exc.text.clone(),
+    }
+}
+
+/// What is at a screen point, looking into open shadow roots and same-origin
+/// iframes, and whether it is `target` (a selector or `jev-ref:`), part of
+/// it, or its label. `off` means the point is outside the screen.
+#[derive(Debug)]
+struct Hit {
+    hit: String,
+    ok: bool,
+    off: bool,
+}
+
+const DESCRIBE_JS: &str = r#"var __bsDesc = function(el) {
+  if (!el || !el.tagName) return 'nothing';
+  var t = el.tagName.toLowerCase();
+  if (el.id) t += '#' + el.id;
+  else if (typeof el.className === 'string' && el.className.trim()) t += '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.');
+  var label = String(el.getAttribute('aria-label') || el.innerText || el.value || el.getAttribute('placeholder') || '').replace(/\s+/g, ' ').trim();
+  if (label) t += ' "' + (label.length > 50 ? label.slice(0, 49) + '...' : label) + '"';
+  // Inside a web component (a popup rendered in a shadow root), name its
+  // host on the page too: that is what a page script can find and remove.
+  var host = el.getRootNode && el.getRootNode().host;
+  while (host && host.getRootNode().host) host = host.getRootNode().host;
+  if (host) t += ' (inside ' + host.tagName.toLowerCase() + (host.id ? '#' + host.id : '') + ')';
+  return t;
+};"#;
+
+async fn hit_at(page: &Page, (x, y): (f64, f64), target: Option<&str>) -> Result<Hit> {
+    let decl = format!(
+        "function() {{ {deep} {desc} var x = {x}, y = {y}, sel = {sel}; \
+         if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return {{ off: true }}; \
+         var el = document.elementFromPoint(x, y), ox = 0, oy = 0; \
+         for (var i = 0; el && i < 10; i++) {{ \
+           if (el.shadowRoot) {{ var inner = el.shadowRoot.elementFromPoint(x - ox, y - oy); \
+             if (inner && inner !== el) {{ el = inner; continue; }} }} \
+           if (el.tagName === 'IFRAME') {{ var d = null; try {{ d = el.contentDocument; }} catch (e) {{}} \
+             if (d) {{ var r = el.getBoundingClientRect(); ox += r.left + el.clientLeft; oy += r.top + el.clientTop; \
+               var inside = d.elementFromPoint(x - ox, y - oy); if (inside) {{ el = inside; continue; }} }} }} \
+           break; }} \
+         var up = function(n) {{ return n.parentNode || n.host || (n.defaultView && n.defaultView.frameElement) || null; }}; \
+         var within = function(a, b) {{ for (var n = a; n; n = up(n)) if (n === b) return true; return false; }}; \
+         var h = sel ? __bsDeep(sel) : null, target = h && h.el; \
+         var ok = !target || !el || within(el, target) || within(target, el); \
+         if (!ok) {{ for (var n = el; n; n = up(n)) if (n.tagName === 'LABEL') {{ \
+           ok = n.control === target || within(target, n); break; }} }} \
+         return {{ hit: __bsDesc(el), ok: ok }}; }}",
+        deep = jev::DEEP_FIND_JS,
+        desc = DESCRIBE_JS,
+        sel = target.map_or("null".to_string(), |t| serde_json::to_string(t)
+            .unwrap_or_else(|_| "null".to_string())),
+    );
+    let v = iso_eval_function(page, &decl).await?;
+    Ok(Hit {
+        hit: v
+            .get("hit")
+            .and_then(Value::as_str)
+            .unwrap_or("nothing")
+            .to_string(),
+        ok: v.get("ok").and_then(Value::as_bool).unwrap_or(true),
+        off: v.get("off").and_then(Value::as_bool).unwrap_or(false),
+    })
+}
+
+/// Check that a click or tap at `at` lands on `target` (any element when
+/// `None`): a point off the screen, or one where a popup, banner or other
+/// overlay covers the target, would report success while doing nothing, so
+/// it fails here instead, naming what is in the way. The shared check of
+/// `click`, `tap` and `act`. Returns what is at the point.
+async fn check_point(
+    page: &Page,
+    at: (f64, f64),
+    target: Option<&str>,
+    label: &str,
+) -> Result<String> {
+    let hit = hit_at(page, at, target).await?;
+    if hit.off {
+        bail!(
+            "({:.0}, {:.0}) is outside the screen, so nothing was clicked; scroll it into view or use a selector",
+            at.0,
+            at.1
+        );
+    }
+    if !hit.ok {
+        bail!(
+            "{label} is covered by {} at ({:.0}, {:.0}), so nothing was clicked; close or remove what covers it (a popup, banner or overlay), or target that element if it is what you meant",
+            hit.hit,
+            at.0,
+            at.1
+        );
+    }
+    Ok(hit.hit)
+}
+
+/// Where the page is after an action, for its result: the URL and title,
+/// whether it left `before`, the focused element (through shadow roots and
+/// same-origin iframes) and an open dialog. Read after a short pause, so a
+/// click that navigates or opens something has started to.
+#[derive(Serialize, JsonSchema)]
+struct AfterAction {
+    /// The page's URL after the action.
+    url: String,
+    /// The page's title after the action.
+    title: String,
+    /// Whether the URL changed.
+    navigated: bool,
+    /// The element with keyboard focus, or "nothing".
+    focused: String,
+    /// An open dialog's text, if one is showing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dialog: Option<String>,
+    /// What was at the clicked or tapped point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hit: Option<String>,
+    /// With press_key's `repeat`: the focused element after each press.
+    #[serde(rename = "focusTrail", skip_serializing_if = "Option::is_none")]
+    focus_trail: Option<Vec<String>>,
+    /// The page's own dialogs (alert, confirm, prompt, "Leave site?")
+    /// answered since the last action, each accepted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    answered: Vec<String>,
+}
+
+const AFTER_ACTION_SETTLE_MS: u64 = 250;
+
+async fn page_url(page: &Page) -> Option<String> {
+    current_url_title(page).await.map(|(u, _)| u)
+}
+
+/// Sets `focused` to the focused element's description, looking through
+/// shadow roots and same-origin iframes.
+const FOCUSED_JS: &str = "var el = document.activeElement; \
+   for (var i = 0; el && i < 10; i++) { \
+     if (el.shadowRoot && el.shadowRoot.activeElement) { el = el.shadowRoot.activeElement; continue; } \
+     if (el.tagName === 'IFRAME') { var d = null; try { d = el.contentDocument; } catch (e) {} \
+       if (d && d.activeElement) { el = d.activeElement; continue; } } \
+     break; } \
+   var focused = el && el !== document.body && el !== document.documentElement ? __bsDesc(el) : 'nothing';";
+
+/// The focused element right now.
+async fn focused_now(page: &Page) -> String {
+    let decl = format!("function() {{ {DESCRIBE_JS} {FOCUSED_JS} return focused; }}");
+    iso_eval_function(page, &decl)
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "nothing".to_string())
+}
+
+/// Most presses one press_key call makes.
+const MAX_KEY_REPEAT: u64 = 50;
+
+async fn after_action(
+    page: &Page,
+    before: Option<String>,
+    hit: Option<String>,
+    (sessions, session_id): (&crate::sessions::SessionManager, &str),
+) -> AfterAction {
+    tokio::time::sleep(Duration::from_millis(AFTER_ACTION_SETTLE_MS)).await;
+    let answered = sessions.take_dialogs(session_id);
+    let decl = format!(
+        "function() {{ {desc} {focused} \
+         var dlg = Array.from(document.querySelectorAll('dialog[open], [role=dialog], [role=alertdialog], [aria-modal=true]')) \
+           .find(function(d) {{ var r = d.getBoundingClientRect(), s = getComputedStyle(d); \
+             var de = document.documentElement; \
+             return r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < de.clientWidth && r.top < de.clientHeight \
+               && s.visibility !== 'hidden' && s.opacity !== '0'; }}); \
+         var text = dlg ? String(dlg.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 160) : null; \
+         return {{ url: location.href, title: document.title, \
+           focused: focused, \
+           dialog: dlg ? (text || __bsDesc(dlg)) : null }}; }}",
+        desc = DESCRIBE_JS,
+        focused = FOCUSED_JS,
+    );
+    let v = iso_eval_function(page, &decl).await.unwrap_or(Value::Null);
+    let url = v
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or("(navigating)")
+        .to_string();
+    AfterAction {
+        navigated: before.as_deref().is_some_and(|b| b != url),
+        title: v
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        focused: v
+            .get("focused")
+            .and_then(Value::as_str)
+            .unwrap_or("nothing")
+            .to_string(),
+        dialog: v.get("dialog").and_then(Value::as_str).map(str::to_string),
+        url,
+        hit,
+        focus_trail: None,
+        answered,
+    }
+}
+
+impl AfterAction {
+    /// The result line under an action's own: where it left the page.
+    fn render(&self, done: &str) -> String {
+        let mut s = format!("{done}.");
+        if let Some(h) = &self.hit {
+            s.push_str(&format!(" It landed on {h}."));
+        }
+        if self.navigated {
+            s.push_str(&format!(
+                " The page navigated to {} ({}).",
+                self.url, self.title
+            ));
+        } else {
+            s.push_str(&format!(" Still on {} ({}).", self.url, self.title));
+        }
+        match &self.focus_trail {
+            Some(t) => s.push_str(&format!(" Focus after each press: {}.", t.join(" / "))),
+            None => s.push_str(&format!(" Focus: {}.", self.focused)),
+        }
+        if let Some(d) = &self.dialog {
+            s.push_str(&format!(" A dialog is open: {d}"));
+        }
+        for d in &self.answered {
+            s.push_str(&format!(" The page asked ({d}) and it was accepted."));
+        }
+        s
+    }
 }
 
 /// Where `act`'s sideways swipe starts: the middle of the in-view part of
@@ -3209,6 +4011,97 @@ async fn wait_for_selector(page: &Page, selector: &str, timeout_ms: u64) -> Resu
     }
 }
 
+/// Requests a tab has in flight, counted from Chrome's network events from
+/// when it was made: resource timing only lists a request once it finishes,
+/// so it can't tell a page waiting on a slow call from one that's done.
+struct InFlight {
+    count: Arc<std::sync::atomic::AtomicI64>,
+    last_change: Arc<std::sync::Mutex<tokio::time::Instant>>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl InFlight {
+    async fn watch(page: &Page) -> Result<Self> {
+        use chromiumoxide::cdp::browser_protocol::network::{
+            EnableParams, EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent,
+        };
+        page.execute(EnableParams::default())
+            .await
+            .context("Network.enable")?;
+        let count = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let last_change = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
+        let bump = |count: Arc<std::sync::atomic::AtomicI64>,
+                    last: Arc<std::sync::Mutex<tokio::time::Instant>>,
+                    by: i64| {
+            move || {
+                count.fetch_add(by, std::sync::atomic::Ordering::SeqCst);
+                *last.lock().expect("unpoisoned") = tokio::time::Instant::now();
+            }
+        };
+        let mut tasks = Vec::new();
+        let mut sent = page.event_listener::<EventRequestWillBeSent>().await?;
+        let on = bump(count.clone(), last_change.clone(), 1);
+        tasks.push(tokio::spawn(async move {
+            while sent.next().await.is_some() {
+                on();
+            }
+        }));
+        let mut done = page.event_listener::<EventLoadingFinished>().await?;
+        let on = bump(count.clone(), last_change.clone(), -1);
+        tasks.push(tokio::spawn(async move {
+            while done.next().await.is_some() {
+                on();
+            }
+        }));
+        let mut failed = page.event_listener::<EventLoadingFailed>().await?;
+        let on = bump(count.clone(), last_change.clone(), -1);
+        tasks.push(tokio::spawn(async move {
+            while failed.next().await.is_some() {
+                on();
+            }
+        }));
+        Ok(Self {
+            count,
+            last_change,
+            tasks,
+        })
+    }
+
+    /// Wait until nothing has been in flight for [`NETWORK_QUIET_MS`], up to
+    /// `timeout_ms`. False if it never went quiet.
+    async fn idle(&self, timeout_ms: u64) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let now = tokio::time::Instant::now();
+            let quiet = now - *self.last_change.lock().expect("unpoisoned");
+            if self.count.load(std::sync::atomic::Ordering::SeqCst) <= 0
+                && quiet >= Duration::from_millis(NETWORK_QUIET_MS)
+            {
+                return true;
+            }
+            if now >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        for t in &self.tasks {
+            t.abort();
+        }
+    }
+}
+
+/// How long without a new request counts as the network gone quiet.
+const NETWORK_QUIET_MS: u64 = 500;
+
+/// The longest plain pause `wait_for` takes, under the per-call time limit
+/// hosts like Executor put on a tool call.
+const MAX_PAUSE_MS: u64 = 25_000;
+
 async fn wait_until<F, Fut>(mut check: F, timeout_ms: u64) -> Result<()>
 where
     F: FnMut() -> Fut,
@@ -3251,6 +4144,12 @@ fn tool_defs() -> Vec<Tool> {
             json!({
                 "width": pos_int_t.clone(),
                 "height": pos_int_t.clone(),
+                "deviceScaleFactor": {
+                    "type": "number",
+                    "minimum": 0.5,
+                    "maximum": 4,
+                    "description": "Device pixels per CSS pixel (window.devicePixelRatio), e.g. 2.625 for a Pixel 7. Default 1."
+                },
             }),
         ),
         ("required", json!(["width", "height"])),
@@ -3299,18 +4198,44 @@ fn tool_defs() -> Vec<Tool> {
     vec![
         tool(
             "open_browser_session",
-            "Open a new isolated browser session and return its sessionId; call this first, then pass the id to every other tool. Each session is its own Chrome BrowserContext with separate cookies, storage and tabs, so sessions never see each other, and it starts with one blank tab. Don't open a new session per page: reuse one and use new_page for more tabs. To start logged in, follow with load_browser_state before navigate. Set `viewport` for a specific window size and `useMobileUA` to be a phone: a mobile User-Agent and client hints, mobile device metrics (the page's viewport meta applies) and a touch screen (navigator.maxTouchPoints, touch events, pointer: coarse), so sites pick their touch behavior; use tap and swipe on it, and act taps and swipes on its own. Both are fixed for the session's life. Sessions persist until close_browser_session, or until the reaper role closes ones idle for MAX_IDLE_HOURS (default 24). Fails if Chrome is unreachable at BROWSER_URL.",
+            "Open a new isolated browser session and return its sessionId; call this first, then pass the id to every other tool. Each session is its own Chrome BrowserContext with separate cookies, storage and tabs, so sessions never see each other, and it starts with one blank tab. Don't open a new session per page: reuse one and use new_page for more tabs. To start logged in, follow with load_browser_state before navigate. Set `viewport` for a specific window size and `useMobileUA` to be a phone: a mobile User-Agent and client hints, mobile device metrics (the page's viewport meta applies) and a touch screen (navigator.maxTouchPoints, touch events, pointer: coarse), so sites pick their touch behavior; use tap and swipe on it, and act taps and swipes on its own. Both are fixed for the session's life. Give a `name` (e.g. `github`) to keep a login across tasks: opening that name again reuses the session while it is open, and otherwise opens a new one with the login saved under the name, which is saved when a takeover finishes and when the session closes. Sessions persist until close_browser_session, or until the reaper role closes ones idle for MAX_IDLE_HOURS (default 24). Fails if Chrome is unreachable at BROWSER_URL.",
             object_schema(
                 &[
                     (
                         "viewport",
                         &viewport_t,
-                        "Window size in CSS pixels, { width, height }. Default 1280x800.",
+                        "Window size in CSS pixels, { width, height, deviceScaleFactor? }. Default 1280x800 at 1x.",
                     ),
                     (
                         "useMobileUA",
                         &bool_t,
                         "Emulate a phone: a mobile User-Agent and client hints, mobile device metrics and a touch screen. Pair it with a phone-sized viewport such as 390x844. Default false.",
+                    ),
+                    (
+                        "device",
+                        &obj(&[
+                            ("type", Value::String("string".into())),
+                            (
+                                "enum",
+                                json!(
+                                    crate::devices::DEVICES
+                                        .iter()
+                                        .map(|d| d.name)
+                                        .collect::<Vec<_>>()
+                                ),
+                            ),
+                        ]),
+                        "A device preset: its screen size, pixel ratio, User-Agent and, for phones and tablets, a touch screen. `viewport`, `useMobileUA` and `userAgent` override parts of it.",
+                    ),
+                    (
+                        "userAgent",
+                        &str_t,
+                        "A User-Agent string to send instead of Chrome's, e.g. a specific phone's; with useMobileUA the session is also a touch phone. A non-Chrome one is sent without Chrome's client hints.",
+                    ),
+                    (
+                        "name",
+                        &str_t,
+                        "Reuse the open session with this name, or open one with the login saved under it; its login is saved under the name on takeover and close.",
                     ),
                 ],
                 &[],
@@ -3319,7 +4244,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "close_browser_session",
-            "Close a browser session for good: closes all its tabs, discards its cookies and storage, and deletes its console and network logs and saved .cpuprofile files. Call it when the task is done so the session doesn't sit open until the reaper closes it. Use close_tab instead to close one tab and keep the session, and save_browser_state first if the login should outlive the session. Idempotent: closing an unknown or already-closed session succeeds, so it is safe in cleanup code. Returns a confirmation.",
+            "Close a browser session for good: closes all its tabs, discards its cookies and storage, and deletes its console and network logs and saved .cpuprofile files. Call it when the task is done so the session doesn't sit open until the reaper closes it, but leave a session open while its login may be needed again soon. Use close_tab instead to close one tab and keep the session. A session opened with a `name` saves its login under the name first; otherwise save_browser_state first if the login should outlive the session. Idempotent: closing an unknown or already-closed session succeeds, so it is safe in cleanup code. Returns a confirmation.",
             object_schema(
                 &[(
                     "sessionId",
@@ -3384,7 +4309,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "navigate",
-            "Load a URL in the session's active tab and return once the page's load event fires. Use new_page instead to keep the current page and load the URL in a new tab, and wait_for after this when content arrives after the load event. If every tab was closed, a new one is opened. `url` must be absolute (https://, http://, data:, about:); `timeout` bounds only the wait for the load event. The returned url is the final one after any redirects. Fails with Chrome's net error (e.g. net::ERR_NAME_NOT_RESOLVED) if the page can't load, or if `timeout` passes first, in which case the page may still be loading.",
+            "Load a URL in the session's active tab and return once the page's load event fires, or with `waitUntil: networkidle` once its requests go quiet, or once `text` shows. Use new_page instead to keep the current page and load the URL in a new tab. If every tab was closed, a new one is opened. `url` must be absolute (https://, http://, data:, about:); `timeout` bounds only the wait for the load event. The returned url is the final one after any redirects. Fails with Chrome's net error (e.g. net::ERR_NAME_NOT_RESOLVED) if the page can't load, or if `timeout` passes first, in which case the page may still be loading.",
             object_schema(
                 &[
                     session_id,
@@ -3394,6 +4319,24 @@ fn tool_defs() -> Vec<Tool> {
                         &pos_int_t,
                         "Milliseconds to wait for the load event before failing. Default: no limit.",
                     ),
+                    (
+                        "waitUntil",
+                        &obj(&[
+                            ("type", Value::String("string".into())),
+                            ("enum", json!(["load", "networkidle"])),
+                        ]),
+                        "`load` (default) returns at the load event; `networkidle` also waits until no new request has started for 500ms, for pages that render themselves after loading.",
+                    ),
+                    (
+                        "text",
+                        &str_t,
+                        "Also wait until this text shows in the page (case-sensitive), failing if it doesn't.",
+                    ),
+                    (
+                        "settleTimeout",
+                        &pos_int_t,
+                        "Milliseconds to wait for `waitUntil: networkidle` or `text` after the load event, at most 25000. Default 10000.",
+                    ),
                 ],
                 &["sessionId", "url"],
             ),
@@ -3401,7 +4344,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "take_screenshot",
-            "Capture a PNG of the session's active tab and return it as an image. Use it when visual layout, styling or images matter; use take_snapshot for a cheaper text view of the page's structure, and evaluate to read specific values. `fullPage` captures the whole scrollable page instead of the visible viewport, which can make a very large image on long pages. It reads the page without changing it. Returns the image plus a caption with its size in bytes.",
+            "Capture a PNG of the session's active tab, or one element of it, and return it as an image or, with `save`, as a file path. Use it when visual layout, styling or images matter; use take_snapshot for a cheaper text view of the page's structure, and evaluate to read specific values. `fullPage` captures the whole scrollable page instead of the visible viewport, which can make a very large image on long pages. It reads the page without changing it. Returns the image plus a caption with its size in bytes.",
             object_schema(
                 &[
                     session_id,
@@ -3410,10 +4353,46 @@ fn tool_defs() -> Vec<Tool> {
                         &bool_t,
                         "Capture the whole scrollable page instead of only the visible viewport. Default false.",
                     ),
+                    (
+                        "selector",
+                        &str_t,
+                        "Capture only this element (CSS or `jev:` plain language), scrolled into view.",
+                    ),
+                    (
+                        "scale",
+                        &num_t,
+                        "Resize the image by this factor, 0.05 to 4 (e.g. 0.5 for a smaller file). Default 1.",
+                    ),
+                    (
+                        "save",
+                        &bool_t,
+                        "Save the PNG to a file on the host (under $STATE_DIR/screenshots/, kept after the session closes) and return { path, bytes } instead of the image, for callers that can't take an image (a sandbox) or want the file. Default false.",
+                    ),
                 ],
                 &["sessionId"],
             ),
             read_only(),
+        ),
+        tool(
+            "measure_page",
+            "Measure how fast a page loads, like a small Lighthouse performance run, in the session as it is: its login, device and throttling (set_emulation). Reloads the active tab (or loads `url`), waits for its requests to go quiet, and returns server response time, first and largest contentful paint (and the element it was), cumulative layout shift, total blocking time from long tasks, DOMContentLoaded and load times, requests and bytes by type and host, and the largest resources, each metric rated good, needs improvement or poor by the Core Web Vitals and Lighthouse thresholds. Use start_profiling instead to find which JavaScript is slow. Reloading loses unsaved page state.",
+            object_schema(
+                &[
+                    session_id,
+                    (
+                        "url",
+                        &url_t,
+                        "Load this URL instead of reloading the current page.",
+                    ),
+                    (
+                        "timeout",
+                        &pos_int_t,
+                        "Milliseconds to wait for the load and for its requests to go quiet, at most 25000. Default 20000.",
+                    ),
+                ],
+                &["sessionId"],
+            ),
+            writes(false, true),
         ),
         tool(
             "take_snapshot",
@@ -3668,6 +4647,11 @@ fn tool_defs() -> Vec<Tool> {
                         &pos_int_t,
                         "Milliseconds to wait for `selector` to appear. Default 5000.",
                     ),
+                    (
+                        "repeat",
+                        &pos_int_t,
+                        "Press it this many times (at most 50), e.g. to walk focus with Tab; the result's `focusTrail` lists the focused element after each press. Default 1.",
+                    ),
                 ],
                 &["sessionId", "key"],
             ),
@@ -3727,7 +4711,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "wait_for",
-            "Wait until a CSS selector matches an element, or a text string appears in the page's visible text, in the session's active tab, polling every 100ms. Use it after navigate, click or scroll when content loads asynchronously, instead of sleeping. Pass `selector` or `text`; if both are given, only `selector` is checked. `text` is a case-sensitive substring of document.body.innerText, so text hidden with CSS doesn't count. It reads the page without changing it. Returns which selector or text matched. Fails with a timeout error if nothing matches within `timeout`, or if neither argument is given.",
+            "Wait until a CSS selector matches an element, a text string appears in the page's visible text, or a JavaScript `expression` is truthy, in the session's active tab, polling every 100ms; or, with only `ms`, just pause. Use it after navigate, click or scroll when content loads asynchronously. Pass one of `selector`, `text` or `expression`; `selector` wins if several are given. `ms` alone is a plain pause for hosts with no timer of their own. `text` is a case-sensitive substring of document.body.innerText, so text hidden with CSS doesn't count. It reads the page without changing it. Returns which selector or text matched. Fails with a timeout error if nothing matches within `timeout`, or if neither argument is given.",
             object_schema(
                 &[
                     session_id,
@@ -3736,6 +4720,16 @@ fn tool_defs() -> Vec<Tool> {
                         "text",
                         &str_t,
                         "Text to wait for in document.body.innerText; case-sensitive substring match.",
+                    ),
+                    (
+                        "expression",
+                        &str_t,
+                        "JavaScript to poll until its value is truthy, run like evaluate (e.g. `window.dataLayer.length > 3`).",
+                    ),
+                    (
+                        "ms",
+                        &pos_int_t,
+                        "With no selector, text or expression: just wait this many milliseconds (at most 25000), for hosts without timers.",
                     ),
                     (
                         "timeout",
@@ -3857,7 +4851,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "list_network_requests",
-            "List the network requests the session's pages made, oldest first, from the most recent `limit`: method, URL, status (or failure reason), redirects and request body. Use it to check API calls, tracking pixels and failed loads; use list_console_messages for script errors and logs. Pass `visit` (a seq from list_visits) to see one page load; without it, requests from every visit are merged and `limit` keeps the newest. A null status means the request hadn't finished when logged. It reads logs and changes nothing. Empty unless the listener role is running, and logs are deleted when the session closes.",
+            "List the network requests the session's pages made, oldest first, from the most recent `limit`: method, URL, status (or failure reason), redirects and request body. With `details`, also request and response headers and, for fetch/XHR and documents, text or JSON response bodies up to 64 KB; credential headers and keys are masked, and nothing of a login a person does in a takeover is kept. `urlContains` narrows the list to matching URLs. Use it to check API calls, what a page sent and got back, tracking pixels and failed loads; use list_console_messages for script errors and logs. Pass `visit` (a seq from list_visits) to see one page load; without it, requests from every visit are merged and `limit` keeps the newest. A null status means the request hadn't finished when logged. It reads logs and changes nothing. Empty unless the listener role is running, and logs are deleted when the session closes.",
             object_schema(
                 &[
                     session_id,
@@ -3870,6 +4864,16 @@ fn tool_defs() -> Vec<Tool> {
                         "limit",
                         &pos_int_t,
                         "Return at most this many of the newest requests. Default 500.",
+                    ),
+                    (
+                        "urlContains",
+                        &str_t,
+                        "Only requests whose URL contains this text.",
+                    ),
+                    (
+                        "details",
+                        &bool_t,
+                        "Include request and response headers and response bodies. Default false.",
                     ),
                 ],
                 &["sessionId"],
@@ -3983,7 +4987,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "await_human_takeover",
-            "Wait for the human to click Done in the takeover page. `completed` is true if they finished, false on timeout. STRONGLY ADVISED: run this in a BACKGROUND task and POLL — call it in a loop with a SHORT `timeout` (e.g. 4000ms) until completed:true — rather than one long blocking call, which can exceed your MCP client's request timeout and make you miss the Done signal. The human may take several minutes; a background poller lets you be notified and resume. On completion the session is authenticated and you can continue; consider save_browser_state so later sessions skip the login. Fails on a token that request_human_takeover didn't issue or that has already completed.",
+            "Wait up to `timeout` (default 25 s) for the person to click Done on the takeover page. Returns { completed, expired, url, title }: `completed` true once they finished, with the page's URL and title; otherwise false, and call it again in a loop, each call short enough for your host's per-call limit (the default suits Executor). `expired` true means the link ran out unfinished; issue a new request_human_takeover. The person may take several minutes, so poll from a background task if you can. A session opened with a `name` saves its login under that name as soon as they finish. Fails on a token that request_human_takeover didn't issue or that has already completed.",
             object_schema(
                 &[
                     (
@@ -3994,7 +4998,7 @@ fn tool_defs() -> Vec<Tool> {
                     (
                         "timeout",
                         &pos_int_t,
-                        "Milliseconds to wait before returning completed: false. Default 300000, max 1800000.",
+                        "Milliseconds to wait before returning completed: false. Default 25000, max 1800000.",
                     ),
                 ],
                 &["token"],

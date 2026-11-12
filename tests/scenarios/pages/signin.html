@@ -1,0 +1,22 @@
+<!doctype html>
+<!-- A sign-in page that tries a passkey first and offers a password when that
+     fails or is cancelled. -->
+<meta charset="utf-8">
+<title>Sign in</title>
+<button id="passkey">Sign in with a passkey</button>
+<form id="password" hidden>
+  <input id="user" autocomplete="username"><input id="pw" type="password">
+</form>
+<script>
+  document.getElementById("passkey").onclick = async () => {
+    try {
+      await navigator.credentials.get({
+        publicKey: { challenge: new Uint8Array(16), rpId: location.hostname, userVerification: "preferred" },
+      });
+      document.title = "signed in with a passkey";
+    } catch (e) {
+      document.getElementById("password").hidden = false;
+      document.title = "use a password";
+    }
+  };
+</script>

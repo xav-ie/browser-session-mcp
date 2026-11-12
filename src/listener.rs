@@ -228,6 +228,14 @@ pub(crate) struct InflightRequest {
     pub(crate) status: Option<i64>,
     pub(crate) post_data: Option<String>,
     pub(crate) redirected_to: Option<String>,
+    pub(crate) request_id: Option<String>,
+    pub(crate) request_headers: Option<serde_json::Value>,
+    pub(crate) response_headers: Option<serde_json::Value>,
+    pub(crate) mime_type: Option<String>,
+    /// The body exists but Chrome didn't inline it; fetched when it finishes.
+    pub(crate) post_data_pending: bool,
+    pub(crate) encoded_length: Option<f64>,
+    pub(crate) response_body: Option<String>,
 }
 
 /// Wired tabs by target id, so `child_capture` can log a tab's iframe and
@@ -395,18 +403,10 @@ async fn target_loop(
 
     loop {
         tokio::select! {
-            _ = stealth_poll.tick() => {
-                let stealth = tokio::fs::try_exists(&stealth_flag).await.unwrap_or(false);
-                if stealth && runtime_on {
-                    let _ = page.execute(RuntimeDisableParams::default()).await;
-                    runtime_on = false;
-                    tracing::info!(ctx = %ctx_id, "console capture paused (stealth)");
-                } else if !stealth && !runtime_on {
-                    let _ = page.execute(RuntimeEnableParams::default()).await;
-                    runtime_on = true;
-                    tracing::info!(ctx = %ctx_id, "console capture resumed");
-                }
-            }
+            // In order: Chrome sends a request's events in sequence (sent,
+            // response, finished) on separate streams, and a random pick could
+            // finish a request before its response is recorded.
+            biased;
             // The per-target streams all end together when the target is
             // destroyed or the connection drops. Exit on the first `None`: the
             // stealth tick above never disables, so a `select!` `else` arm
@@ -424,7 +424,7 @@ async fn target_loop(
                 None => break,
             },
             e = fin.next() => match e {
-                Some(e) => on_loading_finished(&writer, &state, &e).await,
+                Some(e) => on_loading_finished(&page, &writer, &state, &e).await,
                 None => break,
             },
             e = failed.next() => match e {
@@ -439,6 +439,19 @@ async fn target_loop(
                 Some(e) => on_exception(&writer, &state, &e).await,
                 None => break,
             },
+            _ = stealth_poll.tick() => {
+                let stealth = tokio::fs::try_exists(&stealth_flag).await.unwrap_or(false);
+                if stealth && runtime_on {
+                    let _ = page.execute(RuntimeDisableParams::default()).await;
+                    runtime_on = false;
+                    tracing::info!(ctx = %ctx_id, "console capture paused (stealth)");
+                } else if !stealth && !runtime_on {
+                    let _ = page.execute(RuntimeEnableParams::default()).await;
+                    runtime_on = true;
+                    tracing::info!(ctx = %ctx_id, "console capture resumed");
+                }
+            }
+
         }
     }
     Ok(())
@@ -512,6 +525,13 @@ async fn on_request_will_be_sent(
             write_network(writer, state, hop, None).await;
         }
     }
+    let post_data = e.request.post_data_entries.as_ref().and_then(|entries| {
+        decode_post_data(
+            entries
+                .iter()
+                .filter_map(|ent| ent.bytes.clone().map(String::from)),
+        )
+    });
     let mut s = state.lock().await;
     let seq = s.current_seq;
     s.inflight.insert(
@@ -528,13 +548,12 @@ async fn on_request_will_be_sent(
             // Chrome inlines the request body in `postDataEntries` (base64) for
             // small bodies; decode + concat so callers see e.g. analytics POST
             // payloads. Larger bodies only set `has_post_data` (not fetched here).
-            post_data: e.request.post_data_entries.as_ref().and_then(|entries| {
-                decode_post_data(
-                    entries
-                        .iter()
-                        .filter_map(|ent| ent.bytes.clone().map(String::from)),
-                )
-            }),
+            post_data: post_data.clone(),
+            request_id: Some(e.request_id.inner().to_string()),
+            request_headers: serde_json::to_value(&e.request.headers).ok(),
+            // A large body comes without its bytes (or without entries).
+            post_data_pending: e.request.has_post_data.unwrap_or(false) && post_data.is_none(),
+            ..Default::default()
         },
     );
 }
@@ -556,19 +575,77 @@ async fn on_response_received(state: &Arc<Mutex<TargetState>>, e: &EventResponse
     let mut s = state.lock().await;
     if let Some(inf) = s.inflight.get_mut(e.request_id.inner()) {
         inf.status = Some(e.response.status);
+        inf.response_headers = serde_json::to_value(&e.response.headers).ok();
+        inf.mime_type = Some(e.response.mime_type.clone());
+    }
+}
+
+/// Largest response body the log keeps.
+const MAX_RESPONSE_BODY: f64 = 64.0 * 1024.0;
+
+/// Fetch what Chrome holds only until the request is gone: a request body it
+/// didn't inline, and a small text or JSON response body for fetch/XHR and
+/// documents. Not during a takeover, when no body is logged anyway.
+async fn fetch_bodies(page: &Page, ctx_id: &str, inf: &mut InflightRequest) {
+    use chromiumoxide::cdp::browser_protocol::network::{
+        GetRequestPostDataParams, GetResponseBodyParams, RequestId,
+    };
+    if takeover::active(ctx_id).await {
+        return;
+    }
+    let Some(id) = inf.request_id.clone() else {
+        return;
+    };
+    if inf.post_data_pending {
+        if let Ok(r) = page
+            .execute(GetRequestPostDataParams::new(RequestId::new(id.clone())))
+            .await
+        {
+            inf.post_data = Some(r.result.post_data.clone());
+        }
+    }
+    let wanted = matches!(
+        inf.resource_type,
+        Some(ResourceType::Fetch) | Some(ResourceType::Xhr) | Some(ResourceType::Document)
+    );
+    let texty = inf.mime_type.as_deref().is_some_and(|m| {
+        m.starts_with("text/")
+            || m.contains("json")
+            || m.contains("xml")
+            || m.contains("javascript")
+    });
+    if wanted && texty && inf.encoded_length.unwrap_or(0.0) <= MAX_RESPONSE_BODY {
+        if let Ok(r) = page
+            .execute(GetResponseBodyParams::new(RequestId::new(id)))
+            .await
+        {
+            let body = if r.result.base64_encoded {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD
+                    .decode(r.result.body.as_bytes())
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+            } else {
+                Some(r.result.body.clone())
+            };
+            inf.response_body = body.filter(|b| (b.len() as f64) <= MAX_RESPONSE_BODY);
+        }
     }
 }
 
 async fn on_loading_finished(
+    page: &Page,
     writer: &LogWriter,
     state: &Arc<Mutex<TargetState>>,
     e: &EventLoadingFinished,
 ) {
-    let inf = {
+    let (inf, ctx_id) = {
         let mut s = state.lock().await;
-        s.inflight.remove(e.request_id.inner())
+        (s.inflight.remove(e.request_id.inner()), s.ctx_id.clone())
     };
-    let Some(inf) = inf else { return };
+    let Some(mut inf) = inf else { return };
+    inf.encoded_length = Some(e.encoded_data_length);
+    fetch_bodies(page, &ctx_id, &mut inf).await;
     write_network(writer, state, inf, None).await;
 }
 
@@ -618,6 +695,11 @@ pub(crate) async fn write_network_entry(
         failure,
         post_data: inf.post_data,
         redirected_to: inf.redirected_to,
+        request_id: inf.request_id,
+        request_headers: inf.request_headers,
+        response_headers: inf.response_headers,
+        mime_type: inf.mime_type,
+        response_body: inf.response_body,
     };
     crate::redact::network_entry(&mut entry, takeover::active(ctx_id).await);
     if let Err(err) = writer

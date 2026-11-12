@@ -41,6 +41,7 @@ jobs:
               - '*.nix'
               - 'flake.lock'
               - 'scripts/smoke.sh'
+              - 'tests/**'
               - 'packaging/**'
               - '.github/actions/**'
               - '.github/workflows/ci.yml'

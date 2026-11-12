@@ -37,8 +37,9 @@ credentials.
   keyboard input. Stealth can be switched on and off per session.
 - **Test like a slow phone.** Throttle a session's CPU and network, and run
   your own script before the page's to time what happens from the first byte.
-- **[39 tools](#all-39-tools)** for tabs, navigation, clicks and typing,
-  screenshots, accessibility snapshots, logs, CPU profiles and throttling.
+- **[40 tools](#all-40-tools)** for tabs, navigation, clicks and typing,
+  screenshots, accessibility snapshots, logs, page speed, CPU profiles and
+  throttling.
 
 ## Quick start
 
@@ -171,12 +172,16 @@ type stays out of the model, and every miss is an error, never a guess.
 [Picking elements with Jev](docs/jev.md) covers the benefits, what Jev sees,
 and tuning.
 
-## All 39 tools
+## All 40 tools
 
 Most tools take a `sessionId` first. Tools marked ⚙ need one of the optional
 background roles from [Deployment](docs/deployment.md).
 Tools that return JSON declare its shape as an MCP `outputSchema`, so clients
-can type their results.
+can type their results. One call drives a session at a time: a second call on
+the same session, from any client, waits up to 15 s for the first to finish.
+Every tab answers the page's own dialogs (`alert`, `confirm`, `prompt`,
+"Leave site?") by accepting them, reported in the next action's result, and
+turns passkey prompts down, so sites fall back to a password or a code.
 
 | Group | Tools |
 |---|---|
@@ -186,7 +191,7 @@ can type their results.
 | Seeing the page | `take_screenshot`, `take_snapshot` (the accessibility tree as text), `ask`, `read` |
 | Acting on it | `act`, `click`, `tap`, `swipe`, `type`, `press_key`, `scroll`, `move_mouse`, `wait_for`, `evaluate` |
 | Logs ⚙ | `list_visits`, `list_console_messages`, `list_network_requests` |
-| Profiling | `start_profiling`, `stop_profiling` |
+| Page speed and profiling | `measure_page`, `start_profiling`, `stop_profiling` |
 | Stealth | `set_stealth`, `get_stealth` |
 | Slow devices ⚙ | `set_emulation`, `get_emulation`, `add_init_script`, `remove_init_script` |
 | Human takeover ⚙ | `request_human_takeover`, `await_human_takeover` |
@@ -196,8 +201,8 @@ can type their results.
 <summary><b>Every tool with its arguments</b></summary>
 
 **Sessions**
-- `open_browser_session({ viewport?, useMobileUA? })` → `{ sessionId, pageCount, activeUrl }`: `useMobileUA` makes it a touch phone (mobile UA, device metrics and a touch screen)
-- `close_browser_session({ sessionId })`: safe to call twice
+- `open_browser_session({ device?, viewport?, useMobileUA?, userAgent?, name? })` → `{ sessionId, pageCount, activeUrl }`: `device` is a preset (`pixel-7`, `galaxy-s23`, `iphone-15`, `iphone-se`, `ipad-air`, `laptop`, `desktop-1080p`) setting the screen, pixel ratio, User-Agent and touch; `useMobileUA` makes it a touch phone (mobile UA, device metrics and a touch screen); `viewport.deviceScaleFactor` sets the pixel ratio and `userAgent` replaces the User-Agent, overriding a preset's; `name` reuses the open session with that name, or opens one with the login saved under it, and saves its login when a takeover finishes and when it closes
+- `close_browser_session({ sessionId })`: safe to call twice; a named session saves its login first
 - `list_browser_sessions()`
 
 **Tabs**
@@ -207,32 +212,35 @@ can type their results.
 - `close_tab({ sessionId, tabIndex })`
 
 **Navigation**
-- `navigate({ sessionId, url, timeout? })`: returns after the load event
+- `navigate({ sessionId, url, timeout?, waitUntil?, text?, settleTimeout? })`: returns after the load event, or with `waitUntil: "networkidle"` once requests go quiet, or once `text` shows, for pages that render themselves after loading
 
 **Seeing the page**
-- `take_screenshot({ sessionId, fullPage? })`: a PNG
+- `take_screenshot({ sessionId, fullPage?, selector?, scale?, save? })`: a PNG of the screen, the whole page or one element; `save` writes it under `$STATE_DIR/screenshots/<sessionId>/`, kept after the session closes, and returns `{ path, bytes }` instead, for callers that can't take an image
 - `take_snapshot({ sessionId })`: the accessibility tree as indented text
 - `ask({ sessionId, question, options? })` → `{ answer, probability, probabilities? }`: asks Jev about the page as it is now, yes/no or which of your `options` fits, in one cheap call
 - `read({ sessionId, question, maxChars? })` → `{ text, pageChars, passages, kept, filtered }`: only the passages of the page that help answer `question`, under their headings; a page under 8,000 characters comes back whole
 
 **Acting on it** (real CDP input, not synthetic JavaScript events)
 - `act({ sessionId, goal, values?, maxSteps? })` → `{ status, goal, steps, url, title }`: a Jev-driven loop toward a goal — click, type (from `values`), select, scroll, wait or back per step, checking goal-met, dead-end, login and error walls each round until it finishes, gets stuck or runs out of budget
-- `click({ sessionId, selector | x,y, timeout? })`: `selector` may be plain language or a `jev:<goal>` — the Jev decision model picks the element (see [Picking elements with Jev](docs/jev.md))
+- `click({ sessionId, selector | x,y, timeout? })` → `{ url, title, navigated, focused, dialog?, hit }`: `selector` may be plain language or a `jev:<goal>` — the Jev decision model picks the element (see [Picking elements with Jev](docs/jev.md)). Fails, naming the element in the way, when a popup or overlay covers the target or the point is off the screen, and otherwise says where the page is after: its URL, whether it navigated, the focused element and an open dialog. `tap`, `swipe` and `press_key` report the same
 - `tap({ sessionId, selector | x,y, timeout? })`: a finger tap (touch events), for mobile sessions
 - `swipe({ sessionId, selector? | x,y?, direction? | toX,toY, distance?, durationMs? })`: a finger swipe, e.g. to close a drawer or move a carousel; short and slow drags partway
-- `type({ sessionId, selector, text, delay?, clear?, timeout? })`: `selector` may be plain language or a `jev:` goal; the text itself always comes from you
-- `press_key({ sessionId, key, selector?, timeout? })`: `key` is a name (Enter, Tab, ArrowDown…) or a character; `selector` may be plain language or a `jev:` goal and is optional
+- `type({ sessionId, selector, text, delay?, clear?, timeout? })`: `selector` may be plain language or a `jev:` goal; the text itself always comes from you, typed after what the field holds unless `clear`
+- `press_key({ sessionId, key, selector?, repeat?, timeout? })`: `key` is a name (Enter, Tab, ArrowDown…) or a character; `selector` may be plain language or a `jev:` goal and is optional; `repeat` presses it up to 50 times, with `focusTrail` listing focus after each press
 - `scroll({ sessionId, deltaY?, deltaX?, x?, y? })`
 - `move_mouse({ sessionId, x, y })`
-- `wait_for({ sessionId, selector? | text?, timeout? })`: CSS selector or page text (no `jev:` here — it's a poll, not an action)
+- `wait_for({ sessionId, selector? | text? | expression? | ms?, timeout? })`: a CSS selector, page text or a JavaScript expression turning truthy (no `jev:` here — it's a poll, not an action); `ms` alone just pauses, for hosts with no timer
 - `evaluate({ sessionId, expression, tabIndex? })`: runs JavaScript and returns the value
 
 **Logs** ⚙ (written by the `listener` role)
 - `list_visits({ sessionId })`: one entry per page visit, oldest first
 - `list_console_messages({ sessionId, visit?, limit? })`: `limit` defaults to 500
-- `list_network_requests({ sessionId, visit?, limit? })`: `limit` defaults to 500. Includes requests from cross-site iframes and workers (sandboxed third-party code such as Shopify checkout pixels), logged under the tab's visit
+- `list_network_requests({ sessionId, visit?, limit?, urlContains?, details? })`: `limit` defaults to 500; `details` adds request and response headers and small text or JSON response bodies (fetch/XHR and documents, up to 64 KB), credential headers and keys masked and nothing kept from a takeover login. Includes requests from cross-site iframes and workers (sandboxed third-party code such as a checkout page's tracking pixels), logged under the tab's visit
 
-**Profiling** (find the JavaScript behind a slow or hung page)
+**Page speed and profiling**
+- `measure_page({ sessionId, url?, timeout? })`: reloads (or loads `url`) and returns server response, first and largest paint, layout shift, blocking time, and bytes by type and host, rated by the Core Web Vitals thresholds, in the session's device and throttling
+
+Find the JavaScript behind a slow or hung page:
 - `start_profiling({ sessionId, tabIndex?, samplingIntervalUs? })`: starts the V8 CPU profiler
 - `stop_profiling({ sessionId, tabIndex?, top?, terminateAfterMs?, timeout? })`: saves a `.cpuprofile` (open it in DevTools or speedscope.app) under `$STATE_DIR/logs/<sessionId>/profiles/` and returns long tasks, the hottest functions and time per script. If the page is hung, its script is stopped after `terminateAfterMs` (default 5000) so the profile can be collected
 
@@ -248,7 +256,7 @@ can type their results.
 
 **Human takeover** ⚙ (needs the `takeover` role and `TAKEOVER_BASE_URL`)
 - `request_human_takeover({ sessionId, ttlMinutes? })` → `{ url, token, expiresAtMs }`: returns right away with a link
-- `await_human_takeover({ token, timeout? })` → `{ completed }`: waits until the person clicks Done
+- `await_human_takeover({ token, timeout? })` → `{ completed, expired, url?, title? }`: waits up to `timeout` (default 25 s) for the person to click Done; call it in a loop until `completed`, or until `expired` says to request a new link
 
 **Saved logins**
 - `save_browser_state({ sessionId, name })`

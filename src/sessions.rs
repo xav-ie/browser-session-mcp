@@ -46,6 +46,21 @@ pub struct SessionInfo {
 pub struct Viewport {
     pub width: i64,
     pub height: i64,
+    /// Device pixels per CSS pixel (`window.devicePixelRatio`).
+    #[serde(
+        rename = "deviceScaleFactor",
+        default = "one",
+        skip_serializing_if = "is_one"
+    )]
+    pub scale: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+fn is_one(n: &f64) -> bool {
+    *n == 1.0
 }
 
 impl Default for Viewport {
@@ -53,6 +68,7 @@ impl Default for Viewport {
         Self {
             width: 1280,
             height: 800,
+            scale: 1.0,
         }
     }
 }
@@ -74,6 +90,11 @@ pub struct SessionManager {
     browser: Browser,
     state: StateStore,
     tabs: Arc<Mutex<TabRegistry>>,
+    /// Tabs this process watches for dialogs, by targetId.
+    guarded: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// Dialogs answered on each session's tabs since the last action read
+    /// them, by session.
+    dialogs: Arc<std::sync::Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl SessionManager {
@@ -82,6 +103,8 @@ impl SessionManager {
             browser,
             state,
             tabs: Arc::new(Mutex::new(TabRegistry::default())),
+            guarded: Arc::new(Mutex::new(HashMap::new())),
+            dialogs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -161,8 +184,35 @@ impl SessionManager {
         &self,
         viewport: Option<Viewport>,
         use_mobile_ua: bool,
+        custom_ua: Option<&str>,
     ) -> Result<SessionInfo> {
-        let override_ = user_agent::resolve(&self.browser, use_mobile_ua).await?;
+        let mut override_ = user_agent::resolve(&self.browser, use_mobile_ua).await?;
+        if let Some(ua) = custom_ua {
+            // A preset's `{chrome}` is the running Chrome's major version,
+            // so its User-Agent matches the browser's client hints.
+            let major = override_
+                .user_agent
+                .split("Chrome/")
+                .nth(1)
+                .and_then(|v| v.split('.').next())
+                .unwrap_or("")
+                .to_string();
+            let ua = ua.replace("{chrome}", &major);
+            if !ua.contains("Chrome/") {
+                // Another browser (Safari, Firefox) sends no client hints of
+                // its own, so only a Chrome User-Agent keeps the Chrome ones.
+                override_.metadata = serde_json::Value::Null;
+            } else if let Some(model) = ua
+                .split("Android ")
+                .nth(1)
+                .and_then(|r| r.split(')').next())
+                .and_then(|r| r.split("; ").nth(1))
+            {
+                // An Android phone's client hints name its model too.
+                override_.metadata["model"] = serde_json::Value::String(model.to_string());
+            }
+            override_.user_agent = ua;
+        }
         let ctx_id = self
             .browser
             .create_browser_context(CreateBrowserContextParams::default())
@@ -224,6 +274,40 @@ impl SessionManager {
     async fn cleanup_failed_open(&self, session_id: &str, ctx_id: BrowserContextId) {
         let _ = self.browser.dispose_browser_context(ctx_id).await;
         self.state.forget(session_id).await;
+    }
+
+    /// The name a session was opened with, if any.
+    pub async fn name(&self, session_id: &str) -> Option<String> {
+        self.state.name(session_id).await
+    }
+
+    /// The live session opened with `name`, if one is still open. Records
+    /// of named sessions Chrome no longer has (it restarted, or the reaper
+    /// closed them) are dropped.
+    pub async fn find_named(&self, name: &str) -> Result<Option<String>> {
+        let ids = self.state.named(name).await;
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        let live: std::collections::HashSet<String> = self
+            .list()
+            .await?
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
+        let mut found = None;
+        for id in ids {
+            if live.contains(&id) {
+                found = Some(id);
+            } else {
+                self.state.forget(&id).await;
+            }
+        }
+        Ok(found)
+    }
+
+    pub async fn set_name(&self, session_id: &str, name: &str) {
+        self.state.set_name(session_id, name).await;
     }
 
     pub async fn close(&self, session_id: &str) -> Result<()> {
@@ -299,7 +383,7 @@ impl SessionManager {
             .get_page(TargetId::new(target_id.as_str()))
             .await
             .context("Browser::get_page")?;
-        self.ensure_viewport(session_id, &page).await?;
+        self.prepare(session_id, &page).await?;
         Ok(page)
     }
 
@@ -322,7 +406,7 @@ impl SessionManager {
             .get_page(TargetId::new(t.target_id.inner()))
             .await
             .context("Browser::get_page")?;
-        self.ensure_viewport(session_id, &page).await?;
+        self.prepare(session_id, &page).await?;
         Ok(page)
     }
 
@@ -445,7 +529,7 @@ impl SessionManager {
         if let Some(override_) = self.state.user_agent_override(session_id).await {
             self.apply_user_agent(&page, &override_).await?;
         }
-        self.ensure_viewport(session_id, &page).await?;
+        self.prepare(session_id, &page).await?;
         if let Some(url) = url {
             page.goto(url).await.context("Page.navigate")?;
         }
@@ -512,6 +596,64 @@ impl SessionManager {
     /// UI's own override replaces ours and, once its connection closes, leaves
     /// the tab at the raw window size. `Page.getLayoutMetrics` runs no page JS.
     /// Sessions from before viewports were stored get the `open` default.
+    /// Ready a tab for a tool call: its viewport, and once per tab per
+    /// process, answers to the page's own dialogs and no passkey prompts.
+    async fn prepare(&self, session_id: &str, page: &Page) -> Result<()> {
+        self.ensure_viewport(session_id, page).await?;
+        let target = page.target_id().inner().to_string();
+        let mut guarded = self.guarded.lock().await;
+        if guarded.get(&target).is_some_and(|t| !t.is_finished()) {
+            return Ok(());
+        }
+        no_passkeys(page).await;
+        guarded.insert(target, self.answer_dialogs(session_id, page).await?);
+        Ok(())
+    }
+
+    /// Accept the page's JavaScript dialogs (alert, confirm, prompt, and
+    /// "Leave site?" on unload) as they open, noting each for the session.
+    /// Chrome holds the tab until a dialog is answered, so an unanswered one
+    /// hangs every later call on it (navigate, evaluate, screenshots).
+    async fn answer_dialogs(
+        &self,
+        session_id: &str,
+        page: &Page,
+    ) -> Result<tokio::task::JoinHandle<()>> {
+        use chromiumoxide::cdp::browser_protocol::page::{
+            EventJavascriptDialogOpening, HandleJavaScriptDialogParams,
+        };
+        use futures::StreamExt;
+        let mut events = page
+            .event_listener::<EventJavascriptDialogOpening>()
+            .await
+            .context("listening for JavaScript dialogs")?;
+        let (page, dialogs, session) = (page.clone(), self.dialogs.clone(), session_id.to_string());
+        Ok(tokio::spawn(async move {
+            while let Some(ev) = events.next().await {
+                let kind = format!("{:?}", ev.r#type).to_lowercase();
+                let said = if ev.message.is_empty() {
+                    kind.clone()
+                } else {
+                    format!("{kind}: {}", ev.message)
+                };
+                if let Ok(mut d) = dialogs.lock() {
+                    d.entry(session.clone()).or_default().push(said);
+                }
+                // Another watcher (act's) may have answered it already.
+                let _ = page.execute(HandleJavaScriptDialogParams::new(true)).await;
+            }
+        }))
+    }
+
+    /// Dialogs answered on the session's tabs since the last call to this.
+    pub fn take_dialogs(&self, session_id: &str) -> Vec<String> {
+        self.dialogs
+            .lock()
+            .ok()
+            .and_then(|mut d| d.remove(session_id))
+            .unwrap_or_default()
+    }
+
     async fn ensure_viewport(&self, session_id: &str, page: &Page) -> Result<()> {
         let vp = self.state.viewport(session_id).await.unwrap_or_default();
         let metrics = page
@@ -528,7 +670,12 @@ impl SessionManager {
             // MCP process, a restart), and setting it again is idempotent.
             apply_touch(page).await?;
         }
-        if fits(layout.client_width, vp.width) && fits(layout.client_height, vp.height) {
+        // The pixel ratio doesn't show in the layout size, so a session that
+        // sets one has it applied every time (it's idempotent).
+        if vp.scale == 1.0
+            && fits(layout.client_width, vp.width)
+            && fits(layout.client_height, vp.height)
+        {
             return Ok(());
         }
         self.apply_viewport(page, vp, mobile).await
@@ -544,7 +691,11 @@ impl SessionManager {
         let params = SetDeviceMetricsOverrideParams::builder()
             .width(vp.width)
             .height(vp.height)
-            .device_scale_factor(1.0)
+            .device_scale_factor(vp.scale)
+            // `screen.width`/`height` too: sites read them to tell a phone
+            // from a desktop, and left alone they report the window.
+            .screen_width(vp.width)
+            .screen_height(vp.height)
             .mobile(mobile)
             .build()
             .map_err(|e| anyhow!("SetDeviceMetricsOverrideParams: {e}"))?;
@@ -553,6 +704,38 @@ impl SessionManager {
             .context("Emulation.setDeviceMetricsOverride")?;
         Ok(())
     }
+}
+
+/// Turn passkeys off on a tab: a virtual authenticator that fails every
+/// request at once, the way a person cancelling the prompt does, so sites
+/// fall back to a password or a code. Without one, a passkey request waits
+/// on a browser prompt nobody can answer and the page stalls. Passkeys can't
+/// be forwarded to a person's own devices: a passkey only signs for its own
+/// site, and their browser enforces that against the takeover page. Best
+/// effort.
+async fn no_passkeys(page: &Page) {
+    use chromiumoxide::cdp::browser_protocol::web_authn::{
+        AddVirtualAuthenticatorParams, AuthenticatorProtocol, AuthenticatorTransport, EnableParams,
+        VirtualAuthenticatorOptions,
+    };
+    let enable = EnableParams::builder().enable_ui(false).build();
+    if page.execute(enable).await.is_err() {
+        return;
+    }
+    let Ok(options) = VirtualAuthenticatorOptions::builder()
+        .protocol(AuthenticatorProtocol::Ctap2)
+        .transport(AuthenticatorTransport::Internal)
+        .has_resident_key(true)
+        .has_user_verification(true)
+        .is_user_verified(false)
+        .automatic_presence_simulation(true)
+        .build()
+    else {
+        return;
+    };
+    let _ = page
+        .execute(AddVirtualAuthenticatorParams::new(options))
+        .await;
 }
 
 /// How many touch points a mobile session's screen reports, as a phone does.

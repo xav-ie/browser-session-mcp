@@ -1,0 +1,18 @@
+<!doctype html>
+<!-- A page calling its API with a bearer token, as an admin app does, and
+     posting a large body. -->
+<meta charset="utf-8">
+<title>API</title>
+<div id="out"></div>
+<script>
+  (async () => {
+    const r = await fetch("/api/items", {
+      method: "POST",
+      headers: { Authorization: "Bearer secret-123", "Content-Type": "application/json" },
+      body: JSON.stringify({ q: "hoodie" }),
+    });
+    const data = await r.json();
+    await fetch("/api/upload", { method: "POST", body: "x".repeat(100000) });
+    document.getElementById("out").textContent = `${data.items.length} items`;
+  })();
+</script>

@@ -4,7 +4,7 @@
 //! tab's document and its same-site frames. Cross-site iframes run in their own
 //! process (site isolation) and workers run on their own thread; each is a
 //! separate CDP target, so their requests never reach the tab's session. That
-//! hides sandboxed third-party code such as Shopify's checkout web pixels.
+//! hides sandboxed third-party code such as a checkout page's web pixels.
 //!
 //! This holds its own raw CDP connection (like `attach_guard`): it attaches to
 //! every tab, auto-attaches to the tab's iframe and worker targets (recursively,

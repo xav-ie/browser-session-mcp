@@ -174,9 +174,17 @@ function relay(id: string) {
   send("Input.dispatchKeyEvent", { type: "keyDown", ...a });
   send("Input.dispatchKeyEvent", { type: "keyUp", ...a });
   send("Input.insertText", { text });
-  setStatus(
-    (id === "vp" ? "password" : "username") + " sent to the focused field",
-  );
+  // On to the next field, as a person does after typing one.
+  const tab = {
+    key: "Tab",
+    code: "Tab",
+    windowsVirtualKeyCode: 9,
+    nativeVirtualKeyCode: 9,
+  };
+  send("Input.dispatchKeyEvent", { type: "keyDown", ...tab });
+  send("Input.dispatchKeyEvent", { type: "keyUp", ...tab });
+  const what = { vu: "username", vp: "password", vo: "one-time code" }[id];
+  setStatus(`${what ?? "value"} sent to the focused field, then Tab`);
 }
 
 // --- tabs -----------------------------------------------------------------
