@@ -795,6 +795,12 @@ TAKEOVER=$(call request_human_takeover "$ARGS")
 check "request_human_takeover returns a link" "$TAKEOVER" '/takeover/'
 TOKEN=$(pluck "$TAKEOVER" .result.structuredContent.token)
 check "await_human_takeover times out with nobody there" "$(call await_human_takeover "$(printf '{"token":"%s","timeout":1}' "$TOKEN")")" '"completed":false'
+check "a person in control pauses the agent's calls" "$(call take_snapshot "$ARGS")" 'A person has control'
+check "reading logs still works meanwhile" "$(call list_visits "$ARGS")" '"visits"'
+# Hand back as the takeover page's button does (no daemon runs here).
+mkdir -p "$STATE_DIR/takeover/released"
+: >"$STATE_DIR/takeover/released/$TOKEN"
+check "await_human_takeover returns on the handback, watching" "$(call await_human_takeover "$(printf '{"token":"%s","timeout":1000}' "$TOKEN")")" '"watching":true'
 
 CLOSE_REQ=$(python3 -c '
 import json,sys

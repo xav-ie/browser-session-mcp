@@ -106,6 +106,14 @@ fn claims_dir() -> PathBuf {
 fn claim_path(token: &str) -> PathBuf {
     claims_dir().join(token)
 }
+/// Present while the agent has control: the person handed back and is
+/// watching. A ticket starts without it, so the person starts in control.
+fn released_dir() -> PathBuf {
+    takeover_dir().join("released")
+}
+fn released_path(token: &str) -> PathBuf {
+    released_dir().join(token)
+}
 
 /// Per-session "pause console capture" flag, keyed by browserContextId (==
 /// ticket sessionId). When present, the listener disables the CDP `Runtime`
@@ -145,17 +153,35 @@ pub async fn set_stealth(session_id: &str, stealth: bool) -> Result<()> {
     Ok(())
 }
 
-/// Whether a human takeover is open for a session: an unexpired ticket for it
-/// whose Done sentinel hasn't been dropped. Counts from the moment the ticket
-/// is minted, before the human claims it, so nothing they type is ever logged.
+/// Whether a person has control of a session through a takeover link: an
+/// unexpired ticket for it that hasn't ended or been handed back. Counts from
+/// the moment the ticket is minted, before the human claims it, so nothing
+/// they type is ever logged.
 pub async fn active(session_id: &str) -> bool {
-    valid_ctx(session_id) && active_in(&tokens_dir(), &done_dir(), session_id, now_ms()).await
+    controlling_token(session_id).await.is_some()
+}
+
+/// The token of the takeover link through which a person has control of the
+/// session, if any (see [`active`]).
+pub async fn controlling_token(session_id: &str) -> Option<String> {
+    if !valid_ctx(session_id) {
+        return None;
+    }
+    let dirs = [done_dir(), released_dir()];
+    controlling_in(&tokens_dir(), &dirs, session_id, now_ms()).await
 }
 
 // ponytail: scans every ticket per call; fine for the handful that exist at once.
-async fn active_in(tokens: &Path, done: &Path, session_id: &str, now: u128) -> bool {
+/// A token whose ticket is for `session_id`, unexpired, and has no sentinel in
+/// any of `stops`.
+async fn controlling_in(
+    tokens: &Path,
+    stops: &[PathBuf],
+    session_id: &str,
+    now: u128,
+) -> Option<String> {
     let Ok(mut entries) = tokio::fs::read_dir(tokens).await else {
-        return false;
+        return None;
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name();
@@ -168,16 +194,20 @@ async fn active_in(tokens: &Path, done: &Path, session_id: &str, now: u128) -> b
         let Ok(ticket) = serde_json::from_slice::<Ticket>(&bytes) else {
             continue;
         };
-        if ticket.session_id == session_id
-            && ticket.expires_at_ms > now
-            && !tokio::fs::try_exists(done.join(token))
+        if ticket.session_id != session_id || ticket.expires_at_ms <= now {
+            continue;
+        }
+        let mut stopped = false;
+        for dir in stops {
+            stopped |= tokio::fs::try_exists(dir.join(token))
                 .await
-                .unwrap_or(false)
-        {
-            return true;
+                .unwrap_or(false);
+        }
+        if !stopped {
+            return Some(token.to_string());
         }
     }
-    false
+    None
 }
 
 /// Whether stealth is currently on for a session.
@@ -279,23 +309,43 @@ pub async fn read_ticket(token: &str) -> Result<Ticket> {
     serde_json::from_slice(&bytes).context("parsing ticket")
 }
 
-/// Block until the human clicks Done (sentinel appears) or the timeout elapses.
-/// Returns `true` if completed, `false` on timeout. Called by
-/// `await_human_takeover`. The token comes straight from the MCP caller, so it
-/// is validated before it becomes a path: `../../state.json` would otherwise
-/// report "completed" and then get deleted by `cleanup`.
-pub async fn wait_for_done(token: &str, timeout: Duration) -> Result<bool> {
+/// Where a takeover stands for the agent waiting on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handback {
+    /// The person still has control.
+    Waiting,
+    /// The person handed control back and may still be watching; they can
+    /// take it again while the link lasts.
+    Watching,
+    /// The link ended (End, the page closed, or it expired after a handback).
+    Ended,
+}
+
+/// Block until the person hands control back or the link ends, or the timeout
+/// elapses. Called by `await_human_takeover`. The token comes straight from
+/// the MCP caller, so it is validated before it becomes a path:
+/// `../../state.json` would otherwise report "ended" and then get deleted by
+/// `cleanup`.
+pub async fn wait_for_handback(token: &str, timeout: Duration) -> Result<Handback> {
     if !valid_token(token) {
         return Err(anyhow!("invalid token"));
     }
     let deadline = tokio::time::Instant::now() + timeout;
-    let path = done_path(token);
     loop {
-        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(true);
+        if tokio::fs::try_exists(done_path(token))
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(Handback::Ended);
+        }
+        if tokio::fs::try_exists(released_path(token))
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(Handback::Watching);
         }
         if tokio::time::Instant::now() >= deadline {
-            return Ok(false);
+            return Ok(Handback::Waiting);
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -309,6 +359,7 @@ pub async fn cleanup(token: &str) {
     let _ = tokio::fs::remove_file(ticket_path(token)).await;
     let _ = tokio::fs::remove_file(done_path(token)).await;
     let _ = tokio::fs::remove_file(claim_path(token)).await;
+    let _ = tokio::fs::remove_file(released_path(token)).await;
 }
 
 /// Delete tickets past their expiry (with any matching done-sentinel) and stale
@@ -344,6 +395,7 @@ async fn sweep_expired() {
             let _ = tokio::fs::remove_file(&path).await;
             let _ = tokio::fs::remove_file(done_path(&token)).await;
             let _ = tokio::fs::remove_file(claim_path(&token)).await;
+            let _ = tokio::fs::remove_file(released_path(&token)).await;
         }
     }
 }
@@ -366,6 +418,7 @@ pub async fn run() -> Result<()> {
     tokio::fs::create_dir_all(tokens_dir()).await.ok();
     tokio::fs::create_dir_all(done_dir()).await.ok();
     tokio::fs::create_dir_all(claims_dir()).await.ok();
+    tokio::fs::create_dir_all(released_dir()).await.ok();
 
     let listener = TcpListener::bind(&bind)
         .await
@@ -561,19 +614,33 @@ async fn route(method: &str, path: &str, cookie: Option<&str>) -> Resp {
             if let Some(token) = rest.strip_suffix("/claim") {
                 return claim_response(token, cookie).await;
             }
-            // POST /takeover/<token>/done — only the claimant (matching cookie).
-            if let Some(token) = rest.strip_suffix("/done") {
-                if !valid_token(token) {
-                    return Resp::new("400 Bad Request", "text/plain", "bad token");
+            // POST /takeover/<token>/{release,control,done}: hand control
+            // back, take it again, or end the link. Only the claimant
+            // (matching cookie).
+            if let Some((token, action)) = rest.split_once('/') {
+                let change = match action {
+                    "release" => Some(Change::Control(false)),
+                    "control" => Some(Change::Control(true)),
+                    "done" => Some(Change::Ended),
+                    _ => None,
+                };
+                if let Some(change) = change {
+                    if !valid_token(token) {
+                        return Resp::new("400 Bad Request", "text/plain", "bad token");
+                    }
+                    if relay_gate(token, cookie).await.is_none() {
+                        return Resp::new(
+                            "403 Forbidden",
+                            "text/plain",
+                            "not the claimant, or the link has ended",
+                        );
+                    }
+                    if let Err(err) = apply(token, change).await {
+                        tracing::warn!(error = %err, "takeover {action} failed");
+                        return Resp::new("500 Internal Server Error", "text/plain", "error");
+                    }
+                    return Resp::new("200 OK", "text/plain", "ok");
                 }
-                if !claim_matches(token, cookie).await {
-                    return Resp::new("403 Forbidden", "text/plain", "not the claimant");
-                }
-                if let Err(err) = mark_done(token).await {
-                    tracing::warn!(error = %err, "marking done failed");
-                    return Resp::new("500 Internal Server Error", "text/plain", "error");
-                }
-                return Resp::new("200 OK", "text/plain", "done");
             }
         }
     }
@@ -646,15 +713,24 @@ async fn claim_response(token: &str, cookie: Option<&str>) -> Resp {
     if !valid_token(token) {
         return Resp::new("400 Bad Request", "text/plain", "bad token");
     }
+    let ended = tokio::fs::try_exists(done_path(token))
+        .await
+        .unwrap_or(false);
     match read_ticket(token).await {
+        Ok(_) if ended => Resp::new("410 Gone", "text/plain", "this takeover link has ended"),
         Ok(t) if t.expires_at_ms > now_ms() => match claim(token, cookie).await {
             Ok(maybe_secret) => {
                 // Hand back the relay base + this session's context id so the page
                 // can enumerate the session's tabs (Target.getTargets filtered by
                 // browserContextId) and switch between them, plus the session
                 // viewport every tab is rendered at.
+                // Whether the person has control or is watching, so a
+                // reload comes back in the same mode.
+                let control = !tokio::fs::try_exists(released_path(token))
+                    .await
+                    .unwrap_or(false);
                 let body = format!(
-                    "{{\"wsBase\":{},\"targetId\":{},\"ctxId\":{},\"viewport\":{{\"width\":{},\"height\":{}}}}}",
+                    "{{\"wsBase\":{},\"targetId\":{},\"ctxId\":{},\"viewport\":{{\"width\":{},\"height\":{}}},\"control\":{control}}}",
                     js_str(&format!("/takeover/{token}")),
                     js_str(&t.target_id),
                     js_str(&t.session_id),
@@ -686,25 +762,112 @@ async fn claim_response(token: &str, cookie: Option<&str>) -> Resp {
     }
 }
 
-async fn mark_done(token: &str) -> Result<()> {
-    tokio::fs::create_dir_all(done_dir()).await.ok();
-    tokio::fs::write(done_path(token), b"done").await?;
-    // Close this token's open relay sockets; nobody listening is fine.
-    let _ = DONE.send(token.to_string());
+/// A change to a takeover link, made by the person on the page or by the
+/// daemon when the page has been gone too long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Change {
+    /// The person took control (`true`) or handed it back to the agent.
+    Control(bool),
+    /// The link ended; it also hands control back.
+    Ended,
+}
+
+/// Record a change where the MCP process sees it, then tell open relays.
+async fn apply(token: &str, change: Change) -> Result<()> {
+    match change {
+        Change::Control(true) => {
+            if let Err(err) = tokio::fs::remove_file(released_path(token)).await {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    return Err(err.into());
+                }
+            }
+        }
+        Change::Control(false) => {
+            tokio::fs::create_dir_all(released_dir()).await.ok();
+            tokio::fs::write(released_path(token), b"").await?;
+        }
+        Change::Ended => {
+            tokio::fs::create_dir_all(done_dir()).await.ok();
+            tokio::fs::write(done_path(token), b"done").await?;
+        }
+    }
+    // Nobody listening is fine.
+    let _ = CHANGES.send((token.to_string(), change));
     Ok(())
 }
 
-/// Tokens marked done, broadcast to open relays (see [`done_events`]).
-static DONE: once_cell::sync::Lazy<tokio::sync::broadcast::Sender<String>> =
+/// Changes to takeover links, broadcast to open relays (see [`changes`]).
+static CHANGES: once_cell::sync::Lazy<tokio::sync::broadcast::Sender<(String, Change)>> =
     once_cell::sync::Lazy::new(|| tokio::sync::broadcast::channel(64).0);
 
-/// Subscribe to Done clicks, so a relay closes the moment its takeover ends.
-pub(crate) fn done_events() -> tokio::sync::broadcast::Receiver<String> {
-    DONE.subscribe()
+/// Subscribe to takeover changes, so a relay switches between control and
+/// watching, and closes the moment its link ends.
+pub(crate) fn changes() -> tokio::sync::broadcast::Receiver<(String, Change)> {
+    CHANGES.subscribe()
+}
+
+/// Whether the person has control through `token` (no handback recorded).
+pub(crate) async fn has_control(token: &str) -> bool {
+    !tokio::fs::try_exists(released_path(token))
+        .await
+        .unwrap_or(true)
+}
+
+/// How long a link outlives its last open page. Long enough to reload or
+/// switch tabs, and for a phone to fetch a code from another app.
+const PAGE_GONE_GRACE: Duration = Duration::from_secs(60);
+
+/// Open relay sockets per token, to notice the person closing the page.
+static OPEN_PAGES: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<String, usize>>,
+> = once_cell::sync::Lazy::new(Default::default);
+
+/// Count a relay socket for `token` as open.
+pub(crate) fn page_opened(token: &str) {
+    let mut open = OPEN_PAGES.lock().unwrap_or_else(|e| e.into_inner());
+    *open.entry(token.to_string()).or_default() += 1;
+}
+
+/// Count a relay socket for `token` as closed. When none stays open for
+/// [`PAGE_GONE_GRACE`], the person closed the page: end the link, which
+/// hands control back so the agent isn't left waiting.
+pub(crate) fn page_closed(token: &str) {
+    let last = {
+        let mut open = OPEN_PAGES.lock().unwrap_or_else(|e| e.into_inner());
+        let n = open.entry(token.to_string()).or_default();
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            open.remove(token);
+            true
+        } else {
+            false
+        }
+    };
+    if !last {
+        return;
+    }
+    let token = token.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(PAGE_GONE_GRACE).await;
+        let reopened = OPEN_PAGES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&token);
+        let ended = tokio::fs::try_exists(done_path(&token))
+            .await
+            .unwrap_or(true);
+        if reopened || ended || read_ticket(&token).await.is_err() {
+            return;
+        }
+        tracing::info!("takeover page closed; ending the link");
+        if let Err(err) = apply(&token, Change::Ended).await {
+            tracing::warn!(error = %err, "ending a closed takeover failed");
+        }
+    });
 }
 
 /// Whether a relay socket for `token` may run: the ticket exists and hasn't
-/// expired, Done hasn't been clicked, and `presented` is the claim cookie.
+/// expired, the link hasn't ended, and `presented` is the claim cookie.
 /// Returns the session's browserContextId and the ticket's expiry.
 pub(crate) async fn relay_gate(token: &str, presented: Option<&str>) -> Option<(String, u128)> {
     let ticket = read_ticket(token).await.ok()?;
@@ -737,8 +900,8 @@ fn js_str(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Ticket, Viewport, active_in, cleanup, cookie_secure, is_stealth, read_ticket, valid_ctx,
-        valid_token, wait_for_done,
+        Ticket, Viewport, cleanup, controlling_in, cookie_secure, is_stealth, read_ticket,
+        valid_ctx, valid_token, wait_for_handback,
     };
     use std::time::Duration;
 
@@ -766,7 +929,10 @@ mod tests {
     #[tokio::test]
     async fn caller_supplied_ids_never_become_paths() {
         for bad in TRAVERSALS {
-            assert!(wait_for_done(bad, Duration::ZERO).await.is_err(), "{bad}");
+            assert!(
+                wait_for_handback(bad, Duration::ZERO).await.is_err(),
+                "{bad}"
+            );
             assert!(read_ticket(bad).await.is_err(), "{bad}");
             assert!(!is_stealth(bad).await, "{bad}");
             cleanup(bad).await;
@@ -774,11 +940,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn takeover_active_until_done_or_expired() {
+    async fn person_has_control_until_handback_end_or_expiry() {
         let root = std::env::temp_dir().join(format!("bs-takeover-{}", std::process::id()));
-        let (tokens, done) = (root.join("tokens"), root.join("done"));
-        std::fs::create_dir_all(&tokens).unwrap();
-        std::fs::create_dir_all(&done).unwrap();
+        let (tokens, done, released) = (
+            root.join("tokens"),
+            root.join("done"),
+            root.join("released"),
+        );
+        for d in [&tokens, &done, &released] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let stops = [done.clone(), released.clone()];
         let ticket = |session: &str, expires_at_ms| Ticket {
             session_id: session.into(),
             target_id: "T".into(),
@@ -792,17 +964,19 @@ mod tests {
             )
             .unwrap()
         };
-        assert!(!active_in(&tokens, &done, "CTX1", 1000).await);
+        let holder = |session: &'static str| controlling_in(&tokens, &stops, session, 1000);
+        assert_eq!(holder("CTX1").await, None);
         write("aa", &ticket("CTX1", 2000));
         write("bb", &ticket("CTX2", 500));
-        assert!(active_in(&tokens, &done, "CTX1", 1000).await);
-        assert!(!active_in(&tokens, &done, "CTX2", 1000).await, "expired");
-        assert!(
-            !active_in(&tokens, &done, "CTX3", 1000).await,
-            "other session"
-        );
+        assert_eq!(holder("CTX1").await.as_deref(), Some("aa"));
+        assert_eq!(holder("CTX2").await, None, "expired");
+        assert_eq!(holder("CTX3").await, None, "other session");
+        std::fs::write(released.join("aa"), b"").unwrap();
+        assert_eq!(holder("CTX1").await, None, "handed back");
+        std::fs::remove_file(released.join("aa")).unwrap();
+        assert_eq!(holder("CTX1").await.as_deref(), Some("aa"), "taken again");
         std::fs::write(done.join("aa"), b"").unwrap();
-        assert!(!active_in(&tokens, &done, "CTX1", 1000).await, "done");
+        assert_eq!(holder("CTX1").await, None, "ended");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

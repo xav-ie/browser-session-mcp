@@ -32,9 +32,11 @@ use tokio::net::TcpStream;
 use url::Url;
 
 use crate::chrome;
+use crate::takeover::Change;
 
 /// CDP methods the takeover page uses (frontend/src/lib/takeover.ts). Target
-/// methods are further checked or rewritten in [`Filter::inbound`].
+/// methods are further checked or rewritten in [`Filter::inbound`], and only
+/// [`WATCH_ALLOWED`] pass while the person is watching.
 const ALLOWED: &[&str] = &[
     "Emulation.setDeviceMetricsOverride",
     "Input.dispatchKeyEvent",
@@ -55,6 +57,22 @@ const ALLOWED: &[&str] = &[
     "Target.setDiscoverTargets",
 ];
 
+/// What a watching page may do: show the screen, list and follow tabs, and
+/// read the address. Nothing that clicks, types, navigates or focuses a tab.
+const WATCH_ALLOWED: &[&str] = &[
+    "Emulation.setDeviceMetricsOverride",
+    "Page.enable",
+    "Page.getNavigationHistory",
+    "Page.screencastFrameAck",
+    "Page.startScreencast",
+    "Page.stopScreencast",
+    "Target.getTargets",
+    "Target.setDiscoverTargets",
+];
+
+/// The only script a watching page may run, to show the tab's address.
+const WATCH_EXPRESSION: &str = "location.href";
+
 /// Relay one upgraded takeover WebSocket until either side closes or the gate
 /// stops passing. `head` is the raw request head; the gate already passed once.
 pub(crate) async fn serve(
@@ -65,9 +83,9 @@ pub(crate) async fn serve(
     cookie: Option<String>,
     browser_url: &str,
 ) -> Result<()> {
-    // Subscribe before checking the gate, so a Done landing in between is
+    // Subscribe before checking the gate, so a change landing in between is
     // still seen below.
-    let mut done = crate::takeover::done_events();
+    let mut changes = crate::takeover::changes();
     let (ctx, expires_at_ms) = match crate::takeover::relay_gate(token, cookie.as_deref()).await {
         Some(v) => v,
         None => return reject(&mut stream, "403 Forbidden", "takeover link is not active").await,
@@ -108,6 +126,9 @@ pub(crate) async fn serve(
     let (mut c_tx, mut c_rx) = client.split();
     let (mut b_tx, mut b_rx) = chrome_ws.split();
     let mut filter = Filter::new(ctx, known);
+    filter.control = crate::takeover::has_control(token).await;
+    // Counted from here so every exit, `?` included, counts it closed.
+    let _open = OpenPage::new(token);
     let left = Duration::from_millis(
         u64::try_from(expires_at_ms.saturating_sub(crate::takeover::now_ms())).unwrap_or(u64::MAX),
     );
@@ -133,14 +154,26 @@ pub(crate) async fn serve(
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(_)) => {}
             },
-            d = done.recv() => match d {
-                Ok(t) if t == token => break,
+            d = changes.recv() => match d {
+                Ok((t, change)) if t == token => match change {
+                    Change::Control(control) => {
+                        filter.control = control;
+                        c_tx.send(Message::text(control_event(control))).await?;
+                    }
+                    Change::Ended => {
+                        let _ = c_tx.send(Message::text(ENDED_EVENT)).await;
+                        break;
+                    }
+                },
                 Ok(_) => {}
                 // Missed notifications: re-check this token once.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     if crate::takeover::relay_gate(token, cookie.as_deref()).await.is_none() {
+                        let _ = c_tx.send(Message::text(ENDED_EVENT)).await;
                         break;
                     }
+                    filter.control = crate::takeover::has_control(token).await;
+                    c_tx.send(Message::text(control_event(filter.control))).await?;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
@@ -150,6 +183,29 @@ pub(crate) async fn serve(
     let _ = c_tx.send(Message::Close(None)).await;
     let _ = b_tx.close(None).await;
     Ok(())
+}
+
+/// Not CDP: events the relay adds for the takeover page, so every open page
+/// follows a handback, a retake or the end, whichever page made it.
+fn control_event(control: bool) -> String {
+    json!({ "method": "Takeover.control", "params": { "control": control } }).to_string()
+}
+const ENDED_EVENT: &str = r#"{"method":"Takeover.ended","params":{}}"#;
+
+/// One open takeover page, counted while it lives.
+struct OpenPage(String);
+
+impl OpenPage {
+    fn new(token: &str) -> Self {
+        crate::takeover::page_opened(token);
+        Self(token.to_string())
+    }
+}
+
+impl Drop for OpenPage {
+    fn drop(&mut self) {
+        crate::takeover::page_closed(&self.0);
+    }
 }
 
 async fn reject(stream: &mut TcpStream, status: &str, body: &str) -> Result<()> {
@@ -261,6 +317,8 @@ pub(crate) struct Filter {
     /// Request ids whose replies need filtering or recording.
     get_targets: HashSet<u64>,
     create_target: HashSet<u64>,
+    /// Whether the person has control; while false they only watch.
+    pub(crate) control: bool,
 }
 
 impl Filter {
@@ -270,6 +328,7 @@ impl Filter {
             known,
             get_targets: HashSet::new(),
             create_target: HashSet::new(),
+            control: true,
         }
     }
 
@@ -291,6 +350,13 @@ impl Filter {
             .to_string();
         if !ALLOWED.contains(&method.as_str()) {
             return Err(deny(&id, &format!("{method} is not allowed")));
+        }
+        let watch_ok = WATCH_ALLOWED.contains(&method.as_str())
+            || (method == "Runtime.evaluate"
+                && msg.pointer("/params/expression").and_then(Value::as_str)
+                    == Some(WATCH_EXPRESSION));
+        if !self.control && !watch_ok {
+            return Err(deny(&id, "watching: take control first"));
         }
         let param = |k: &str| {
             msg.pointer(&format!("/params/{k}"))
@@ -416,6 +482,34 @@ mod tests {
             let err = f.inbound(bad).unwrap_err();
             assert!(err.contains("takeover relay"), "{bad} -> {err}");
         }
+    }
+
+    #[test]
+    fn watching_only_shows_the_page() {
+        let mut f = filter();
+        f.control = false;
+        for ok in [
+            r#"{"id":1,"method":"Page.startScreencast","params":{}}"#,
+            r#"{"id":2,"method":"Target.getTargets"}"#,
+            r#"{"id":3,"method":"Runtime.evaluate","params":{"expression":"location.href"}}"#,
+        ] {
+            assert!(f.inbound(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            r#"{"id":4,"method":"Input.dispatchMouseEvent","params":{"type":"mousePressed"}}"#,
+            r#"{"id":5,"method":"Input.insertText","params":{"text":"x"}}"#,
+            r#"{"id":6,"method":"Page.navigate","params":{"url":"https://example.com"}}"#,
+            r#"{"id":7,"method":"Runtime.evaluate","params":{"expression":"history.back()"}}"#,
+            r#"{"id":8,"method":"Target.activateTarget","params":{"targetId":"T1"}}"#,
+        ] {
+            let err = f.inbound(bad).unwrap_err();
+            assert!(err.contains("take control first"), "{bad}: {err}");
+        }
+        f.control = true;
+        assert!(
+            f.inbound(r#"{"id":9,"method":"Input.insertText","params":{"text":"x"}}"#)
+                .is_ok()
+        );
     }
 
     #[test]

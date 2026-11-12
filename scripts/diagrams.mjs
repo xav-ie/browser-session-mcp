@@ -271,14 +271,15 @@ const diagrams = {
         { from: "person", to: "page", label: "opens the link" },
         { from: "page", to: "chrome", label: "screencast and input", both: true },
         { note: "They log in with their password, passkey or 2FA, straight into Chrome. The agent never sees it.", over: ["person", "chrome"] },
-        { from: "person", to: "page", label: "clicks Done" },
+        { from: "person", to: "page", label: "clicks Hand back" },
         { from: "agent", to: "mcp", label: "await_human_takeover" },
         { from: "mcp", to: "agent", label: "completed: true", ret: true },
+        { note: "They can keep watching. Take control pauses the agent again until they hand back.", over: ["person", "chrome"] },
       ],
     );
     return {
       ...d,
-      alt: "Sequence: the agent calls request_human_takeover and gets a one-time link back, which it shows to a person. The person opens the link; the takeover page streams the live Chrome tab and forwards their input. They log in with their password, passkey or 2FA straight into Chrome, and the agent never sees it. They click Done, and the agent's await_human_takeover call returns completed: true",
+      alt: "Sequence: the agent calls request_human_takeover and gets a one-time link back, which it shows to a person. The person opens the link; the takeover page streams the live Chrome tab and forwards their input. They log in with their password, passkey or 2FA straight into Chrome, and the agent never sees it. They click Hand back, and the agent's await_human_takeover call returns completed: true. They can keep watching, and Take control pauses the agent again",
     };
   },
 

@@ -47,7 +47,8 @@ button svg {
   background: var(--bar);
   border-bottom: 1px solid var(--border);
 }
-#bar > button {
+#bar > button,
+#actions > button {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -61,11 +62,13 @@ button svg {
   color: var(--fg);
   cursor: pointer;
 }
-#bar > button:hover:not(:disabled) {
+#bar > button:hover:not(:disabled),
+#actions > button:hover:not(:disabled) {
   background: rgba(255, 241, 123, 0.1);
   color: var(--accent);
 }
-#bar > button:disabled {
+#bar > button:disabled,
+#actions > button:disabled {
   color: #4d4360;
   cursor: default;
 }
@@ -86,21 +89,43 @@ button svg {
   border-color: var(--green);
 }
 
-#bar > #done {
+#actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+}
+/* Hand back (green) while you have control, Take control (yellow) while
+   watching: the one thing to press next always stands out. */
+#actions > #control {
   padding: 0 14px;
   border: 0;
   background: var(--green);
   color: #0b1206;
   font-weight: 700;
 }
-#bar > #done:hover:not(:disabled) {
+body.watching #actions > #control {
+  background: var(--accent);
+}
+#actions > #control:hover:not(:disabled) {
   background: var(--green);
   color: #0b1206;
   filter: brightness(1.08);
 }
-#bar > #done:disabled {
+body.watching #actions > #control:hover:not(:disabled) {
+  background: var(--accent);
+}
+#actions > #control:disabled {
   background: #2a2336;
   color: #6f6685;
+}
+
+/* Watching: the agent drives, so the page's own controls step aside. */
+body.watching #keys,
+body.watching #newtab {
+  visibility: hidden;
+}
+body.watching #screen {
+  outline-color: var(--accent);
 }
 
 /* --- credential relay popover ---------------------------------- */
@@ -314,6 +339,7 @@ canvas {
     margin: 0 -8px;
   }
   #bar > button,
+  #actions > button,
   #url {
     align-self: center;
     height: 34px;
@@ -338,9 +364,10 @@ canvas {
   #keys {
     grid-area: 4 / 1;
   }
-  #bar > #done {
+  #actions {
     grid-area: 4 / 3 / 5 / 5;
     justify-self: end;
+    align-self: center;
   }
 
   /* Popover and toast come up from the bottom bar instead of down from the top. */

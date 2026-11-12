@@ -9,7 +9,8 @@ const TOKEN =
 
 const canvas = document.getElementById("screen") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d") as CanvasRenderingContext2D;
-const doneBtn = document.getElementById("done") as HTMLButtonElement;
+const controlBtn = document.getElementById("control") as HTMLButtonElement;
+const endBtn = document.getElementById("end") as HTMLButtonElement;
 const tabsEl = document.getElementById("tabs") as HTMLElement;
 const wrapEl = document.getElementById("wrap") as HTMLElement;
 const overlayEl = document.getElementById("overlay") as HTMLElement;
@@ -59,8 +60,41 @@ const ICONS = {
   plus16: svg(16, '<path d="M12 5v14M5 12h14"/>'),
 };
 
+// Whether this person has control. While false they watch: the relay refuses
+// anything but these (src/takeover_relay.rs WATCH_ALLOWED), so they aren't sent.
+let control = true;
+let ended = false;
+const WATCH_OK = new Set([
+  "Emulation.setDeviceMetricsOverride",
+  "Page.enable",
+  "Page.getNavigationHistory",
+  "Page.screencastFrameAck",
+  "Page.startScreencast",
+  "Page.stopScreencast",
+  "Target.getTargets",
+  "Target.setDiscoverTargets",
+]);
+const watchOk = (method: string, params?: any) =>
+  WATCH_OK.has(method) ||
+  (method === "Runtime.evaluate" && params?.expression === "location.href");
+
+// Input that means the person tried to use the page while watching: a click
+// or tap, a key, or a scroll (wheel, trackpad or touch drag) or a paste.
+const TRIED = new Set(["mousePressed", "mouseWheel", "keyDown"]);
+let lastHint = 0;
+function watchHint() {
+  // A scroll sends many events; say it once, not once per tick.
+  if (Date.now() - lastHint < 2000) return;
+  lastHint = Date.now();
+  setStatus("watching: press Take control to use the page");
+}
+
 function send(method: string, params?: any): number | null {
   if (!ws || ws.readyState !== WebSocket.OPEN) return null;
+  if (!control && !watchOk(method, params)) {
+    if (TRIED.has(params?.type) || method === "Input.insertText") watchHint();
+    return null;
+  }
   const id = nextId++;
   ws.send(JSON.stringify({ id, method, params: params || {} }));
   return id;
@@ -290,6 +324,17 @@ function onMessage(ev: MessageEvent) {
     return;
   }
 
+  // Added by the relay, not Chrome: a handback, retake or end, from this page
+  // or another of the person's.
+  if (msg.method === "Takeover.control") {
+    setControl(!!msg.params?.control);
+    return;
+  }
+  if (msg.method === "Takeover.ended") {
+    showEnded();
+    return;
+  }
+
   if (msg.id && pending.has(msg.id)) {
     const resolve = pending.get(msg.id)!;
     pending.delete(msg.id);
@@ -373,27 +418,28 @@ function connect(wsUrl: string) {
     // reporting, which is the CDP tell bot-detectors catch. Runtime.evaluate
     // (used for the URL/nav) works without it.
     send("Target.setDiscoverTargets", { discover: true });
-    send("Page.bringToFront");
-    if (currentTarget) {
-      try {
-        send("Target.activateTarget", { targetId: currentTarget });
-      } catch {}
-    }
+    focusTab();
     applyViewport();
     urlQueryId = send("Runtime.evaluate", {
       expression: "location.href",
       returnByValue: true,
     });
-    doneBtn.disabled = false;
+    controlBtn.disabled = false;
+    endBtn.disabled = false;
+    reconnects = 0;
     refreshNav();
     canvas.focus();
     refreshTabs();
   };
   const sock = ws;
-  // Switching tabs or pressing Done drops `ws` first, so only an unexpected
-  // close (Chrome restarted, network gone) still finds this socket current.
+  // Switching tabs or the link ending drops `ws` first, so only an unexpected
+  // close (Chrome restarted, network gone, a phone pausing the page) still
+  // finds this socket current.
   ws.onclose = () => {
-    if (ws === sock) setStatus("connection lost, reload to reconnect", "err");
+    if (ws !== sock) return;
+    ws = null;
+    setStatus("connection lost, reconnecting…", "err");
+    scheduleReconnect();
   };
   ws.onerror = () =>
     setStatus("connection error: is chrome.<base> reachable?", "err");
@@ -746,34 +792,119 @@ urlEl.addEventListener("keydown", (e) => {
   }
 });
 
-// --- done -----------------------------------------------------------------
-doneBtn.addEventListener("click", async () => {
-  doneBtn.disabled = true;
-  setStatus("handing back to agent…", "pending");
-  try {
-    const r = await fetch("/takeover/" + TOKEN + "/done", { method: "POST" });
-    if (!r.ok) throw new Error("done failed: HTTP " + r.status);
-    if (ws) {
-      try {
-        send("Page.stopScreencast");
-      } catch {}
-      const sock = ws;
-      ws = null; // an intentional close, not "connection lost"
-      sock.close();
-    }
-    setStatus("done, you can close this tab", "ok");
-    document.querySelectorAll<HTMLElement>("[popover]").forEach((p) => {
-      try {
-        p.hidePopover();
-      } catch {}
-    });
-    overlayEl.textContent =
-      "Handed back to the agent — this session is no longer interactive. You can close this tab.";
-    overlayEl.style.display = "flex";
-  } catch {
-    setStatus("failed to signal done, try again", "err");
-    doneBtn.disabled = false;
+// --- control, watch and end ---------------------------------------------
+// The person starts in control. Hand back lets the agent drive while they
+// watch; Take control pauses the agent again. The daemon records each, and
+// the relay tells every open page (Takeover.control).
+function focusTab() {
+  if (!control) return;
+  send("Page.bringToFront");
+  if (currentTarget) send("Target.activateTarget", { targetId: currentTarget });
+}
+
+function setControl(c: boolean) {
+  const changed = c !== control;
+  control = c;
+  document.body.classList.toggle("watching", !c);
+  controlBtn.textContent = c ? "Hand back" : "Take control";
+  controlBtn.title = c
+    ? "Let the agent continue. You keep watching and can take control again."
+    : "Pause the agent and use the page yourself.";
+  urlEl.readOnly = !c;
+  if (!c) hidePopovers();
+  if (changed && c) {
+    focusTab();
+    canvas.focus();
   }
+  if (changed)
+    setStatus(
+      c
+        ? "you have control; the agent is paused"
+        : "watching: the agent is driving",
+    );
+}
+
+function hidePopovers() {
+  document.querySelectorAll<HTMLElement>("[popover]").forEach((p) => {
+    try {
+      p.hidePopover();
+    } catch {}
+  });
+}
+
+async function post(action: string): Promise<boolean> {
+  try {
+    const r = await fetch("/takeover/" + TOKEN + "/" + action, {
+      method: "POST",
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+controlBtn.addEventListener("click", async () => {
+  const want = !control;
+  controlBtn.disabled = true;
+  setStatus(want ? "taking control…" : "handing back to the agent…", "pending");
+  if (await post(want ? "control" : "release")) setControl(want);
+  else setStatus("that didn't go through, try again", "err");
+  controlBtn.disabled = false;
+});
+
+endBtn.addEventListener("click", async () => {
+  if (
+    !confirm(
+      "End this link? The agent keeps control and you can't watch or take control again.",
+    )
+  )
+    return;
+  endBtn.disabled = true;
+  if (await post("done")) showEnded();
+  else {
+    setStatus("failed to end the link, try again", "err");
+    endBtn.disabled = false;
+  }
+});
+
+function showEnded() {
+  if (ended) return;
+  ended = true;
+  if (ws) {
+    try {
+      send("Page.stopScreencast");
+    } catch {}
+    const sock = ws;
+    ws = null; // an intentional close, not "connection lost"
+    sock.close();
+  }
+  controlBtn.disabled = true;
+  endBtn.disabled = true;
+  hidePopovers();
+  setStatus("ended", "ok");
+  overlayEl.textContent =
+    "This link has ended and the agent has control. You can close this tab.";
+  overlayEl.style.display = "flex";
+}
+
+// A dropped socket comes back on its own: phones pause background pages, and
+// the daemon keeps the link for a minute after its last page goes away.
+let reconnectTimer: any = null;
+let reconnects = 0; // since the last socket that opened
+function scheduleReconnect() {
+  if (reconnectTimer || ended) return;
+  if (++reconnects > 5) {
+    setStatus("connection lost, reload to reconnect", "err");
+    return;
+  }
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (document.visibilityState === "visible") start();
+  }, 2000);
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && !ws && !ended && wsBase)
+    start();
 });
 
 document.querySelectorAll("#vault button[data-for]").forEach((b) => {
@@ -797,6 +928,10 @@ async function start() {
   }
   if (r.status === 409) {
     setStatus("This takeover link is already in use by someone else.", "err");
+    return;
+  }
+  if (r.status === 410) {
+    showEnded();
     return;
   }
   if (!r.ok) {
@@ -824,6 +959,8 @@ async function start() {
   canvas.width = sessionVp.width;
   canvas.height = sessionVp.height;
   fitCanvas();
-  openTab(info.targetId);
+  setControl(info.control !== false);
+  // A reconnect stays on the tab being shown.
+  openTab(currentTarget || info.targetId);
 }
 start();

@@ -26,8 +26,8 @@ credentials.
 - **Sessions that stick around.** A session is just an id the agent passes to
   each tool, so it survives dropped connections and server restarts.
 - **Hand logins to a human.** For passwords, passkeys and 2FA, the agent sends
-  you a link to a live view of the page. You log in, click Done, and the agent
-  continues. Your credentials never reach it.
+  you a link to a live view of the page. You log in, hand control back, and
+  the agent continues while you watch. Your credentials never reach it.
 - **Log in once.** Save a session's cookies under a name and load them into any
   future session.
 - **Everything recorded.** Every console message and network request is kept on
@@ -130,15 +130,18 @@ shows how.
 ## Handing a login to a person
 
 When a page needs credentials the agent must not see, it asks for a takeover
-link and shows it to you. The page opens a live view of the agent's tab; you
-log in there, click Done, and the agent picks up where it left off.
+link and shows it to you. The page opens a live view of the agent's tab with
+you in control, and the agent's calls on that session wait. You log in there,
+click Hand back, and the agent picks up where it left off. The link stays open
+so you can watch it work; Take control pauses it again, and End closes the link.
+Closing the page ends the link after a minute.
 
-![The takeover page: a bar with back, forward, the page's URL, new tab, a button to fill a username or password, and Done, above a live view of the agent's tab showing GitHub's sign-in form](docs/images/takeover.png)
+![The takeover page: a bar with back, forward, the page's URL, new tab, a button to fill a username or password, and Hand back, above a live view of the agent's tab showing GitHub's sign-in form](docs/images/takeover.png)
 
 <!-- diagram:takeover -->
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/takeover-dark.svg">
-  <img src="docs/diagrams/takeover.svg" alt="Sequence: the agent calls request_human_takeover and gets a one-time link back, which it shows to a person. The person opens the link; the takeover page streams the live Chrome tab and forwards their input. They log in with their password, passkey or 2FA straight into Chrome, and the agent never sees it. They click Done, and the agent's await_human_takeover call returns completed: true">
+  <img src="docs/diagrams/takeover.svg" alt="Sequence: the agent calls request_human_takeover and gets a one-time link back, which it shows to a person. The person opens the link; the takeover page streams the live Chrome tab and forwards their input. They log in with their password, passkey or 2FA straight into Chrome, and the agent never sees it. They click Hand back, and the agent's await_human_takeover call returns completed: true. They can keep watching, and Take control pauses the agent again">
 </picture>
 <!-- /diagram:takeover -->
 
@@ -256,7 +259,7 @@ Find the JavaScript behind a slow or hung page:
 
 **Human takeover** ⚙ (needs the `takeover` role and `TAKEOVER_BASE_URL`)
 - `request_human_takeover({ sessionId, ttlMinutes? })` → `{ url, token, expiresAtMs }`: returns right away with a link
-- `await_human_takeover({ token, timeout? })` → `{ completed, expired, url?, title? }`: waits up to `timeout` (default 25 s) for the person to click Done; call it in a loop until `completed`, or until `expired` says to request a new link
+- `await_human_takeover({ token, timeout? })` → `{ completed, watching, expired, url?, title? }`: waits up to `timeout` (default 25 s) for the person to hand control back; call it in a loop until `completed`, or until `expired` says to request a new link. `watching` means the link is still open: if they take control again, calls on the session fail until you await the same token again
 
 **Saved logins**
 - `save_browser_state({ sessionId, name })`

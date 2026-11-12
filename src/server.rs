@@ -93,6 +93,21 @@ impl ServerHandler for BrowserSessionServer {
     ) -> Result<CallToolResponse, McpError> {
         let args = request.arguments.unwrap_or_default();
         let name = request.name.as_ref();
+        // While a person has control through a takeover link, the agent keeps
+        // its hands off the session: nothing it does lands on the page under
+        // them, and nothing reads what they type.
+        if let Some(id) = args.get("sessionId").and_then(Value::as_str) {
+            if !UNLOCKED_TOOLS.contains(&name) {
+                if let Some(token) = takeover::controlling_token(id).await {
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                        "A person has control of this session through a takeover link, so calls on it \
+                         are paused until they hand control back. Wait with \
+                         await_human_takeover(token=\"{token}\")."
+                    ))])
+                    .into());
+                }
+            }
+        }
         // One call drives a session at a time, across processes: two agents
         // (or two calls of one) on the same page fight over it.
         let _lock = match args.get("sessionId").and_then(Value::as_str) {
@@ -1644,16 +1659,22 @@ impl BrowserSessionServer {
         let timeout_ms = optional_u64(&args, "timeout")
             .unwrap_or(25_000)
             .min(1_800_000);
-        let ticket = takeover::read_ticket(&token).await.ok();
-        let completed = takeover::wait_for_done(&token, Duration::from_millis(timeout_ms)).await?;
-        let expired = !completed
-            && ticket
-                .as_ref()
-                .is_some_and(|t| t.expires_at_ms <= takeover::expiry_ms(0));
+        // A token whose ticket is gone was never issued, or its link ended
+        // and was already reported.
+        let ticket = takeover::read_ticket(&token).await.map_err(|_| {
+            anyhow!("unknown takeover token, or its link has ended and was already reported")
+        })?;
+        let state = takeover::wait_for_handback(&token, Duration::from_millis(timeout_ms)).await?;
+        let completed = state != takeover::Handback::Waiting;
+        let ended = state == takeover::Handback::Ended;
+        let expired = !completed && ticket.expires_at_ms <= takeover::expiry_ms(0);
         let mut where_ = None;
         if completed {
-            takeover::cleanup(&token).await;
-            if let (Some(t), Ok(sessions)) = (&ticket, self.ctx.sessions().await) {
+            if ended {
+                takeover::cleanup(&token).await;
+            }
+            if let Ok(sessions) = self.ctx.sessions().await {
+                let t = &ticket;
                 // A named session saves the login right away.
                 if let Some(name) = sessions.name(&t.session_id).await {
                     let _ = self.save_login(&t.session_id, &name).await;
@@ -1664,11 +1685,18 @@ impl BrowserSessionServer {
             }
         }
         let body = if completed {
-            match &where_ {
-                Some((url, title)) => {
-                    format!("The person finished; the session is now on {url} ({title}).")
-                }
-                None => "The person finished; resuming.".to_string(),
+            let place = match &where_ {
+                Some((url, title)) => format!("the session is now on {url} ({title})"),
+                None => "resuming".to_string(),
+            };
+            if ended {
+                format!("The person finished and closed the link; {place}.")
+            } else {
+                format!(
+                    "The person handed control back and may keep watching; {place}. If they take \
+                     control again, calls on the session fail until they hand back: wait with \
+                     await_human_takeover and this token again."
+                )
             }
         } else if expired {
             "The link expired before the person finished; issue a new request_human_takeover."
@@ -1680,6 +1708,7 @@ impl BrowserSessionServer {
             body,
             TakeoverDoneOut {
                 completed,
+                watching: completed && !ended,
                 expired,
                 url: where_.as_ref().map(|(u, _)| u.clone()),
                 title: where_.map(|(_, t)| t),
@@ -2419,8 +2448,12 @@ struct TakeoverOut {
 
 #[derive(Serialize, JsonSchema)]
 struct TakeoverDoneOut {
-    /// True once the person clicked Done; false while still waiting.
+    /// True once the person handed control back or the link ended; false
+    /// while they still have control.
     completed: bool,
+    /// True when they handed back but the link is still open: they may be
+    /// watching, and can take control again.
+    watching: bool,
     /// True when the link expired unfinished: request a new one.
     expired: bool,
     /// Where the session is once finished.
@@ -4971,7 +5004,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "request_human_takeover",
-            "Hand the session's active page to a human to log in themselves (passwords/passkeys the agent must not see). Use it only when a login needs a person; for a site you've logged into before, try load_browser_state first. Show the returned url to the user and keep the token for await_human_takeover. Does NOT block. STRONGLY ADVISED: after showing the URL, run await_human_takeover in a BACKGROUND task (subagent/job) — not your main loop — because the human may take many minutes and you should stay responsive. The URL is a bearer credential that gives live control of the tab until `ttlMinutes` passes, so share it only with the intended person. Fails if TAKEOVER_BASE_URL isn't configured on the server.",
+            "Hand the session's active page to a human to log in themselves (passwords/passkeys the agent must not see). Use it only when a login needs a person; for a site you've logged into before, try load_browser_state first. Show the returned url to the user and keep the token for await_human_takeover. Does NOT block. The person starts in control, and every call on the session except reading logs fails until they hand control back; after that the link stays open for them to watch you work, and they can take control again, which pauses your calls the same way. STRONGLY ADVISED: after showing the URL, run await_human_takeover in a BACKGROUND task (subagent/job) — not your main loop — because the human may take many minutes and you should stay responsive. The URL is a bearer credential that gives live control of the tab until `ttlMinutes` passes, so share it only with the intended person. Fails if TAKEOVER_BASE_URL isn't configured on the server.",
             object_schema(
                 &[
                     session_id,
@@ -4987,7 +5020,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "await_human_takeover",
-            "Wait up to `timeout` (default 25 s) for the person to click Done on the takeover page. Returns { completed, expired, url, title }: `completed` true once they finished, with the page's URL and title; otherwise false, and call it again in a loop, each call short enough for your host's per-call limit (the default suits Executor). `expired` true means the link ran out unfinished; issue a new request_human_takeover. The person may take several minutes, so poll from a background task if you can. A session opened with a `name` saves its login under that name as soon as they finish. Fails on a token that request_human_takeover didn't issue or that has already completed.",
+            "Wait up to `timeout` (default 25 s) for the person to hand control back on the takeover page, or for the link to end. Returns { completed, watching, expired, url, title }: `completed` true once they handed back, with the page's URL and title; otherwise false, and call it again in a loop, each call short enough for your host's per-call limit (the default suits Executor). `watching` true means the link is still open: the person may watch and can take control again, and then calls on the session fail until you await the same token again. `expired` true means the link ran out unfinished; issue a new request_human_takeover. The person may take several minutes, so poll from a background task if you can. A session opened with a `name` saves its login under that name as soon as they finish. Fails on a token that request_human_takeover didn't issue or whose link has ended and was already reported.",
             object_schema(
                 &[
                     (
