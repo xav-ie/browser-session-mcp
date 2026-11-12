@@ -135,7 +135,13 @@ let
             [ "name = \"${commonArgs.pname}\"\nversion = \"${depsVersion}\"" ]
             (builtins.readFile ./Cargo.lock)
         );
-        cleanCargoTomlFilter = path: path != [ "package" "version" ] && craneLib.filters.cargoTomlDefault path;
+        cleanCargoTomlFilter =
+          path:
+          path != [
+            "package"
+            "version"
+          ]
+          && craneLib.filters.cargoTomlDefault path;
       };
     }
   );
