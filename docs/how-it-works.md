@@ -150,7 +150,8 @@ daemons — the processes coordinate purely through files in it.
 └── takeover/                         # human-takeover IPC
     ├── tokens/<token>.json           # ticket: sessionId + targetId + expiry
     ├── claims/<token>                # first-claimant secret
-    ├── done/<token>                  # "Done" sentinel
+    ├── released/<token>              # presence = handed back, person watching
+    ├── done/<token>                  # presence = link ended
     └── stealth/<sessionId>           # presence = stealth on for that session
 ```
 

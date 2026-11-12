@@ -15,7 +15,46 @@ concurrency:
 permissions: {}
 
 jobs:
+  # The CodeQL languages to analyze: on a pull request only those it touches (or all, when it
+  # changes this workflow); on main and the weekly run, all of them.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      languages: ${{ steps.diff.outputs.languages }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          all='["actions","javascript-typescript","rust"]'
+          if [ "$EVENT" != pull_request ]; then
+            echo "languages=$all" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$BASE...$HEAD")
+          if echo "$changed" | grep -qx '.github/workflows/security.yml'; then
+            echo "languages=$all" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          langs=()
+          echo "$changed" | grep -q '^\.github/\(workflows\|actions\)/' && langs+=('"actions"')
+          echo "$changed" | grep -qE '\.(js|mjs|cjs|ts|mts|cts|tsx|jsx|astro|html)$' && langs+=('"javascript-typescript"')
+          echo "$changed" | grep -qE '(\.rs|(^|/)Cargo\.(toml|lock))$' && langs+=('"rust"')
+          echo "languages=[$(IFS=,; echo "${langs[*]}")]" >>"$GITHUB_OUTPUT"
+
   codeql:
+    needs: changes
+    if: needs.changes.outputs.languages != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -24,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [actions, javascript-typescript, rust]
+        language: ${{ fromJSON(needs.changes.outputs.languages) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

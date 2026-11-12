@@ -23,13 +23,18 @@ import Base from "../layouts/base.astro";
       popovertarget="vault"
       title="Fill username, password or one-time code"
     ></button>
-    <button
-      id="done"
-      disabled
-      title="Hand control back to the agent. It resumes and normal network logging turns back on."
-    >
-      Done
-    </button>
+    <div id="actions">
+      <button
+        id="end"
+        disabled
+        title="Close this link for good. The agent keeps control and you can no longer watch."
+      >
+        End
+      </button>
+      <button id="control" disabled>
+        Hand back
+      </button>
+    </div>
   </header>
 
   <form id="vault" popover autocomplete="on" action="#" onsubmit="return false">

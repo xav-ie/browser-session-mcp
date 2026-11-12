@@ -16,7 +16,7 @@ hand the live page to a human instead of automating the login:
 <!-- diagram:takeover -->
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/takeover-dark.svg">
-  <img src="diagrams/takeover.svg" alt="Sequence: the agent calls request_human_takeover and gets a one-time link back, which it shows to a person. The person opens the link; the takeover page streams the live Chrome tab and forwards their input. They log in with their password, passkey or 2FA straight into Chrome, and the agent never sees it. They click Done, and the agent's await_human_takeover call returns completed: true">
+  <img src="diagrams/takeover.svg" alt="Sequence: the agent calls request_human_takeover and gets a one-time link back, which it shows to a person. The person opens the link; the takeover page streams the live Chrome tab and forwards their input. They log in with their password, passkey or 2FA straight into Chrome, and the agent never sees it. They click Hand back, and the agent's await_human_takeover call returns completed: true. They can keep watching, and Take control pauses the agent again">
 </picture>
 <!-- /diagram:takeover -->
 
@@ -33,7 +33,8 @@ const { url, token } = (
   await tools.browser_session_mcp.request_human_takeover({ sessionId: sid })
 ).structuredContent;
 // → present `url`; the user opens it, sees a live view of the page, logs in
-//   themselves (passkey/password/2FA), and clicks "Done".
+//   themselves (passkey/password/2FA), and clicks "Hand back". Until then,
+//   calls on this session fail with "a person has control".
 
 // Wait for them to finish, ideally in a background task. Each call waits up
 // to 25 s by default, under hosts' per-call limits; the person may take
@@ -43,7 +44,9 @@ do {
   r = (await tools.browser_session_mcp.await_human_takeover({ token })).structuredContent;
 } while (!r.completed && !r.expired);
 // Now authenticated (r.url says where); continue. A session opened with a
-// `name` has already saved this login for next time.
+// `name` has already saved this login for next time. If r.watching, the person
+// can still see the page and may take control again: a call failing with "a
+// person has control" means await the same token again.
 await tools.browser_session_mcp.navigate({
   sessionId: sid,
   url: "https://tagmanager.google.com",
@@ -60,15 +63,22 @@ How it works:
    with this link's claim cookie, only for the session's tabs, and only the
    CDP methods the page needs). It streams the live page via
    `Page.startScreencast` and forwards the human's mouse/keyboard as CDP input.
-   The socket closes on Done or when the link expires.
+   While the person watches, the relay passes only what shows the page, so
+   no click or key reaches Chrome until they take control again. The socket
+   closes when the link ends.
 3. Chrome's DevTools endpoint stays on loopback, and nothing the human types
    reaches the agent; the daemon only passes CDP messages through.
-4. Clicking "Done" POSTs back and drops `${STATE_DIR}/takeover/done/<token>`, which
-   unblocks `await_human_takeover`.
+4. The person starts in control: every tool call on the session, except
+   reading logs, fails until they hand back. "Hand back" drops
+   `${STATE_DIR}/takeover/released/<token>`, which unblocks
+   `await_human_takeover`; "Take control" removes it again.
+5. The link ends on "End", when it expires, or a minute after its last open
+   page went away; that drops `${STATE_DIR}/takeover/done/<token>`.
 
 Security: the URL is a bearer credential (valid 30 minutes by default, `ttlMinutes` 1 to 60). The first
 browser to open it *claims* it via an `HttpOnly` cookie — a leaked URL is
-useless once the real user has it, and only the claimant can click Done.
+useless once the real user has it, and only the claimant can hand back, take
+control or end it.
 
 ## Saved cookie state
 
