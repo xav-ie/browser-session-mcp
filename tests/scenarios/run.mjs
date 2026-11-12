@@ -101,6 +101,11 @@ const expect = (cond, what) => {
 const text = (r) => r.content?.[0]?.text ?? "";
 const js = async (call, sessionId, expression) => (await call("evaluate", { sessionId, expression })).result;
 
+// questions.html is long, and Jev is offered what's on screen first; how much
+// fits depends on the machine's fonts, so its scenarios see the whole page
+// and ask the same question everywhere.
+const WHOLE_PAGE = { width: 1280, height: 4000 };
+
 const SCENARIOS = [
   {
     id: "popup-covers-click",
@@ -581,7 +586,7 @@ const SCENARIOS = [
     id: "late-file-name",
     about: "upload_file sees a file name the page shows only once its upload finishes, in capitals",
     async run({ call, session }) {
-      const sessionId = await session();
+      const sessionId = await session({ viewport: WHOLE_PAGE });
       await call("navigate", { sessionId, url: `${SITE}/questions.html` });
       const r = await call("upload_file", { sessionId, selector: "#cv-drop", content: Buffer.from("%PDF-1.4\n").toString("base64"), name: "My CV.pdf" });
       expect(r.into.startsWith("input#cv-input") && r.pageShowsName, `it saw the name: ${JSON.stringify(r)}`);
@@ -592,7 +597,7 @@ const SCENARIOS = [
     needs: "TYPESAFE_API_KEY",
     about: "Plain language finds fields by the question beside them when the page links no label to them",
     async run({ call, session }) {
-      const sessionId = await session();
+      const sessionId = await session({ viewport: WHOLE_PAGE });
       await call("navigate", { sessionId, url: `${SITE}/questions.html` });
       const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
       const school = await call("select_option", { sessionId, selector: "Which school did you last attend?", option: "Boston University" });
@@ -620,7 +625,7 @@ const SCENARIOS = [
     needs: "TYPESAFE_API_KEY",
     about: "Plain language finds a drop zone with a file and a folder input, and one with no input at all",
     async run({ call, session }) {
-      const sessionId = await session();
+      const sessionId = await session({ viewport: WHOLE_PAGE });
       await call("navigate", { sessionId, url: `${SITE}/questions.html` });
       const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
       const b64 = Buffer.from("sample").toString("base64");
@@ -637,7 +642,7 @@ const SCENARIOS = [
     id: "radio-groups",
     about: "select_option lists and picks in radio groups: by a radio, a fieldset, and through a label when the radio is hidden",
     async run({ call, raw, session }) {
-      const sessionId = await session();
+      const sessionId = await session({ viewport: WHOLE_PAGE });
       await call("navigate", { sessionId, url: `${SITE}/questions.html` });
       const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
       const listed = await call("select_option", { sessionId, selector: "#contact-group" });
@@ -678,7 +683,7 @@ const SCENARIOS = [
     needs: "TYPESAFE_API_KEY",
     about: "Plain language finds radio questions that only their question text tells apart",
     async run({ call, session }) {
-      const sessionId = await session();
+      const sessionId = await session({ viewport: WHOLE_PAGE });
       await call("navigate", { sessionId, url: `${SITE}/questions.html` });
       const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
       await call("select_option", { sessionId, selector: "Are you authorized to work in the country where this job is located?", option: "No" });
