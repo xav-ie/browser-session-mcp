@@ -144,6 +144,10 @@ craneLib.buildPackage (
       }
     );
 
+    # The takeover UI, so .github/workflows/pnpm-hash.yml can build its
+    # pnpmDeps alone to read the new hash.
+    passthru.frontend = frontend;
+
     # `cargo test` over the same artifacts; the flake's `checks.test`.
     passthru.test = craneLib.cargoTest (
       commonArgs
