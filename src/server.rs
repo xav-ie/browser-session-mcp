@@ -567,7 +567,7 @@ impl BrowserSessionServer {
         } else {
             bail!("click requires either `selector` or both `x` and `y`");
         };
-        let before = page_url(&page).await;
+        let before = before_action(&page).await;
         let hit = check_point(&page, (x, y), target.as_deref(), &label).await?;
         page.click(Point::new(x, y))
             .await
@@ -584,7 +584,7 @@ impl BrowserSessionServer {
         let session_id = required_str(&args, "sessionId")?.to_string();
         let key = required_str(&args, "key")?.to_string();
         let page = sessions.active_page(&session_id).await?;
-        let before = page_url(&page).await;
+        let before = before_action(&page).await;
         // None unless Jev picked the element; names what was chosen.
         let mut note = None;
         if let Some(sel) = optional_str(&args, "selector") {
@@ -667,7 +667,7 @@ impl BrowserSessionServer {
         } else {
             bail!("tap requires either `selector` or both `x` and `y`");
         };
-        let before = page_url(&page).await;
+        let before = before_action(&page).await;
         let hit = check_point(&page, at, target.as_deref(), &label).await?;
         touch_tap(&page, at)
             .await
@@ -714,7 +714,7 @@ impl BrowserSessionServer {
             }
         };
         let duration = optional_u64(&args, "durationMs").unwrap_or(300);
-        let before = page_url(&page).await;
+        let before = before_action(&page).await;
         touch_swipe(&page, from, to, duration)
             .await
             .with_context(|| format!("swiping from {label}"))?;
@@ -750,12 +750,9 @@ impl BrowserSessionServer {
         let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
         let page = sessions.active_page(&session_id).await?;
         let (selector, note) = resolve_and_wait(&page, &selector, timeout).await?;
-        type_into(&page, &selector, &text, clear, delay).await?;
+        let typed = type_into(&page, &selector, &text, clear, delay).await?;
         let target = note.unwrap_or(selector);
-        Ok(ok_text(format!(
-            "Typed {} chars into {target}",
-            text.chars().count()
-        )))
+        Ok(ok_text(typed_report(&typed, &text, &target, clear)?))
     }
 
     async fn select_option(&self, args: JsonObject) -> Result<Structured<SelectOut>> {
@@ -774,7 +771,7 @@ impl BrowserSessionServer {
         )
         .await?;
         let label = note.unwrap_or(css.clone());
-        let before = page_url(&page).await;
+        let before = before_action(&page).await;
         let choice = choose_option(&page, &css, &label, want.as_deref()).await?;
         let mut after = after_action(&page, before, None, (&sessions, &session_id)).await;
         // The options are this result's own field; the report's would repeat them.
@@ -868,7 +865,7 @@ impl BrowserSessionServer {
         )
         .await?;
         let label = note.unwrap_or(css.clone());
-        let before = page_url(&page).await;
+        let before = before_action(&page).await;
         let decl = UPLOAD_JS
             .replace("@@DEEP@@", jev::DEEP_FIND_JS)
             .replace("@@DESC@@", DESCRIBE_JS)
@@ -3973,6 +3970,14 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) 
     page.click(Point::new(at.0, at.1))
         .await
         .with_context(|| format!("clicking {what}"))?;
+    // A list that picks several (a multi-select) stays open after a pick,
+    // covering the fields below it; close it as a person would. A list
+    // closing on its own gets a moment first, so its fade isn't taken for
+    // open and toggled back.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    if options_showing(page).await {
+        close_list(page, (x, y)).await;
+    }
     Ok(Choice {
         chosen: Some(opts[i].clone()),
         options: opts,
@@ -3985,7 +3990,14 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) 
 async fn close_list(page: &Page, at: (f64, f64)) {
     dispatch_key(page, "Escape").await.ok();
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let still = iso_eval_function(
+    if options_showing(page).await {
+        page.click(Point::new(at.0, at.1)).await.ok();
+    }
+}
+
+/// Whether any option of the list [`shown_options`] last read still shows.
+async fn options_showing(page: &Page) -> bool {
+    iso_eval_function(
         page,
         &format!(
             "function() {{ var o = (globalThis.__bsPicks || {{}})[{key}] || []; \
@@ -3998,10 +4010,7 @@ async fn close_list(page: &Page, at: (f64, f64)) {
     .await
     .ok()
     .and_then(|v| v.as_bool())
-    .unwrap_or(false);
-    if still {
-        page.click(Point::new(at.0, at.1)).await.ok();
-    }
+    .unwrap_or(false)
 }
 
 /// Empty the focused field if it still holds text, as a person would with
@@ -4204,13 +4213,95 @@ async fn click_label(page: &Page, css: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// The `type` tool's result line: what it did and, when the field doesn't
+/// read back as typed, what it holds instead. A field left empty, or one
+/// that kept none of the text, is an error: the typing didn't take.
+fn typed_report(typed: &Typed, text: &str, target: &str, clear: bool) -> Result<String> {
+    let n = text.chars().count();
+    let Some(holds) = &typed.holds else {
+        return Ok(format!("Typed {n} chars into {target}"));
+    };
+    if typed.set {
+        return Ok(format!("Set {target} to {holds:?}"));
+    }
+    let as_typed = if clear {
+        holds == text
+    } else {
+        holds.ends_with(text)
+    };
+    if as_typed {
+        return Ok(format!("Typed {n} chars into {target}"));
+    }
+    // Compare letters and digits only, so a mask's spaces and brackets
+    // don't count as lost text: "(555) 123-4567" kept all of 5551234567.
+    let core = |s: &str| {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+    };
+    let kept = core(holds).contains(&core(text));
+    if holds.is_empty() || (!kept && !text.trim().is_empty() && core(holds).is_empty()) {
+        bail!("typed {n} chars into {target}, but it is empty afterwards: the page dropped them");
+    }
+    if typed.secret {
+        return Ok(format!(
+            "Typed {n} chars into {target}; it now holds {} chars",
+            holds.chars().count()
+        ));
+    }
+    let shown = clamp_chars(holds, 120);
+    if kept {
+        Ok(format!(
+            "Typed {n} chars into {target}; the page formatted it as {shown:?}"
+        ))
+    } else {
+        Ok(format!(
+            "Typed {n} chars into {target}, but it holds {shown:?}: the page changed or dropped some of the text"
+        ))
+    }
+}
+
+/// `s` cut to `max` characters, with an ellipsis when cut.
+fn clamp_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// What a field holds after [`type_into`]: its text, or `None` when it
+/// can't be read (a widget that keeps no value). `secret` for a password
+/// field, whose text is never echoed.
+struct Typed {
+    holds: Option<String>,
+    secret: bool,
+    /// Set as a value instead of typed: a date, time, range or color input.
+    set: bool,
+}
+
 /// Optionally clear a field, focus and click it, and type `text` into it:
 /// the shared path of the `type` tool and `act`'s value typing. The click
 /// is best effort (a field can be focusable but covered); focus is not.
-async fn type_into(page: &Page, css: &str, text: &str, clear: bool, delay_ms: u64) -> Result<()> {
+/// Date, time, range and color inputs take no typed text (the browser
+/// splits a date into boxes whose order depends on the locale, and a range
+/// has no text at all), so their value is set the way the page's own
+/// script would, with the events it listens for. Returns what the field
+/// holds afterwards, so a caller can tell typing that didn't take.
+async fn type_into(
+    page: &Page,
+    css: &str,
+    text: &str,
+    clear: bool,
+    delay_ms: u64,
+) -> Result<Typed> {
     focus_element(page, css)
         .await
         .with_context(|| format!("locating {css}"))?;
+    if let Some(typed) = set_special_value(page, css, text).await? {
+        return Ok(typed);
+    }
     if let Ok((x, y)) = element_center(page, css).await {
         page.click(Point::new(x, y)).await.ok();
     }
@@ -4221,7 +4312,88 @@ async fn type_into(page: &Page, css: &str, text: &str, clear: bool, delay_ms: u6
     }
     type_chars(page, text, delay_ms)
         .await
-        .with_context(|| format!("typing into {css}"))
+        .with_context(|| format!("typing into {css}"))?;
+    Ok(field_holds(page, css).await)
+}
+
+/// Read what a field holds: an input's or textarea's value, an editable
+/// element's text.
+async fn field_holds(page: &Page, css: &str) -> Typed {
+    let decl = format!(
+        "function() {{ {deep} const h = __bsDeep({sel}); if (!h) return null; const el = h.el; \
+         const secret = el.type === 'password'; \
+         if ('value' in el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return {{ v: String(el.value), secret: secret }}; \
+         if (el.isContentEditable) return {{ v: String(el.innerText || ''), secret: false }}; \
+         return null; }}",
+        deep = jev::DEEP_FIND_JS,
+        sel = serde_json::to_string(css).unwrap_or_else(|_| "''".to_string()),
+    );
+    let v = iso_eval_function(page, &decl).await.unwrap_or(Value::Null);
+    Typed {
+        holds: v.get("v").and_then(Value::as_str).map(str::to_string),
+        secret: v.get("secret").and_then(Value::as_bool).unwrap_or(false),
+        set: false,
+    }
+}
+
+/// Set a date, time, datetime-local, month, week, range or color input to
+/// `text` through the input's own value setter (which frameworks like React
+/// watch), then fire input and change. Dates also take 03/14/2026 and
+/// "March 14, 2026", times 2:30 PM. `None` for any other field; an error
+/// when the input refuses the value, naming the format it takes.
+async fn set_special_value(page: &Page, css: &str, text: &str) -> Result<Option<Typed>> {
+    let decl = format!(
+        "function() {{ {deep} const h = __bsDeep({sel}); if (!h) return null; const el = h.el; \
+         const kinds = ['date', 'time', 'datetime-local', 'month', 'week', 'range', 'color']; \
+         if (el.tagName !== 'INPUT' || kinds.indexOf(el.type) < 0) return null; \
+         const t = {text}.trim(), pad = function(n) {{ return String(n).padStart(2, '0'); }}; \
+         const ymd = function(d) {{ return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }}; \
+         const time = function(s) {{ const m = s.match(/^(\\d{{1,2}}):(\\d{{2}})(?::(\\d{{2}}))?\\s*([ap])\\.?m?\\.?$/i); \
+           if (!m) return s; let hr = Number(m[1]) % 12; if (/p/i.test(m[4])) hr += 12; \
+           return pad(hr) + ':' + m[2] + (m[3] ? ':' + m[3] : ''); }}; \
+         const date = function(s) {{ if (/^\\d{{4}}-\\d{{2}}-\\d{{2}}$/.test(s)) return s; \
+           const us = s.match(/^(\\d{{1,2}})[\\/.-](\\d{{1,2}})[\\/.-](\\d{{4}})$/); \
+           if (us) return us[3] + '-' + pad(us[1]) + '-' + pad(us[2]); \
+           const d = new Date(s); return isNaN(d) ? s : ymd(d); }}; \
+         let v = t; \
+         if (el.type === 'date') v = date(t); \
+         else if (el.type === 'time') v = time(t); \
+         else if (el.type === 'datetime-local') {{ const m = t.match(/^(.+?)[T ,]+(\\d{{1,2}}:\\d{{2}}.*)$/); if (m) v = date(m[1]) + 'T' + time(m[2]); }} \
+         else if (el.type === 'month' && /^\\d{{1,2}}\\/\\d{{4}}$/.test(t)) {{ const p = t.split('/'); v = p[1] + '-' + pad(p[0]); }} \
+         const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; \
+         set.call(el, v); \
+         el.dispatchEvent(new Event('input', {{ bubbles: true }})); \
+         el.dispatchEvent(new Event('change', {{ bubbles: true }})); \
+         return {{ kind: el.type, v: String(el.value), min: el.min, max: el.max }}; }}",
+        deep = jev::DEEP_FIND_JS,
+        sel = serde_json::to_string(css).unwrap_or_else(|_| "''".to_string()),
+        text = serde_json::to_string(text).unwrap_or_else(|_| "''".to_string()),
+    );
+    let v = iso_eval_function(page, &decl).await?;
+    let Some(kind) = v.get("kind").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let holds = v
+        .get("v")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if holds.is_empty() {
+        let format = match kind {
+            "date" => "a date such as 2026-03-14 or 03/14/2026",
+            "time" => "a time such as 14:30 or 2:30 PM",
+            "datetime-local" => "a date and time such as 2026-03-14T14:30",
+            "month" => "a month such as 2026-03",
+            "week" => "a week such as 2026-W11",
+            _ => "a value it accepts",
+        };
+        bail!("the {kind} input {css} didn't take {text:?}: it wants {format}");
+    }
+    Ok(Some(Typed {
+        holds: Some(holds),
+        secret: false,
+        set: true,
+    }))
 }
 
 /// Mark a field `act` typed into, so the rest of the run doesn't offer it
@@ -4553,6 +4725,11 @@ struct AfterAction {
     /// answered since the last action, each accepted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     answered: Vec<String>,
+    /// Fields the page rejected during the action, each with its message:
+    /// the browser's own form check (a required field left empty), or the
+    /// page marking them invalid. The form wasn't sent while any remain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rejected: Vec<String>,
     /// The options of a dropdown or list open after the action (the one the
     /// focused field controls, else any showing), up to 50: pick one with
     /// select_option or click.
@@ -4561,6 +4738,50 @@ struct AfterAction {
 }
 
 const AFTER_ACTION_SETTLE_MS: u64 = 250;
+
+/// Before an action: start noting fields the page rejects during it (see
+/// [`rejected_fields`]), and return the URL, for [`after_action`].
+async fn before_action(page: &Page) -> Option<String> {
+    let arm = "function() { var g = globalThis; g.__bsInvalid = []; \
+       if (!g.__bsInvalidOn) { g.__bsInvalidOn = true; \
+         document.addEventListener('invalid', function(e) { (g.__bsInvalid || (g.__bsInvalid = [])).push(e.target); }, true); } \
+       g.__bsWasInvalid = new Set(Array.from(document.querySelectorAll('[aria-invalid=true]'))); \
+       return true; }";
+    let _ = iso_eval_function(page, arm).await;
+    page_url(page).await
+}
+
+/// Fields the page rejected during the action [`before_action`] started:
+/// those the browser's own form check failed (a required field left empty,
+/// an email without an @), with the message it shows, and those the page's
+/// script newly marked aria-invalid, with the error text tied to them. Up
+/// to 10.
+async fn rejected_fields(page: &Page) -> Vec<String> {
+    let decl = format!(
+        "function() {{ {desc} var g = globalThis, out = [], seen = new Set(); \
+         var text = function(n) {{ return n ? String(n.innerText || n.textContent || '').replace(/\\s+/g, ' ').trim() : ''; }}; \
+         var byIds = function(el, attr) {{ var root = el.getRootNode(); \
+           return (el.getAttribute(attr) || '').trim().split(/\\s+/).filter(Boolean) \
+             .map(function(id) {{ return text(root.getElementById ? root.getElementById(id) : document.getElementById(id)); }}) \
+             .filter(Boolean).join(' '); }}; \
+         var said = function(el) {{ var m = byIds(el, 'aria-errormessage') || byIds(el, 'aria-describedby'); \
+           for (var p = el.parentElement, i = 0; !m && p && i < 3; p = p.parentElement, i++) m = text(p.querySelector('[role=alert]')); \
+           return m.slice(0, 160); }}; \
+         (g.__bsInvalid || []).forEach(function(el) {{ if (seen.has(el)) return; seen.add(el); \
+           out.push(__bsDesc(el) + ': ' + (el.validationMessage || said(el) || 'invalid')); }}); \
+         if (g.__bsWasInvalid) Array.from(document.querySelectorAll('[aria-invalid=true]')).forEach(function(el) {{ \
+           if (g.__bsWasInvalid.has(el) || seen.has(el)) return; seen.add(el); \
+           out.push(__bsDesc(el) + ': ' + (said(el) || 'marked invalid')); }}); \
+         g.__bsInvalid = []; g.__bsWasInvalid = null; \
+         return out.slice(0, 10); }}",
+        desc = DESCRIBE_JS,
+    );
+    iso_eval_function(page, &decl)
+        .await
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
 
 async fn page_url(page: &Page) -> Option<String> {
     current_url_title(page).await.map(|(u, _)| u)
@@ -4657,6 +4878,7 @@ async fn after_action(
     tokio::time::sleep(Duration::from_millis(AFTER_ACTION_SETTLE_MS)).await;
     follow_focus(page).await;
     let answered = sessions.take_dialogs(session_id);
+    let rejected = rejected_fields(page).await;
     let decl = format!(
         "function() {{ {desc} {focused} \
          var dlg = Array.from(document.querySelectorAll('dialog[open], [role=dialog], [role=alertdialog], [aria-modal=true]')) \
@@ -4722,6 +4944,7 @@ async fn after_action(
         hit,
         focus_trail: None,
         answered,
+        rejected,
     }
 }
 
@@ -4749,6 +4972,14 @@ impl AfterAction {
         }
         for d in &self.answered {
             s.push_str(&format!(" The page asked ({d}) and it was accepted."));
+        }
+        if !self.rejected.is_empty() {
+            s.push_str(&format!(
+                " The page rejected {} field{}: {}.",
+                self.rejected.len(),
+                plural(self.rejected.len()),
+                self.rejected.join("; ").trim_end_matches('.')
+            ));
         }
         if let Some(o) = &self.options {
             s.push_str(&format!(
@@ -5594,7 +5825,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "click",
-            "Click in the session's active tab with real CDP mouse input (trusted events — fires handlers reliably and grants user activation, so it can open popups/new tabs that a JS click can't). Pass a CSS `selector` to click the first match's center, after waiting up to `timeout` for it and scrolling it into view. Plain language works too: a `jev:` prefix (e.g. `jev: the login button`) goes straight to the Jev decision model, and with TYPESAFE_API_KEY configured on the server any selector that matches nothing as CSS is retried as a plain-language goal the same way — the server sends the page's interactive elements to Jev, which picks one (on low confidence or any Jev problem it errors instead of guessing, so nothing is clicked blindly; elements are picked from the page as it is at call time, so wait_for content first if the page is still loading). Or pass both `x` and `y` to click viewport coordinates, which are used only when there is no selector. Don't use evaluate to click: synthetic JS clicks can be ignored by pages. Coordinates outside the viewport are not rejected; the click lands on nothing. A click can submit forms or trigger purchases, like a real user's. Returns a confirmation naming what was clicked. Fails if the selector matches nothing within `timeout` and Jev can't (or isn't configured to) resolve it, or if neither a selector nor both coordinates are given.",
+            "Click in the session's active tab with real CDP mouse input (trusted events — fires handlers reliably and grants user activation, so it can open popups/new tabs that a JS click can't). Pass a CSS `selector` to click the first match's center, after waiting up to `timeout` for it and scrolling it into view. Plain language works too: a `jev:` prefix (e.g. `jev: the login button`) goes straight to the Jev decision model, and with TYPESAFE_API_KEY configured on the server any selector that matches nothing as CSS is retried as a plain-language goal the same way — the server sends the page's interactive elements to Jev, which picks one (on low confidence or any Jev problem it errors instead of guessing, so nothing is clicked blindly; elements are picked from the page as it is at call time, so wait_for content first if the page is still loading). Or pass both `x` and `y` to click viewport coordinates, which are used only when there is no selector. Don't use evaluate to click: synthetic JS clicks can be ignored by pages. Coordinates outside the viewport are not rejected; the click lands on nothing. A click can submit forms or trigger purchases, like a real user's. Returns a confirmation naming what was clicked, and `rejected`: fields the page refused during the click with their messages (a required field left empty, or the page's own error text), when a form wasn't sent. Fails if the selector matches nothing within `timeout` and Jev can't (or isn't configured to) resolve it, or if neither a selector nor both coordinates are given.",
             object_schema(
                 &[
                     session_id,
@@ -5715,7 +5946,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "type",
-            "Type text into the first element matching a CSS selector in the session's active tab: waits up to `timeout` for it, clicks it to focus, then sends real key events for each character, so the page's input handlers fire. Plain language works too: a `jev:` prefix (e.g. `jev: the email field`) goes straight to the Jev decision model, and with TYPESAFE_API_KEY set on the server a selector that matches nothing as CSS is retried as a plain-language goal — Jev picks the input from the page's interactive elements (it errors rather than guesses); the text itself always comes from you. Use press_key afterwards for Enter or Tab, and press_key alone for single keys. `clear` empties the field first; without it, text is appended. `delay` paces the characters for pages that react to typing speed. It doesn't check that the element is editable: typing into a button or plain text reports success but changes nothing, so target an input, textarea or contenteditable element. Returns how many characters were typed. Fails if the selector matches nothing within `timeout` and Jev can't (or isn't configured to) resolve it.",
+            "Type text into the first element matching a CSS selector in the session's active tab: waits up to `timeout` for it, clicks it to focus, then sends real key events for each character, so the page's input handlers fire. Plain language works too: a `jev:` prefix (e.g. `jev: the email field`) goes straight to the Jev decision model, and with TYPESAFE_API_KEY set on the server a selector that matches nothing as CSS is retried as a plain-language goal — Jev picks the input from the page's interactive elements (it errors rather than guesses); the text itself always comes from you. Use press_key afterwards for Enter or Tab, and press_key alone for single keys. `clear` empties the field first; without it, text is appended. `delay` paces the characters for pages that react to typing speed. A date, time, datetime-local, month, week, range or color input takes no typed text, so its value is set directly with the events the page listens for: dates as 2026-03-14 or 03/14/2026, times as 14:30 or 2:30 PM, a range as a number. Afterwards it reads the field back: it reports text the page reformatted (a phone mask), and fails when the field is empty afterwards (the page dropped the text). Target an input, textarea or contenteditable element; typing into a button reports success but changes nothing. Returns how many characters were typed, or the value set. Fails if the selector matches nothing within `timeout` and Jev can't (or isn't configured to) resolve it.",
             object_schema(
                 &[
                     session_id,
