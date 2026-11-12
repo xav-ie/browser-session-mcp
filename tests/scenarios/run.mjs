@@ -722,6 +722,41 @@ const SCENARIOS = [
     },
   },
   {
+    id: "icon-hints",
+    about: "Unnamed icon buttons are described by what their markup says the icon shows, in snapshots and action results",
+    async run({ call, raw, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/icons.html` });
+      const snap = text(await raw("take_snapshot", { sessionId }));
+      // Chrome names a button by its SVG's <title> itself.
+      expect(snap.includes('button "Delete"'), `an SVG title names it: ${snap}`);
+      for (const hint of ["archive", "share", "close", "star"]) {
+        expect(snap.includes(`button (icon "${hint}")`), `the snapshot hints ${hint}: ${snap}`);
+      }
+      // An icon font's glyph is no name: the hint goes after it.
+      expect(/button "[^"\w]*" \(icon "pen"\)/.test(snap), `a glyph gets a hint too: ${snap}`);
+      expect(snap.includes('button "Reply"') && !snap.includes('(icon "reply")'), `a named button keeps its name: ${snap}`);
+      const clicked = await call("click", { sessionId, selector: "#actions button:nth-child(2)" });
+      expect(clicked.focused?.includes('(icon "archive")'), `the click result hints it: ${JSON.stringify(clicked)}`);
+    },
+  },
+  {
+    id: "icon-buttons",
+    needs: "TYPESAFE_API_KEY",
+    about: "Plain language picks an unnamed icon button by what its icon shows, and act fails when the page drops a typed value",
+    async run({ call, raw, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/icons.html` });
+      await call("click", { sessionId, selector: "the delete button" });
+      await call("click", { sessionId, selector: "the share button" });
+      const clicked = await js(call, sessionId, "window.clicked.join()");
+      expect(clicked === "0,3", `delete then share: ${clicked}`);
+      await call("navigate", { sessionId, url: `${SITE}/fields.html` });
+      const r = await raw("act", { sessionId, goal: "Enter the code", values: { code: "abc" }, maxSteps: 2 });
+      expect(r.isError && text(r).includes("`code`") && text(r).includes("empty afterwards") && !text(r).includes("abc"), `a dropped value: ${text(r).slice(0, 300)}`);
+    },
+  },
+  {
     id: "radio-questions",
     needs: "TYPESAFE_API_KEY",
     about: "Plain language finds radio questions that only their question text tells apart",

@@ -1,3 +1,58 @@
+/// `__bsIcon(el)`: what an icon-only control shows, read from the markup
+/// around the icon when the page gives it no name: an SVG's `<title>`, an
+/// image's alt text or file name, an SVG sprite's `<use href>`, attributes
+/// such as `data-icon` or `data-testid`, and icon library classes
+/// (`fa-trash`, `lucide-x`, `bi-pencil`). Returns '' when nothing names it.
+/// A hint, not a name: descriptions show it as `(icon "trash")`. A macro so
+/// the scripts that describe elements (Jev's extraction, action results,
+/// snapshots) paste the same text in at compile time.
+macro_rules! icon_hint_js {
+    () => {
+        r#"var __bsIcon = function(el) {
+  if (!el || !el.querySelector) return '';
+  var NOISE = /^(icons?|ico|svg|img|image|fa[srlbdtk]?|fa(solid|regular|light|thin|duotone|brands)|solid|regular|outline|outlined|filled|fill|line|rounded|sharp|mini|micro|bi|lucide|mdi|ti|tabler|ri|bxs?|ph|feather|octicon|heroicons?|glyphicon|material|symbols|button|btn|action|sm|md|lg|xl|xs|\d+(px)?|w\d+|h\d+)$/;
+  var clean = function(s) {
+    s = String(s || '').replace(/^.*[#\/]/, '').replace(/\.(svg|png|gif|webp|jpe?g|ico)(\?.*)?$/i, '')
+      .replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+    var words = s.split(/[\s_\-.:]+/).filter(function(w) { return w && !NOISE.test(w); });
+    s = words.join(' ').trim();
+    return s.length <= 30 ? s : '';
+  };
+  var t = el.querySelector('svg title') || (el.tagName === 'svg' ? el.querySelector('title') : null);
+  if (t && t.textContent.trim()) return t.textContent.trim().slice(0, 40);
+  var img = el.tagName === 'IMG' ? el : el.querySelector('img');
+  if (img) {
+    if (String(img.alt || '').trim()) return img.alt.trim().slice(0, 40);
+    var fromSrc = clean(img.getAttribute('src'));
+    if (fromSrc) return fromSrc;
+  }
+  var use = el.querySelector('use');
+  if (use) {
+    var fromUse = clean(use.getAttribute('href') || use.getAttribute('xlink:href'));
+    if (fromUse) return fromUse;
+  }
+  var nodes = [el].concat(Array.prototype.slice.call(el.querySelectorAll('*'), 0, 12));
+  var attrs = ['data-icon', 'data-testid', 'data-test-id', 'data-test', 'data-qa', 'data-action', 'data-cy'];
+  for (var i = 0; i < nodes.length; i++) {
+    for (var a = 0; a < attrs.length; a++) {
+      var fromAttr = clean(nodes[i].getAttribute(attrs[a]));
+      if (fromAttr) return fromAttr;
+    }
+  }
+  var LIB = /^(fa|bi|lucide|mdi|ti|ri|bxs?|ph|icon|icons|glyphicon|octicon|feather|heroicon|svg-icon|ico)[-_]|[-_]icon$/i;
+  for (var j = 0; j < nodes.length; j++) {
+    var cls = String(nodes[j].getAttribute('class') || '').split(/\s+/);
+    for (var k = 0; k < cls.length; k++) {
+      if (!LIB.test(cls[k])) continue;
+      var fromClass = clean(cls[k]);
+      if (fromClass) return fromClass;
+    }
+  }
+  return '';
+};"#
+    };
+}
+
 pub mod attach_guard;
 pub mod child_capture;
 pub mod chrome;

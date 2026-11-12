@@ -46,9 +46,19 @@ pub async fn snapshot(page: &Page) -> Result<String> {
         .flatten()
         .map(|f| format!("{}:{}", page.target_id().as_ref(), f.as_ref()))
         .unwrap_or_default();
+    // Controls with no name (an icon button): what their icon shows.
+    let unnamed: Vec<_> = nodes
+        .iter()
+        .filter(|n| !n.ignored && is_control(n) && !says_anything(name_of(n)))
+        .filter_map(|n| n.backend_dom_node_id)
+        .take(MAX_ICON_HINTS)
+        .collect();
+    let icons = crate::server::icon_hints(page, &unnamed).await;
     let ctx = Frames {
         frames: &frames,
         trees: &trees,
+        top: &top,
+        icons: &icons,
     };
     let mut lines = Vec::new();
     render(nodes, &top, &ctx, 0, &mut lines);
@@ -62,6 +72,39 @@ pub async fn snapshot(page: &Page) -> Result<String> {
 struct Frames<'a> {
     frames: &'a [crate::frames::Frame],
     trees: &'a HashMap<String, Vec<AxNode>>,
+    /// The top document's key, and icon hints for its unnamed controls by
+    /// backend node id (ids are only unique within one document's tree).
+    top: &'a str,
+    icons: &'a HashMap<i64, String>,
+}
+
+/// Most unnamed controls a snapshot looks up icon hints for.
+const MAX_ICON_HINTS: usize = 60;
+
+/// Roles a person acts on, whose unnamed instances get an icon hint.
+fn is_control(node: &AxNode) -> bool {
+    matches!(
+        node.role
+            .as_ref()
+            .and_then(|v| v.value.as_ref())
+            .and_then(|v| v.as_str()),
+        Some("button" | "link" | "menuitem" | "tab" | "switch" | "checkbox" | "radio")
+    )
+}
+
+/// Whether a name has a letter or digit in it: an icon font's glyph
+/// ("✎", or a private-use character) names nothing a person could say.
+fn says_anything(name: &str) -> bool {
+    name.chars().any(char::is_alphanumeric)
+}
+
+/// A node's accessible name, or "".
+fn name_of(node: &AxNode) -> &str {
+    node.name
+        .as_ref()
+        .and_then(|v| v.value.as_ref())
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
 }
 
 /// One document's tree (`key` names its frame), with each frame inside it
@@ -79,7 +122,7 @@ fn render(nodes: &[AxNode], key: &str, ctx: &Frames, depth: usize, out: &mut Vec
         .filter_map(|f| Some((f.owner?, f)))
         .collect();
     for root in nodes.iter().filter(|n| !has_parent.contains(&n.node_id)) {
-        walk(root, &by_id, &owners, ctx, depth, out);
+        walk(root, &by_id, &owners, ctx, key, depth, out);
     }
 }
 
@@ -88,11 +131,16 @@ fn walk<'a>(
     by_id: &HashMap<AxNodeId, &'a AxNode>,
     owners: &HashMap<i64, &crate::frames::Frame>,
     ctx: &Frames,
+    key: &str,
     depth: usize,
     out: &mut Vec<String>,
 ) {
     if !node.ignored {
-        if let Some(line) = format_node(node, depth) {
+        let icon = node
+            .backend_dom_node_id
+            .filter(|_| key == ctx.top)
+            .and_then(|b| ctx.icons.get(b.inner()));
+        if let Some(line) = format_node(node, depth, icon.map(String::as_str)) {
             out.push(line);
         }
     }
@@ -109,13 +157,13 @@ fn walk<'a>(
     if let Some(child_ids) = node.child_ids.as_ref() {
         for child_id in child_ids {
             if let Some(child) = by_id.get(child_id) {
-                walk(child, by_id, owners, ctx, next_depth, out);
+                walk(child, by_id, owners, ctx, key, next_depth, out);
             }
         }
     }
 }
 
-fn format_node(node: &AxNode, depth: usize) -> Option<String> {
+fn format_node(node: &AxNode, depth: usize, icon: Option<&str>) -> Option<String> {
     let role = node
         .role
         .as_ref()
@@ -150,10 +198,14 @@ fn format_node(node: &AxNode, depth: usize) -> Option<String> {
         return None;
     }
     let indent = "  ".repeat(depth);
-    let name_part = if name_str.is_empty() {
+    let named = if name_str.is_empty() {
         String::new()
     } else {
         format!(" \"{name_str}\"")
+    };
+    let name_part = match icon.filter(|_| !says_anything(&name_str)) {
+        Some(icon) => format!("{named} (icon \"{}\")", escape_name(icon)),
+        None => named,
     };
     Some(format!("{indent}{role}{name_part}{value_str}{level_str}"))
 }

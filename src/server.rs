@@ -1324,7 +1324,14 @@ impl BrowserSessionServer {
                         if let Some((k, text)) =
                             key.and_then(|k| values.iter().find(|(vk, _)| *vk == k))
                         {
-                            type_into(&page, &css, text, true, 0).await?;
+                            let typed = type_into(&page, &css, text, true, 0).await?;
+                            // Only whether it took: a value's text never
+                            // goes into the result, where a model reads it.
+                            if typed.holds.as_deref() == Some("") && !text.is_empty() {
+                                bail!(
+                                    "typed the value `{k}` into {css}, but it is empty afterwards: the page dropped it"
+                                );
+                            }
                             mark_typed(&page, &css).await;
                             return Ok(("type".to_string(), Some(k.clone()), None));
                         }
@@ -3015,6 +3022,74 @@ pub(crate) async fn iso_eval_top(page: &Page, function_declaration: &str) -> Res
         .ok_or_else(|| anyhow!("the new isolated world lost its marker"))?
 }
 
+/// `__bsIcon` (see `icon_hint_js!`) on the top document's elements with
+/// these backend node ids, in this crate's isolated world: what each
+/// unnamed control's icon shows, for the snapshot. Ids with no hint are
+/// left out. Best effort: an id that no longer resolves is skipped.
+pub(crate) async fn icon_hints(
+    page: &Page,
+    ids: &[chromiumoxide::cdp::browser_protocol::dom::BackendNodeId],
+) -> std::collections::HashMap<i64, String> {
+    use chromiumoxide::cdp::browser_protocol::dom::ResolveNodeParams;
+    let mut out = std::collections::HashMap::new();
+    if ids.is_empty()
+        || iso_eval_top(page, "function() { return true; }")
+            .await
+            .is_err()
+    {
+        return out;
+    }
+    let Some(key) = page
+        .mainframe()
+        .await
+        .ok()
+        .flatten()
+        .map(|f| format!("{}:{}", page.target_id().as_ref(), f.as_ref()))
+    else {
+        return out;
+    };
+    let Some(world) = ISO_WORLDS
+        .lock()
+        .expect("iso worlds lock")
+        .get(&key)
+        .cloned()
+    else {
+        return out;
+    };
+    let decl = concat!(
+        "function() { ",
+        icon_hint_js!(),
+        " return __bsIcon(this); }"
+    );
+    let hints = futures::future::join_all(ids.iter().map(|id| {
+        let world = world.clone();
+        async move {
+            let node = page
+                .execute(
+                    ResolveNodeParams::builder()
+                        .backend_node_id(*id)
+                        .execution_context_id(world.context_id)
+                        .build(),
+                )
+                .await
+                .ok()?;
+            let object = node.result.object.object_id.clone()?;
+            let call = CallFunctionOnParams::builder()
+                .function_declaration(decl)
+                .object_id(object)
+                .return_by_value(true)
+                .build()
+                .ok()?;
+            let r = page.execute(call).await.ok()?;
+            let hint = r.result.result.value.as_ref()?.as_str()?.to_string();
+            (!hint.is_empty()).then_some((*id.inner(), hint))
+        }
+    }))
+    .await;
+    out.extend(hints.into_iter().flatten());
+    out
+}
+
 /// One cached isolated world: its context id and the marker set inside it
 /// (a random global name, so even a check that lands in the page's main
 /// world reads a property no page script can know to trap).
@@ -4596,20 +4671,24 @@ struct Hit {
     dead: bool,
 }
 
-const DESCRIBE_JS: &str = r#"var __bsDesc = function(el) {
+const DESCRIBE_JS: &str = concat!(
+    icon_hint_js!(),
+    r#"var __bsDesc = function(el) {
   if (!el || !el.tagName) return 'nothing';
   var t = el.tagName.toLowerCase();
   if (el.id) t += '#' + el.id;
   else if (typeof el.className === 'string' && el.className.trim()) t += '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.');
   var label = String(el.getAttribute('aria-label') || el.innerText || el.value || el.getAttribute('placeholder') || '').replace(/\s+/g, ' ').trim();
   if (label) t += ' "' + (label.length > 50 ? label.slice(0, 49) + '...' : label) + '"';
+  if (!/[\p{L}\p{N}]/u.test(label)) { var icon = __bsIcon(el); if (icon) t += ' (icon "' + icon + '")'; }
   // Inside a web component (a popup rendered in a shadow root), name its
   // host on the page too: that is what a page script can find and remove.
   var host = el.getRootNode && el.getRootNode().host;
   while (host && host.getRootNode().host) host = host.getRootNode().host;
   if (host) t += ' (inside ' + host.tagName.toLowerCase() + (host.id ? '#' + host.id : '') + ')';
   return t;
-};"#;
+};"#
+);
 
 async fn hit_at(page: &Page, (x, y): (f64, f64), target: Option<&str>) -> Result<Hit> {
     let decl = format!(
@@ -5754,7 +5833,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "take_snapshot",
-            "Return the accessibility tree of the session's active tab as indented text: each node's role and name (links, buttons, headings, form fields and their labels, and current values), nested by structure. Use it to find what's on the page and what to click or type into, far more cheaply than take_screenshot; use take_screenshot when visual layout matters, and evaluate for data not shown as text. It reads the page without changing it and returns the whole tree, so a large page gives long output.",
+            "Return the accessibility tree of the session's active tab as indented text: each node's role and name (links, buttons, headings, form fields and their labels, and current values), nested by structure. A control the page gives no name shows what its icon is, as `button (icon \"trash\")`, read from the icon's markup. Use it to find what's on the page and what to click or type into, far more cheaply than take_screenshot; use take_screenshot when visual layout matters, and evaluate for data not shown as text. It reads the page without changing it and returns the whole tree, so a large page gives long output.",
             object_schema(&[session_id], &["sessionId"]),
             read_only(),
         ),
