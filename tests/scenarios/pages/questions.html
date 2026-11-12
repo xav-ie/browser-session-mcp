@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Questions</title>
+<style>
+  body { font: 15px system-ui, sans-serif; margin: 2rem auto; max-width: 640px; }
+  .question { margin: 1.4rem 0; list-style: none; position: relative; }
+  .question-text { font-weight: 600; margin-bottom: .3rem; }
+  select, .loc input { width: 100%; padding: 6px; }
+  .loc ul { position: absolute; left: 0; right: 0; margin: 0; padding: 0; list-style: none; background: #fff; border: 1px solid #999; z-index: 2; }
+  .loc li { padding: 5px 8px; }
+  .drop { border: 2px dashed #999; padding: 1rem; text-align: center; }
+  .drop input { display: none; }
+  .file-name { text-transform: uppercase; }
+  /* Kept on the page, one pixel big, so the browser still opens it. */
+  .drop input.tiny { display: block; position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+</style>
+</head>
+<body>
+<h1>Apply</h1>
+<!-- Questions as many job boards draw them: the question is a div or a
+     <label> that names no id, so no field has a label of its own. -->
+<ul>
+  <li class="question">
+    <div class="question-text">Which school did you last attend? Pick "Other" if it isn't listed.</div>
+    <div><select name="cards[a1][field0]" id="school-select">
+      <option>Select...</option><option>Arizona State University</option><option>Boston College</option>
+      <option>Boston University</option><option>Northeastern University</option><option>Other</option>
+    </select></div>
+  </li>
+  <li class="question">
+    <div class="question-text">How did you hear about this job?</div>
+    <div><select name="cards[a2][field0]" id="source-select">
+      <option>Select...</option><option>A friend</option><option>LinkedIn</option><option>Job board</option><option>Other</option>
+    </select></div>
+  </li>
+  <li class="question">
+    <div class="question-text">Will you need a visa to work here?</div>
+    <div><select name="cards[a3][field0]" id="visa-select"><option>Select...</option><option>Yes</option><option>No</option></select></div>
+  </li>
+  <li class="question">
+    <div class="question-text">Are you willing to relocate?</div>
+    <div><select name="cards[a4][field0]" id="move-select"><option>Select...</option><option>Yes</option><option>No</option></select></div>
+  </li>
+  <li class="question loc">
+    <label for="location">Where are you located?</label>
+    <div><input placeholder="Start typing..." role="combobox" aria-autocomplete="list" aria-expanded="false" autocomplete="off" id="loc-input">
+      <ul role="listbox" id="loc-list" hidden></ul></div>
+  </li>
+  <li class="question">
+    <span class="question-text" id="cv-heading">Resume</span>
+    <div class="drop" id="cv-drop"><label for="cv-input">Upload a file</label> or drag and drop here
+      <input type="file" id="cv-input" accept=".pdf,.doc,.docx">
+      <div class="file-name" id="cv-name"></div></div>
+  </li>
+  <li class="question">
+    <span class="question-text" id="letter-heading">Cover letter</span>
+    <div class="drop"><input type="file" id="letter-input" class="tiny">
+      <label for="letter-input" role="button" tabindex="0" aria-describedby="letter-heading">Choose file</label> or drag and drop here</div>
+  </li>
+</ul>
+<script>
+const values = (window.formValues = {});
+for (const id of ["school-select", "source-select", "visa-select", "move-select"]) {
+  document.getElementById(id).addEventListener("change", (e) => { values[id] = e.target.value; });
+}
+
+// A location search that offers matches only once something is typed.
+const places = ["Austin, Texas, United States", "Boston, Massachusetts, United States", "Boston, Lincolnshire, United Kingdom", "Denver, Colorado, United States"];
+const input = document.getElementById("loc-input"), list = document.getElementById("loc-list");
+const show = () => {
+  const q = input.value.trim().toLowerCase();
+  list.replaceChildren();
+  const hits = q ? places.filter((p) => p.toLowerCase().includes(q)) : [];
+  for (const p of hits) {
+    const li = document.createElement("li");
+    li.setAttribute("role", "option");
+    li.textContent = p;
+    li.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      values.location = input.value = p;
+      list.hidden = true;
+      input.setAttribute("aria-expanded", "false");
+    });
+    list.append(li);
+  }
+  list.hidden = !hits.length;
+  input.setAttribute("aria-expanded", String(!!hits.length));
+};
+input.addEventListener("input", show);
+input.addEventListener("blur", () => { list.hidden = true; });
+
+document.getElementById("letter-input").addEventListener("change", (e) => { values.letter = e.target.files[0]?.name; });
+
+// The file name shows up once the upload finishes, in capitals.
+document.getElementById("cv-input").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  setTimeout(() => {
+    values.cv = f.name;
+    document.getElementById("cv-name").textContent = f.name;
+  }, 700);
+});
+</script>
+</body>
+</html>

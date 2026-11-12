@@ -515,6 +515,44 @@ const SCENARIOS = [
     },
   },
   {
+    id: "late-file-name",
+    about: "upload_file sees a file name the page shows only once its upload finishes, in capitals",
+    async run({ call, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/questions.html` });
+      const r = await call("upload_file", { sessionId, selector: "#cv-drop", content: Buffer.from("%PDF-1.4\n").toString("base64"), name: "My CV.pdf" });
+      expect(r.into.startsWith("input#cv-input") && r.pageShowsName, `it saw the name: ${JSON.stringify(r)}`);
+    },
+  },
+  {
+    id: "question-labels",
+    needs: "TYPESAFE_API_KEY",
+    about: "Plain language finds fields by the question beside them when the page links no label to them",
+    async run({ call, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/questions.html` });
+      const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
+      const school = await call("select_option", { sessionId, selector: "Which school did you last attend?", option: "Boston University" });
+      const source = await call("select_option", { sessionId, selector: "How did you hear about this job?", option: "LinkedIn" });
+      // Two Yes/No dropdowns only their questions tell apart.
+      await call("select_option", { sessionId, selector: "Are you willing to relocate?", option: "Yes" });
+      await call("select_option", { sessionId, selector: "Will you need a visa to work here?", option: "No" });
+      const yn = await values();
+      expect(yn["move-select"] === "Yes" && yn["visa-select"] === "No", `yes/no: ${JSON.stringify(yn)}`);
+      const place = await call("select_option", { sessionId, selector: "Where are you located?", option: "Boston, Massachusetts" });
+      const cv = await call("upload_file", { sessionId, selector: "Resume", content: Buffer.from("%PDF-1.4\n").toString("base64"), name: "cv.pdf" });
+      // A one pixel input whose question reaches it only as its label's description.
+      const letter = await call("upload_file", { sessionId, selector: "Cover letter", content: Buffer.from("Dear team").toString("base64"), name: "letter.txt" });
+      expect(letter.into.startsWith("input#letter-input"), `cover letter: ${JSON.stringify(letter)}`);
+      await call("wait_for", { sessionId, expression: "window.formValues.cv", timeout: 3000 });
+      const v = await values();
+      expect(v["school-select"] === "Boston University", `school: ${JSON.stringify(school)}`);
+      expect(v["source-select"] === "LinkedIn", `source: ${JSON.stringify(source)}`);
+      expect(v.location === "Boston, Massachusetts, United States", `location: ${JSON.stringify(place)}`);
+      expect(v.cv === "cv.pdf" && cv.into.startsWith("input#cv-input"), `resume: ${JSON.stringify(cv)}`);
+    },
+  },
+  {
     id: "takeover-wait",
     needs: "TAKEOVER_BASE_URL",
     about: "await_human_takeover returns at its timeout, not finished and not expired",
