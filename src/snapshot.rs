@@ -8,6 +8,9 @@ use chromiumoxide::cdp::browser_protocol::accessibility::{
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Longest a snapshot waits for one frame's tree.
+const FRAME_TREE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub async fn snapshot(page: &Page) -> Result<String> {
     let result = page
         .execute(GetFullAxTreeParams::default())
@@ -17,30 +20,74 @@ pub async fn snapshot(page: &Page) -> Result<String> {
     if nodes.is_empty() {
         return Ok("(empty accessibility tree)".to_string());
     }
-
-    let by_id: HashMap<AxNodeId, &AxNode> = nodes.iter().map(|n| (n.node_id.clone(), n)).collect();
-    let has_parent: std::collections::HashSet<AxNodeId> = nodes
-        .iter()
-        .flat_map(|n| n.child_ids.iter().flatten().cloned())
-        .collect();
-    let roots: Vec<&AxNode> = nodes
-        .iter()
-        .filter(|n| !has_parent.contains(&n.node_id))
-        .collect();
-
+    // The tree above holds the top document only; each frame's own tree
+    // goes under its Iframe node, from another site or not.
+    // Frames with no size (tracking pixels) are left out, and the rest are
+    // read at once, each given at most FRAME_TREE_WAIT, so a page of ads
+    // can't stall the snapshot.
+    let frames = crate::frames::frames(page).await;
+    let read = futures::future::join_all(frames.iter().map(|f| async move {
+        if !crate::frames::has_size(f).await {
+            return None;
+        }
+        let v = tokio::time::timeout(FRAME_TREE_WAIT, crate::frames::ax_nodes(f))
+            .await
+            .ok()?
+            .ok()?;
+        let n = serde_json::from_value::<Vec<AxNode>>(v["nodes"].clone()).ok()?;
+        Some((f.key(), n))
+    }))
+    .await;
+    let trees: HashMap<String, Vec<AxNode>> = read.into_iter().flatten().collect();
+    let top = page
+        .mainframe()
+        .await
+        .ok()
+        .flatten()
+        .map(|f| format!("{}:{}", page.target_id().as_ref(), f.as_ref()))
+        .unwrap_or_default();
+    let ctx = Frames {
+        frames: &frames,
+        trees: &trees,
+    };
     let mut lines = Vec::new();
-    for root in roots {
-        walk(root, &by_id, 0, &mut lines);
-    }
+    render(nodes, &top, &ctx, 0, &mut lines);
     if lines.is_empty() {
         return Ok("(empty accessibility tree)".to_string());
     }
     Ok(lines.join("\n"))
 }
 
+/// The page's frames and their trees, for [`render`].
+struct Frames<'a> {
+    frames: &'a [crate::frames::Frame],
+    trees: &'a HashMap<String, Vec<AxNode>>,
+}
+
+/// One document's tree (`key` names its frame), with each frame inside it
+/// rendered under its Iframe node.
+fn render(nodes: &[AxNode], key: &str, ctx: &Frames, depth: usize, out: &mut Vec<String>) {
+    let by_id: HashMap<AxNodeId, &AxNode> = nodes.iter().map(|n| (n.node_id.clone(), n)).collect();
+    let has_parent: std::collections::HashSet<AxNodeId> = nodes
+        .iter()
+        .flat_map(|n| n.child_ids.iter().flatten().cloned())
+        .collect();
+    let owners: HashMap<i64, &crate::frames::Frame> = ctx
+        .frames
+        .iter()
+        .filter(|f| f.outer_key == key)
+        .filter_map(|f| Some((f.owner?, f)))
+        .collect();
+    for root in nodes.iter().filter(|n| !has_parent.contains(&n.node_id)) {
+        walk(root, &by_id, &owners, ctx, depth, out);
+    }
+}
+
 fn walk<'a>(
     node: &'a AxNode,
     by_id: &HashMap<AxNodeId, &'a AxNode>,
+    owners: &HashMap<i64, &crate::frames::Frame>,
+    ctx: &Frames,
     depth: usize,
     out: &mut Vec<String>,
 ) {
@@ -50,10 +97,19 @@ fn walk<'a>(
         }
     }
     let next_depth = if node.ignored { depth } else { depth + 1 };
+    if let Some(frame) = node
+        .backend_dom_node_id
+        .as_ref()
+        .and_then(|b| owners.get(b.inner()))
+    {
+        if let Some(inner) = ctx.trees.get(&frame.key()) {
+            render(inner, &frame.key(), ctx, next_depth, out);
+        }
+    }
     if let Some(child_ids) = node.child_ids.as_ref() {
         for child_id in child_ids {
             if let Some(child) = by_id.get(child_id) {
-                walk(child, by_id, next_depth, out);
+                walk(child, by_id, owners, ctx, next_depth, out);
             }
         }
     }

@@ -515,6 +515,67 @@ const SCENARIOS = [
     },
   },
   {
+    id: "cross-site-frame",
+    about: "An application form embedded from another site: snapshot, type, click, select_option, upload_file, press_key, wait_for and evaluate reach into the frame",
+    async run({ call, raw, session }) {
+      if (!LAN_SITE) throw new Skipped("no non-loopback address to serve the frame from");
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/embed.html` });
+      // The form from another origin, and beside it a tracking pixel from the
+      // same site, which holds nothing to act on.
+      await call("evaluate", {
+        sessionId,
+        expression: `(() => {
+          document.getElementById("embed").src = ${JSON.stringify(`${LAN_SITE}/apply.html`)};
+          const pixel = Object.assign(document.createElement("iframe"), { src: ${JSON.stringify(`${LAN_SITE}/home.html`)} });
+          pixel.style.cssText = "width:1px;height:1px;border:0;padding:0;position:absolute;left:0;top:0";
+          document.body.append(pixel);
+          return true;
+        })()`,
+      });
+      await call("wait_for", { sessionId, expression: "Object.keys(window.embedValues).length > 0", timeout: 5000 });
+      await call("wait_for", { sessionId, ms: 500 });
+      const values = () => js(call, sessionId, "JSON.stringify(window.embedValues)").then(JSON.parse);
+      const snap = text(await raw("take_snapshot", { sessionId }));
+      expect(snap.includes("Software Engineer application"), `the snapshot shows the frame's form: ${snap.slice(0, 400)}`);
+      await call("type", { sessionId, selector: "#first_name", text: "Test" });
+      // A script-drawn dropdown far down the frame, and a native select.
+      const state = await call("select_option", { sessionId, selector: "#state", option: "Massachusetts" });
+      expect(state.chosen === "Massachusetts" && state.confirmed, `state: ${JSON.stringify(state)}`);
+      const pronouns = await call("select_option", { sessionId, selector: "#pronouns", option: "She/her" });
+      expect(pronouns.chosen === "She/her", `pronouns: ${JSON.stringify(pronouns)}`);
+      // A click opens a list there, and the result lists its options.
+      const opened = await call("click", { sessionId, selector: "#sponsor" });
+      expect((opened.options || []).includes("No"), `the click reports the list: ${JSON.stringify(opened)}`);
+      await call("press_key", { sessionId, key: "Escape" });
+      const pdf = Buffer.from("%PDF-1.4\n%%EOF\n").toString("base64");
+      const cv = await call("upload_file", { sessionId, selector: "#attach", content: pdf, name: "resume.pdf" });
+      expect(cv.how === "input" && cv.into.startsWith("input#resume"), `upload: ${JSON.stringify(cv)}`);
+      await call("wait_for", { sessionId, expression: "window.embedValues.resume && window.embedValues.first_name", timeout: 3000 });
+      const v = await values();
+      expect(v.first_name === "Test", `typed into the frame: ${JSON.stringify(v)}`);
+      expect(v.state === "Massachusetts" && v.pronouns === "She/her", `picked in the frame: ${JSON.stringify(v)}`);
+      expect(v.resume?.name === "resume.pdf" && v.resume?.head === "%PDF-", `attached in the frame: ${JSON.stringify(v.resume)}`);
+      // Focus inside the frame is the field there, not the <iframe>.
+      await call("click", { sessionId, selector: "#first_name" });
+      const tab = await call("press_key", { sessionId, key: "Tab" });
+      expect(!tab.focused.startsWith("iframe") && tab.focused.includes("input"), `press_key sees the frame's focus: ${tab.focused}`);
+      // Text only the frame shows, and a script run in the frame.
+      await call("wait_for", { sessionId, text: "Software Engineer application", timeout: 3000 });
+      const host = new URL(LAN_SITE).host;
+      const read = await call("evaluate", { sessionId, frame: host, expression: "document.querySelector('#first_name').value" });
+      expect(read.result === "Test", `evaluate in the frame: ${JSON.stringify(read)}`);
+      const none = await raw("evaluate", { sessionId, frame: "no-such-host", expression: "1" });
+      expect(none.isError && text(none).includes(host), `a missing frame lists the frames: ${text(none).slice(0, 200)}`);
+      // Plain language reaches the frame's fields too.
+      if (process.env.TYPESAFE_API_KEY) {
+        const sponsor = await call("select_option", { sessionId, selector: "Will you now or in the future require sponsorship?", option: "No" });
+        expect(sponsor.chosen === "No", `plain language: ${JSON.stringify(sponsor)}`);
+        await call("wait_for", { sessionId, expression: "window.embedValues.sponsor === 'No'", timeout: 3000 });
+      }
+    },
+  },
+  {
     id: "late-file-name",
     about: "upload_file sees a file name the page shows only once its upload finishes, in capitals",
     async run({ call, session }) {

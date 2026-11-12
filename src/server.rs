@@ -123,7 +123,7 @@ impl ServerHandler for BrowserSessionServer {
             },
             _ => None,
         };
-        match self.dispatch(name, args).await {
+        match crate::frames::scope(self.dispatch(name, args)).await {
             Ok(result) => Ok(result.into()),
             Err(err) => {
                 // A transport-level failure may mean the connection died:
@@ -488,8 +488,7 @@ impl BrowserSessionServer {
             Some((x, y, w, h))
         } else if scale != 1.0 && !full_page {
             let vp = sessions.viewport(&session_id).await;
-            let scroll =
-                iso_eval_function(&page, "function() { return [scrollX, scrollY]; }").await?;
+            let scroll = iso_eval_top(&page, "function() { return [scrollX, scrollY]; }").await?;
             let at = |i: usize| scroll.get(i).and_then(Value::as_f64).unwrap_or(0.0);
             Some((at(0), at(1), vp.width as f64, vp.height as f64))
         } else {
@@ -1262,6 +1261,10 @@ impl BrowserSessionServer {
                     ));
                 }
             }
+            // Work in the chosen element's frame, when it's in one.
+            if let Some(el) = el {
+                let _ = wait_for_selector(&page, &d.page.css(&el.id), 0).await;
+            }
             // Snapshot what the action could change, for the effect check,
             // and the open tabs, to follow a link that opens a new one.
             let before = page_fingerprint(&page).await;
@@ -1598,12 +1601,18 @@ impl BrowserSessionServer {
             // Run like `evaluate` (main world, or isolated on stealth
             // sessions), until the value is truthy.
             let stealth = takeover::is_stealth(&session_id).await;
-            let wrapped = wrap_expression(&page, &expr, stealth).await?;
+            let frame = match optional_str(&args, "frame") {
+                Some(f) => Some(frame_by_url(&page, f).await?),
+                None => None,
+            };
+            let wrapped = wrap_expression(&page, &expr, stealth || frame.is_some()).await?;
             let last = std::sync::Mutex::new(Value::Null);
-            let (last, page, wrapped) = (&last, &page, &wrapped);
+            let (last, page, wrapped, frame) = (&last, &page, &wrapped, &frame);
             let found = wait_until(
                 || async move {
-                    let v = if stealth {
+                    let v = if let Some(frame) = frame {
+                        crate::frames::eval(frame, wrapped).await
+                    } else if stealth {
                         iso_eval_function(page, wrapped).await
                     } else {
                         main_world_eval(page, wrapped).await
@@ -1633,10 +1642,24 @@ impl BrowserSessionServer {
             "function() {{ return document.body && document.body.innerText && document.body.innerText.includes({}); }}",
             serde_json::to_string(&needle).unwrap()
         );
+        let page = &page;
+        let body = &body;
         wait_until(
-            || async {
-                let v = iso_eval_function(&page, &body).await?;
-                Ok(v.as_bool().unwrap_or(false))
+            || async move {
+                if iso_eval_top(page, body).await?.as_bool().unwrap_or(false) {
+                    return Ok(true);
+                }
+                for frame in crate::frames::closed(page).await {
+                    if crate::frames::eval(&frame, body)
+                        .await
+                        .ok()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             },
             timeout,
         )
@@ -1663,8 +1686,14 @@ impl BrowserSessionServer {
         // globals. The session already exposes Runtime via the listener when not
         // in stealth, so main-world execution costs no extra detectability there.
         let stealth = takeover::is_stealth(&session_id).await;
-        let wrapped = wrap_expression(&page, &expression, stealth).await?;
-        let value = if stealth {
+        let frame = match optional_str(&args, "frame") {
+            Some(f) => Some(frame_by_url(&page, f).await?),
+            None => None,
+        };
+        let wrapped = wrap_expression(&page, &expression, stealth || frame.is_some()).await?;
+        let value = if let Some(frame) = &frame {
+            crate::frames::eval(frame, &wrapped).await
+        } else if stealth {
             iso_eval_function(&page, &wrapped).await
         } else {
             main_world_eval(&page, &wrapped).await
@@ -2890,7 +2919,8 @@ fn optional_viewport(args: &JsonObject, field: &str) -> Result<Option<Viewport>>
 }
 
 /// Evaluate a JS *function declaration* in the tab's isolated world and
-/// return its JSON result.
+/// return its JSON result. Once the tool call found its target in a frame
+/// page scripts can't reach, it runs there instead (see [`crate::frames`]).
 ///
 /// Our forked chromiumoxide deliberately never sends `Runtime.enable` (the
 /// primary CDP automation tell anti-bot systems watch for), so no execution
@@ -2910,6 +2940,15 @@ fn optional_viewport(args: &JsonObject, field: &str) -> Result<Option<Viewport>>
 /// therefore carries a random marker, and every call checks it before running
 /// anything: a missing context or a missing marker means "make a new world".
 pub(crate) async fn iso_eval_function(page: &Page, function_declaration: &str) -> Result<Value> {
+    match crate::frames::current() {
+        Some(frame) => crate::frames::eval(&frame, function_declaration).await,
+        None => iso_eval_top(page, function_declaration).await,
+    }
+}
+
+/// [`iso_eval_function`] in the tab's top document, whichever frame the tool
+/// call works in: for the page's own URL, title, scroll and history.
+pub(crate) async fn iso_eval_top(page: &Page, function_declaration: &str) -> Result<Value> {
     let frame_id = page
         .mainframe()
         .await?
@@ -3439,7 +3478,7 @@ async fn scroll_viewport(page: &Page, fraction: f64) -> Result<()> {
     let decl = format!(
         "function() {{ window.scrollBy(0, Math.round(window.innerHeight * ({fraction}))); return true; }}"
     );
-    iso_eval_function(page, &decl).await?;
+    iso_eval_top(page, &decl).await?;
     Ok(())
 }
 
@@ -3994,7 +4033,7 @@ fn accepts(accept: &str, name: &str, mime: &str) -> bool {
 
 /// Go back one entry in history — `act`'s `back` pseudo-action.
 async fn go_back(page: &Page) -> Result<()> {
-    iso_eval_function(page, "function() { history.back(); return true; }")
+    iso_eval_top(page, "function() { history.back(); return true; }")
         .await
         .map(|_| ())
         .context("going back in history")
@@ -4003,17 +4042,25 @@ async fn go_back(page: &Page) -> Result<()> {
 /// [`jev::FINGERPRINT_FN`] for `act`'s effect check; `None` when the read
 /// failed (mid-navigation teardown).
 async fn page_fingerprint(page: &Page) -> Option<String> {
-    iso_eval_function(page, jev::FINGERPRINT_FN)
+    let top = iso_eval_top(page, jev::FINGERPRINT_FN)
         .await
         .ok()?
         .as_str()
-        .map(str::to_string)
+        .map(str::to_string)?;
+    // An action inside a frame changes the frame, not the top document.
+    let Some(frame) = crate::frames::current() else {
+        return Some(top);
+    };
+    let inner = crate::frames::eval(&frame, jev::FINGERPRINT_FN)
+        .await
+        .ok()?;
+    Some(format!("{top}/{}", inner.as_str().unwrap_or_default()))
 }
 
 /// Read the page's current url + title for `act`'s final report. `None`
 /// means the read itself failed (mid-navigation teardown).
 async fn current_url_title(page: &Page) -> Option<(String, String)> {
-    let v = iso_eval_function(
+    let v = iso_eval_top(
         page,
         "function() { return location.href + ' ~~ ' + document.title; }",
     )
@@ -4196,15 +4243,24 @@ async fn element_box(page: &Page, selector: &str) -> Result<Option<(f64, f64, f6
         "function() {{ {deep} let h = __bsDeep({sel}); if (!h) return null; \
          h.el.scrollIntoView({{block:'center',inline:'center',behavior:'instant'}}); h = __bsDeep({sel}); \
          const r = h.el.getBoundingClientRect(); if (!r.width || !r.height) return null; \
-         return [h.ox + r.left + scrollX, h.oy + r.top + scrollY, r.width, r.height]; }}",
+         return [h.ox + r.left, h.oy + r.top, r.width, r.height, scrollX, scrollY]; }}",
         deep = jev::DEEP_FIND_JS,
         sel = serde_json::to_string(selector).unwrap_or_else(|_| "''".to_string())
     );
     let v = iso_eval_function(page, &decl).await?;
-    Ok(v.as_array().filter(|a| a.len() == 4).map(|a| {
-        let n = |i: usize| a[i].as_f64().unwrap_or(0.0);
-        (n(0), n(1), n(2), n(3))
-    }))
+    let Some(a) = v.as_array().filter(|a| a.len() == 6) else {
+        return Ok(None);
+    };
+    let n = |i: usize| a[i].as_f64().unwrap_or(0.0);
+    // Document coordinates are the top document's, scrolled as it is.
+    let (sx, sy) = if crate::frames::current().is_some() {
+        let s = iso_eval_top(page, "function() { return [scrollX, scrollY]; }").await?;
+        let at = |i: usize| s.get(i).and_then(Value::as_f64).unwrap_or(0.0);
+        (at(0), at(1))
+    } else {
+        (n(4), n(5))
+    };
+    Ok(Some((n(0) + sx, n(1) + sy, n(2), n(3))))
 }
 
 /// A thrown error's message: `text` alone is often just "Uncaught" or
@@ -4252,7 +4308,8 @@ const DESCRIBE_JS: &str = r#"var __bsDesc = function(el) {
 
 async fn hit_at(page: &Page, (x, y): (f64, f64), target: Option<&str>) -> Result<Hit> {
     let decl = format!(
-        "function() {{ {deep} {desc} var x = {x}, y = {y}, sel = {sel}; \
+        "function() {{ {deep} {desc} var base = globalThis.__bsBase || {{ x: 0, y: 0 }}; \
+         var x = {x} - base.x, y = {y} - base.y, sel = {sel}; \
          if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return {{ off: true }}; \
          var el = document.elementFromPoint(x, y), ox = 0, oy = 0; \
          for (var i = 0; el && i < 10; i++) {{ \
@@ -4298,6 +4355,26 @@ async fn check_point(
     target: Option<&str>,
     label: &str,
 ) -> Result<String> {
+    // Inside a frame, the page around it can still cover the point (a
+    // cookie banner over an embedded form): it has to reach a frame there.
+    if crate::frames::current().is_some() {
+        let decl = format!(
+            "function() {{ {DESCRIBE_JS} var x = {}, y = {}; \
+             if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null; \
+             var el = document.elementFromPoint(x, y); \
+             for (var i = 0; el && el.shadowRoot && i < 10; i++) {{ var inner = el.shadowRoot.elementFromPoint(x, y); \
+               if (!inner || inner === el) break; el = inner; }} \
+             return el && el.tagName !== 'IFRAME' && el.tagName !== 'FRAME' ? __bsDesc(el) : null; }}",
+            at.0, at.1
+        );
+        if let Ok(Value::String(cover)) = iso_eval_top(page, &decl).await {
+            bail!(
+                "{label} is covered by {cover} at ({:.0}, {:.0}), so nothing was clicked; close or remove what covers it (a popup, banner or overlay), or target that element if it is what you meant",
+                at.0,
+                at.1
+            );
+        }
+    }
     let hit = hit_at(page, at, target).await?;
     if hit.off {
         bail!(
@@ -4367,8 +4444,67 @@ const FOCUSED_JS: &str = "var el = document.activeElement; \
      break; } \
    var focused = el && el !== document.body && el !== document.documentElement ? __bsDesc(el) : 'nothing';";
 
+/// When focus sits in a frame from another site, which page scripts can't
+/// look into, work in that frame for the rest of the call, so the focused
+/// field (not the `<iframe>`) is what gets described and pressed into.
+async fn follow_focus(page: &Page) {
+    if crate::frames::current().is_some() {
+        return;
+    }
+    let into_frame = iso_eval_top(
+        page,
+        "function() { var el = document.activeElement; \
+         while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement; \
+         if (!el || el.tagName !== 'IFRAME') return false; \
+         try { return !el.contentDocument; } catch (e) { return true; } }",
+    )
+    .await
+    .ok()
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false);
+    if !into_frame {
+        return;
+    }
+    // Frames are listed outer first and an outer frame has focus while one
+    // inside it does, so the last that has it is where the focus is.
+    let mut focused = None;
+    for frame in crate::frames::closed(page).await {
+        let has = crate::frames::eval(&frame, "function() { return document.hasFocus(); }")
+            .await
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if has {
+            focused = Some(frame);
+        }
+    }
+    if focused.is_some() {
+        crate::frames::set_current(focused);
+    }
+}
+
+/// The frame whose URL contains `needle`, for evaluate's `frame`.
+async fn frame_by_url(page: &Page, needle: &str) -> Result<crate::frames::Frame> {
+    let frames = crate::frames::frames(page).await;
+    if let Some(f) = frames.iter().find(|f| f.url.contains(needle)) {
+        return Ok(f.clone());
+    }
+    let urls: Vec<String> = frames
+        .iter()
+        .map(|f| f.url.chars().take(80).collect())
+        .collect();
+    if urls.is_empty() {
+        bail!("no frame's URL contains `{needle}`: the page has no frames");
+    }
+    bail!(
+        "no frame's URL contains `{needle}`; the page's frames: {}",
+        urls.join(", ")
+    )
+}
+
 /// The focused element right now.
 async fn focused_now(page: &Page) -> String {
+    follow_focus(page).await;
     let decl = format!("function() {{ {DESCRIBE_JS} {FOCUSED_JS} return focused; }}");
     iso_eval_function(page, &decl)
         .await
@@ -4387,6 +4523,7 @@ async fn after_action(
     (sessions, session_id): (&crate::sessions::SessionManager, &str),
 ) -> AfterAction {
     tokio::time::sleep(Duration::from_millis(AFTER_ACTION_SETTLE_MS)).await;
+    follow_focus(page).await;
     let answered = sessions.take_dialogs(session_id);
     let decl = format!(
         "function() {{ {desc} {focused} \
@@ -4410,7 +4547,24 @@ async fn after_action(
         desc = DESCRIBE_JS,
         focused = FOCUSED_JS,
     );
-    let v = iso_eval_function(page, &decl).await.unwrap_or(Value::Null);
+    let mut v = iso_eval_top(page, &decl).await.unwrap_or(Value::Null);
+    // Inside a frame, focus and an open list are the frame's.
+    if let Some(frame) = crate::frames::current() {
+        if let Ok(inner) = crate::frames::eval(&frame, &decl).await {
+            if let Some(obj) = v.as_object_mut() {
+                for key in ["focused", "options"] {
+                    if let Some(x) = inner.get(key).filter(|x| !x.is_null()) {
+                        obj.insert(key.to_string(), x.clone());
+                    }
+                }
+                if obj.get("dialog").is_none_or(Value::is_null) {
+                    if let Some(d) = inner.get("dialog") {
+                        obj.insert("dialog".to_string(), d.clone());
+                    }
+                }
+            }
+        }
+    }
     let url = v
         .get("url")
         .and_then(Value::as_str)
@@ -4496,7 +4650,7 @@ async fn swipe_start(page: &Page, direction: &str, vp: Viewport) -> (f64, f64) {
           if (w > 40 && h > 40 && w * h > area) { area = w * h; \
             best = [Math.max(r.left, 0) + w / 2, Math.max(r.top, 0) + h / 2]; } } \
         return best; }";
-    iso_eval_function(page, FIND)
+    iso_eval_top(page, FIND)
         .await
         .ok()
         .and_then(|v| Some((v.get(0)?.as_f64()?, v.get(1)?.as_f64()?)))
@@ -4813,14 +4967,26 @@ async fn wait_for_selector(page: &Page, selector: &str, timeout_ms: u64) -> Resu
         deep = jev::DEEP_FIND_JS,
         css = serde_json::to_string(&sel).unwrap_or_else(|_| "''".to_string())
     );
+    let found = |v: Result<Value>| v.ok().and_then(|v| v.as_bool()) == Some(true);
     loop {
-        if iso_eval_function(page, &decl)
-            .await
-            .ok()
-            .and_then(|v| v.as_bool())
-            == Some(true)
-        {
+        // The frame this call already works in first: a reference such as
+        // an option list's could name something there and, stale, in the
+        // top document too. Then the top document, then the frames page
+        // scripts can't reach; where it's found, the call works on.
+        if let Some(frame) = crate::frames::current() {
+            if found(crate::frames::eval(&frame, &decl).await) {
+                return Ok(());
+            }
+        }
+        if found(iso_eval_top(page, &decl).await) {
+            crate::frames::set_current(None);
             return Ok(());
+        }
+        for frame in crate::frames::closed(page).await {
+            if found(crate::frames::eval(&frame, &decl).await) {
+                crate::frames::set_current(Some(frame));
+                return Ok(());
+            }
         }
         if tokio::time::Instant::now() >= deadline {
             bail!("timed out waiting for selector {sel}");
@@ -5596,7 +5762,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "wait_for",
-            "Wait until a CSS selector matches an element, a text string appears in the page's visible text, or a JavaScript `expression` is truthy, in the session's active tab, polling every 100ms; or, with only `ms`, just pause. Use it after navigate, click or scroll when content loads asynchronously. Pass one of `selector`, `text` or `expression`; `selector` wins if several are given. `ms` alone is a plain pause for hosts with no timer of their own. `text` is a case-sensitive substring of document.body.innerText, so text hidden with CSS doesn't count. It reads the page without changing it. Returns which selector or text matched. Fails with a timeout error if nothing matches within `timeout`, or if neither argument is given.",
+            "Wait until a CSS selector matches an element, a text string appears in the page's visible text, or a JavaScript `expression` is truthy, in the session's active tab, polling every 100ms; or, with only `ms`, just pause. Use it after navigate, click or scroll when content loads asynchronously. Pass one of `selector`, `text` or `expression`; `selector` wins if several are given. `ms` alone is a plain pause for hosts with no timer of their own. `text` is a case-sensitive substring of document.body.innerText, so text hidden with CSS doesn't count; it is looked for in frames from other sites too. It reads the page without changing it. Returns which selector or text matched. Fails with a timeout error if nothing matches within `timeout`, or if neither argument is given.",
             object_schema(
                 &[
                     session_id,
@@ -5610,6 +5776,11 @@ fn tool_defs() -> Vec<Tool> {
                         "expression",
                         &str_t,
                         "JavaScript to poll until its value is truthy, run like evaluate (e.g. `window.dataLayer.length > 3`).",
+                    ),
+                    (
+                        "frame",
+                        &str_t,
+                        "With `expression`: run it in the frame whose URL contains this (as evaluate's `frame`).",
                     ),
                     (
                         "ms",
@@ -5628,7 +5799,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "evaluate",
-            "Run JavaScript in a tab and return its value as JSON in { result }. A bare expression returns its value; for several statements use `return ...`; promises are awaited. Values that aren't JSON come back reduced: undefined as null and DOM nodes as {}. It runs in the page's main world (can read page globals like window.dataLayer); on stealth sessions (see set_stealth) it runs in an isolated world instead, which sees the DOM but not page-defined globals. `tabIndex` runs it in another tab without switching to it. The code can change the page like any script, so prefer take_snapshot or wait_for when they suffice, and click or type for interaction. Fails with the JS exception's message if the code throws.",
+            "Run JavaScript in a tab and return its value as JSON in { result }. A bare expression returns its value; for several statements use `return ...`; promises are awaited. Values that aren't JSON come back reduced: undefined as null and DOM nodes as {}. It runs in the page's main world (can read page globals like window.dataLayer); on stealth sessions (see set_stealth) it runs in an isolated world instead, which sees the DOM but not page-defined globals. `tabIndex` runs it in another tab without switching to it, and `frame` in an embedded frame. The code can change the page like any script, so prefer take_snapshot or wait_for when they suffice, and click or type for interaction. Fails with the JS exception's message if the code throws.",
             object_schema(
                 &[
                     session_id,
@@ -5641,6 +5812,11 @@ fn tool_defs() -> Vec<Tool> {
                         "tabIndex",
                         &nonneg_int_t,
                         "Tab to run in, by its 0-based list_pages index. Default: the active tab.",
+                    ),
+                    (
+                        "frame",
+                        &str_t,
+                        "Run in the frame whose URL contains this (an embedded form from another site, e.g. `greenhouse.io`), in an isolated world that sees its DOM but not its page globals. Default: the top document.",
                     ),
                 ],
                 &["sessionId", "expression"],
