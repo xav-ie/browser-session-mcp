@@ -4411,6 +4411,9 @@ struct Hit {
     hit: String,
     ok: bool,
     off: bool,
+    /// The target is disabled, or ignores clicks along with its parent and
+    /// labels, as in a greyed out part of a form.
+    dead: bool,
 }
 
 const DESCRIBE_JS: &str = r#"var __bsDesc = function(el) {
@@ -4448,7 +4451,10 @@ async fn hit_at(page: &Page, (x, y): (f64, f64), target: Option<&str>) -> Result
          var ok = !target || !el || within(el, target) || (!bare && within(target, el)); \
          if (!ok) {{ for (var n = el; n; n = up(n)) if (n.tagName === 'LABEL') {{ \
            ok = n.control === target || within(target, n); break; }} }} \
-         return {{ hit: __bsDesc(el), ok: ok }}; }}",
+         var pe = function(n) {{ return getComputedStyle(n).pointerEvents === 'none'; }}; \
+         var dead = !!target && target.nodeType === 1 && ((target.matches && target.matches(':disabled')) || \
+           (pe(target) && target.parentElement && pe(target.parentElement) && !(target.labels && [].some.call(target.labels, function(l) {{ return !pe(l); }})))); \
+         return {{ hit: __bsDesc(el), ok: ok, dead: dead }}; }}",
         deep = jev::DEEP_FIND_JS,
         desc = DESCRIBE_JS,
         sel = target.map_or("null".to_string(), |t| serde_json::to_string(t)
@@ -4463,13 +4469,14 @@ async fn hit_at(page: &Page, (x, y): (f64, f64), target: Option<&str>) -> Result
             .to_string(),
         ok: v.get("ok").and_then(Value::as_bool).unwrap_or(true),
         off: v.get("off").and_then(Value::as_bool).unwrap_or(false),
+        dead: v.get("dead").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 
 /// Check that a click or tap at `at` lands on `target` (any element when
 /// `None`): a point off the screen, or one where a popup, banner or other
-/// overlay covers the target, would report success while doing nothing, so
-/// it fails here instead, naming what is in the way. The shared check of
+/// overlay covers the target, or a target the page has disabled, would
+/// report success while doing nothing, so it fails here instead, naming why. The shared check of
 /// `click`, `tap` and `act`. Returns what is at the point.
 async fn check_point(
     page: &Page,
@@ -4504,6 +4511,9 @@ async fn check_point(
             at.0,
             at.1
         );
+    }
+    if hit.dead {
+        bail!("{label} can't be clicked: the page has it disabled (greyed out, ignores clicks)");
     }
     if !hit.ok {
         bail!(

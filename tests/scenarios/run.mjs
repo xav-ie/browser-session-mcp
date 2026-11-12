@@ -655,6 +655,25 @@ const SCENARIOS = [
     },
   },
   {
+    id: "disabled-targets",
+    about: "A click on what the page has disabled or greyed out says so instead of reporting a click that did nothing",
+    async run({ call, raw, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/knockout.html` });
+      const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
+      await call("click", { sessionId, selector: "#styled-box" });
+      expect((await values()).alerts === true, "an input that ignores clicks still works through its clickable box");
+      const off = await raw("click", { sessionId, selector: "#send" });
+      expect(off.isError && text(off).includes("disabled"), `a disabled button: ${text(off).slice(0, 200)}`);
+      await call("select_option", { sessionId, selector: "#licence-group", option: "Yes" });
+      await call("select_option", { sessionId, selector: "#city-group", option: "No" });
+      const locked = await raw("select_option", { sessionId, selector: "#licence-group", option: "No" });
+      expect(locked.isError && text(locked).includes("the page has it disabled"), `a greyed out question: ${text(locked).slice(0, 200)}`);
+      const v = await values();
+      expect(v["q-city"] === "no" && v["q-licence"] === "yes", `answers: ${JSON.stringify(v)}`);
+    },
+  },
+  {
     id: "radio-questions",
     needs: "TYPESAFE_API_KEY",
     about: "Plain language finds radio questions that only their question text tells apart",

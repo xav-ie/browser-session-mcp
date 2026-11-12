@@ -13,5 +13,7 @@ default: patch
 - A selector is looked for in all frames at once.
 - A takeover link whose browser session closed ends, and its page says so,
   instead of reconnecting to a tab that's gone.
-- `tests/scenarios` covers radio groups, FilePond-like widgets and a
-  takeover link outliving its session.
+- A click on something the page has disabled or greyed out fails saying so,
+  instead of reporting a click that did nothing.
+- `tests/scenarios` covers radio groups, FilePond-like widgets, a greyed out
+  question and a takeover link outliving its session.
