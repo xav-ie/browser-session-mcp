@@ -520,8 +520,19 @@ const SCENARIOS = [
     async run({ call, raw, session }) {
       if (!LAN_SITE) throw new Skipped("no non-loopback address to serve the frame from");
       const sessionId = await session();
-      // Beside it, a tracking pixel from the same site, which holds nothing to act on.
-      await call("navigate", { sessionId, url: `${SITE}/embed.html?src=${encodeURIComponent(`${LAN_SITE}/apply.html`)}&pixel=${encodeURIComponent(`${LAN_SITE}/home.html`)}` });
+      await call("navigate", { sessionId, url: `${SITE}/embed.html` });
+      // The form from another origin, and beside it a tracking pixel from the
+      // same site, which holds nothing to act on.
+      await call("evaluate", {
+        sessionId,
+        expression: `(() => {
+          document.getElementById("embed").src = ${JSON.stringify(`${LAN_SITE}/apply.html`)};
+          const pixel = Object.assign(document.createElement("iframe"), { src: ${JSON.stringify(`${LAN_SITE}/home.html`)} });
+          pixel.style.cssText = "width:1px;height:1px;border:0;padding:0;position:absolute;left:0;top:0";
+          document.body.append(pixel);
+          return true;
+        })()`,
+      });
       await call("wait_for", { sessionId, expression: "Object.keys(window.embedValues).length > 0", timeout: 5000 });
       await call("wait_for", { sessionId, ms: 500 });
       const values = () => js(call, sessionId, "JSON.stringify(window.embedValues)").then(JSON.parse);

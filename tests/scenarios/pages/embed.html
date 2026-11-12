@@ -12,17 +12,10 @@
 <body>
 <header><h1>Careers</h1><p>Join us. Apply below.</p></header>
 <!-- An application form embedded from another site, as job boards offer:
-     its `src` comes in the query string, so the scenario can serve it from
-     another origin. -->
+     the scenario sets its `src`, so it can serve the form from another
+     origin. -->
 <iframe id="embed" title="Application form"></iframe>
 <script>
-const params = new URLSearchParams(location.search);
-document.getElementById("embed").src = params.get("src");
-if (params.get("pixel")) {
-  const pixel = Object.assign(document.createElement("iframe"), { src: params.get("pixel") });
-  pixel.style.cssText = "width:1px;height:1px;border:0;padding:0;position:absolute;left:0;top:0";
-  document.body.append(pixel);
-}
 // The form posts its values up, since this page can't read them.
 window.embedValues = {};
 addEventListener("message", (e) => { if (e.data && e.data.formValues) window.embedValues = e.data.formValues; });
