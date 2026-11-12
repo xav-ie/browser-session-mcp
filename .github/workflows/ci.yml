@@ -85,7 +85,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.nix == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ github.head_ref == 'release' && 60 || 30 }}
     permissions:
       contents: read
     steps:
@@ -95,11 +95,11 @@ jobs:
       - uses: ./.github/actions/nix-cache
         with:
           push-token: ${{ secrets.ATTIC_TOKEN }}
-      # Pull requests build the fast `ci` profile and skip the optimized package
-      # and the static musl release; pushes to main build those too, which also
-      # fills the cache.
+      # Everything builds the fast `ci` profile. Only the release PR also builds
+      # the optimized package and the static musl release, so a broken release
+      # build shows up before the tag; release.yml builds those again itself.
       - env:
-          FULL: ${{ github.event_name == 'push' }}
+          FULL: ${{ github.head_ref == 'release' }}
         run: |
           targets=(
             ".#packages.x86_64-linux.browser-session-mcp-ci"
@@ -139,11 +139,10 @@ jobs:
           push-token: ${{ secrets.ATTIC_TOKEN }}
       - run: nix build -L ".#checks.x86_64-linux.smoke"
 
-  # Builds the aarch64-darwin package and release binary via Nix on an arm64
-  # macOS runner, so the Darwin build path the flake exposes is actually
-  # exercised, and the release build's check that it links nothing from
-  # /nix/store runs on every push to main. macos-latest is arm64, matching
-  # aarch64-darwin.
+  # Builds the aarch64-darwin package via Nix on an arm64 macOS runner, so the
+  # Darwin build path the flake exposes is actually exercised; the release PR
+  # also builds the release binary and its check that it links nothing from
+  # /nix/store. macos-latest is arm64, matching aarch64-darwin.
   build-darwin:
     name: build (aarch64-darwin)
     needs: changes
@@ -159,9 +158,9 @@ jobs:
       - uses: ./.github/actions/nix-cache
         with:
           push-token: ${{ secrets.ATTIC_TOKEN }}
-      # As on Linux: the `ci` profile on pull requests, the shipped builds on main.
+      # As on Linux: the `ci` profile, plus the shipped builds on the release PR.
       - env:
-          FULL: ${{ github.event_name == 'push' }}
+          FULL: ${{ github.head_ref == 'release' }}
         run: |
           targets=(".#packages.aarch64-darwin.browser-session-mcp-ci")
           if [[ $FULL == true ]]; then
