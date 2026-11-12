@@ -1,0 +1,54 @@
+name: pnpm hash
+
+# Dependabot bumps frontend/pnpm-lock.yaml but not pnpmDeps.hash in package.nix,
+# so its frontend PRs fail the Nix build. This recomputes the hash and pushes it
+# to the PR branch over a write deploy key, since a push made with GITHUB_TOKEN
+# would not start CI on the new commit.
+on:
+  pull_request:
+    paths: [frontend/pnpm-lock.yaml]
+
+concurrency:
+  group: pnpm-hash-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  update:
+    # The deploy key is a Dependabot secret, so it is empty when anyone else
+    # pushes to the branch; the push step then fails rather than skip quietly.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/nix-cache
+      - name: Recompute pnpmDeps.hash
+        run: |
+          [ "$(grep -c 'hash = "sha256-' package.nix)" = 1 ] || { echo "::error::expected exactly one hash in package.nix"; exit 1; }
+          sed -i -E 's|hash = "sha256-[^"]*";|hash = "";|' package.nix
+          log=$(nix build --no-link -L .#browser-session-mcp-ci.frontend.pnpmDeps 2>&1) || true
+          got=$(sed -n -E 's/.*got: *(sha256-[^ ]+).*/\1/p' <<<"$log" | head -1)
+          [ -n "$got" ] || { echo "$log"; echo "::error::no hash in the build output"; exit 1; }
+          sed -i -E "s|hash = \"\";|hash = \"$got\";|" package.nix
+          git diff
+      - name: Push the hash
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPENDABOT_PUSH_KEY }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if git diff --quiet; then echo "hash already current"; exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -qam "build(deps): update pnpmDeps.hash"
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" >"$key"
+          GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes" \
+            git push "git@github.com:${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$HEAD_REF"

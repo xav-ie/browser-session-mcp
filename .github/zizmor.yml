@@ -1,0 +1,5 @@
+rules:
+  # zizmor wants `uses: $/...` for in-repo actions, but actionlint does not
+  # accept that syntax yet. Drop this once it does.
+  self-repository:
+    disable: true

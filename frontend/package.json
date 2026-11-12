@@ -18,21 +18,22 @@
     "format": "prettier --write ."
   },
   "devDependencies": {
-    "@astrojs/check": "^0.9.10",
-    "@eslint/js": "^9.39.5",
-    "astro": "^7.3.6",
-    "eslint": "^10.12.0",
+    "@astrojs/check": "^0.9.12",
+    "@eslint/js": "^10.0.1",
+    "astro": "^7.4.2",
+    "eslint": "^10.13.0",
     "eslint-plugin-astro": "^3.2.1",
     "globals": "^17.13.0",
-    "prettier": "^3.9.9",
-    "prettier-plugin-astro": "^1.1.0",
+    "prettier": "^3.9.10",
+    "prettier-plugin-astro": "^1.1.2",
     "typescript": "~6.0.3",
-    "typescript-eslint": "^8.71.1"
+    "typescript-eslint": "^8.72.1"
   },
   "pnpm": {
     "overrides": {
       "fast-uri": "^3.1.9",
       "brace-expansion": "^5.0.12",
+      "minimatch": "^11.0.1",
       "postcss-selector-parser": "^7.1.6"
     }
   }

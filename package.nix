@@ -59,7 +59,7 @@ let
       (fetchPnpm10Deps {
         inherit (finalAttrs) pname version src;
         fetcherVersion = 3;
-        hash = "sha256-Pd1/SmK/xqVq/d3Xojj3n+AYdWZJ03MFJe+z6XlNnRk=";
+        hash = "sha256-zVT3tPqw1/bWyo7bAtS7Y4kBtcwwKZHrkbnPGXpe/tY=";
       }).overrideAttrs
         (o: {
           env = (o.env or { }) // {
@@ -143,6 +143,10 @@ craneLib.buildPackage (
         cargoClippyExtraArgs = "--all-targets -- --deny warnings";
       }
     );
+
+    # The takeover UI, so .github/workflows/pnpm-hash.yml can build its
+    # pnpmDeps alone to read the new hash.
+    passthru.frontend = frontend;
 
     # `cargo test` over the same artifacts; the flake's `checks.test`.
     passthru.test = craneLib.cargoTest (
