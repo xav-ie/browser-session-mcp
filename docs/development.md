@@ -71,18 +71,22 @@ nix run nixpkgs#librsvg -- -o docs/logo/social-preview.png docs/logo/social-prev
 
 The README's screenshot of the takeover page is real:
 [`scripts/screenshot.mjs`](../scripts/screenshot.mjs) starts a Chrome for the
-agent's session, the takeover daemon and the MCP server, opens a session on
-GitHub's sign-in page, and screenshots the takeover link from a second Chrome.
+agent's session, the takeover daemon and the MCP server, opens a session on a
+local sign-in page ([`scripts/screenshot-page.html`](../scripts/screenshot-page.html),
+shown as example.com), and screenshots the takeover link from a second Chrome.
 Everything runs on ports the OS picks, so it never touches a stack you already
-have running. After changing the takeover UI, rebuild and retake it:
+have running.
+
+CI takes it: when a pull request changes the takeover UI, the `screenshot` job
+retakes it with the flake's Chromium and, if the picture changed, commits it to
+the branch. To preview it locally:
 
 ```sh
 nix build
 node scripts/screenshot.mjs              # or pass another URL to show
 ```
 
-It needs Chrome (`CHROME` picks the binary, `google-chrome` by default) and the
-network, so CI doesn't run it.
+It needs Chrome (`CHROME` picks the binary, `google-chrome` by default).
 
 ## Releases
 

@@ -136,7 +136,7 @@ click Hand back, and the agent picks up where it left off. The link stays open
 so you can watch it work; Take control pauses it again, and End closes the link.
 Closing the page ends the link after a minute.
 
-![The takeover page: a bar with back, forward, the page's URL, new tab, a button to fill a username or password, End and Hand back, above a live view of the agent's tab showing GitHub's sign-in form](docs/images/takeover.png)
+![The takeover page: a bar with back, forward, the page's URL, new tab, a button to fill a username or password, End and Hand back, above a live view of the agent's tab showing a sign-in form](docs/images/takeover.png)
 
 <!-- diagram:takeover -->
 <picture>
