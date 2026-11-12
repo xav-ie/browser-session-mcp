@@ -116,7 +116,29 @@ let
   # source-only changes reuse it — this is the layer the Nix store / magic-nix-
   # cache reuses across builds. Git deps (the fork) are fetched from Cargo.lock;
   # no manual outputHashes needed.
-  cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+  #
+  # The crate's own version is pinned to 0.0.0 here, in the deps' Cargo.toml and
+  # Cargo.lock, so a release bump doesn't rebuild every dependency.
+  depsVersion = "0.0.0";
+  cargoArtifacts = craneLib.buildDepsOnly (
+    commonArgs
+    // {
+      version = depsVersion;
+      dummySrc = craneLib.mkDummySrc {
+        src = lib.cleanSourceWith {
+          inherit src;
+          filter = path: _: baseNameOf path != "Cargo.lock";
+        };
+        cargoLock = builtins.toFile "Cargo.lock" (
+          lib.replaceStrings
+            [ "name = \"${commonArgs.pname}\"\nversion = \"${version}\"" ]
+            [ "name = \"${commonArgs.pname}\"\nversion = \"${depsVersion}\"" ]
+            (builtins.readFile ./Cargo.lock)
+        );
+        cleanCargoTomlFilter = path: path != [ "package" "version" ] && craneLib.filters.cargoTomlDefault path;
+      };
+    }
+  );
 in
 craneLib.buildPackage (
   commonArgs
