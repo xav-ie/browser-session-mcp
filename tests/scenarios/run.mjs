@@ -656,7 +656,9 @@ const recording = !!(process.env.TYPESAFE_API_KEY && process.env.JEV_RECORD);
 const jev = recording || !process.env.TYPESAFE_API_KEY
   ? await startJevStandIn({
       record: recording,
-      normalize: (s) => [[SITE, "SITE"], [LAN_SITE, "LAN_SITE"]].reduce((t, [from, to]) => (from ? t.split(from).join(to) : t), s),
+      // The test server's address and port, with or without the scheme.
+      normalize: (s) => [[SITE, "SITE"], [LAN_SITE, "LAN_SITE"]].reduce(
+        (t, [from, to]) => (from ? t.split(from).join(to).split(new URL(from).host).join(`${to}_HOST`) : t), s),
     })
   : null;
 if (jev) {
