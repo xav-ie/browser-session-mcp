@@ -750,9 +750,15 @@ impl BrowserSessionServer {
         let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
         let page = sessions.active_page(&session_id).await?;
         let (selector, note) = resolve_and_wait(&page, &selector, timeout).await?;
+        let earlier = typed_changed(&page).await;
         let typed = type_into(&page, &selector, &text, clear, delay).await?;
+        remember_typed(&page, &selector).await;
         let target = note.unwrap_or(selector);
-        Ok(ok_text(typed_report(&typed, &text, &target, clear)?))
+        let mut report = typed_report(&typed, &text, &target, clear)?;
+        if let Some(c) = earlier {
+            report.push_str(&format!(". Before that, {c}"));
+        }
+        Ok(ok_text(report))
     }
 
     async fn select_option(&self, args: JsonObject) -> Result<Structured<SelectOut>> {
@@ -4028,8 +4034,13 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) 
     let Some(want) = want else {
         close_list(page, (x, y)).await;
         if opts.is_empty() {
+            if focused_is_combobox(page).await {
+                bail!(
+                    "no list of options opened from {label}; it is searched as you type, so pass `option` with the text to search"
+                );
+            }
             bail!(
-                "no list of options opened from {label}; if it is searched as you type, pass `option` with the text to search"
+                "no list of options opened from {label}; if it isn't a dropdown (a date picker, a plain field), use click or type"
             );
         }
         return Ok(Choice {
@@ -4385,6 +4396,44 @@ fn clamp_chars(s: &str, max: usize) -> String {
     out
 }
 
+/// Note the field `type` just filled and what it holds, so the next action
+/// can tell when the page changed it once focus left (a date field that
+/// reformats or reverts on blur). Never a password field. Only the `type`
+/// tool's own fields: `act` keeps its values out of every report.
+async fn remember_typed(page: &Page, css: &str) {
+    let decl = format!(
+        "function() {{ {deep} const h = __bsDeep({sel}); \
+         globalThis.__bsTypedLast = h && h.el.type !== 'password' && 'value' in h.el ? {{ el: h.el, v: String(h.el.value) }} : null; \
+         return true; }}",
+        deep = jev::DEEP_FIND_JS,
+        sel = serde_json::to_string(css).unwrap_or_else(|_| "''".to_string()),
+    );
+    let _ = iso_eval_function(page, &decl).await;
+}
+
+/// The field [`remember_typed`] noted, once focus has left it, when the page
+/// changed its text since: "input#date changed after typing: it held
+/// \"2026-12-25\" and now holds \"12/24/2026\"". `None` while it still has
+/// focus or kept its text; a field that left focus is checked once.
+async fn typed_changed(page: &Page) -> Option<String> {
+    let decl = format!(
+        "function() {{ {desc} var t = globalThis.__bsTypedLast; if (!t) return null; var el = t.el; \
+         if (!el.isConnected) {{ globalThis.__bsTypedLast = null; return null; }} \
+         var a = el.ownerDocument.activeElement; \
+         while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement; \
+         if (a === el) return null; \
+         globalThis.__bsTypedLast = null; var now = String(el.value); \
+         if (now === t.v) return null; \
+         var clip = function(x) {{ return x.length > 80 ? x.slice(0, 79) + '…' : x; }}; \
+         return __bsDesc(el) + ' changed after typing: it held ' + JSON.stringify(clip(t.v)) + ' and now holds ' + JSON.stringify(clip(now)); }}",
+        desc = DESCRIBE_JS,
+    );
+    iso_eval_function(page, &decl)
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+}
+
 /// What a field holds after [`type_into`]: its text, or `None` when it
 /// can't be read (a widget that keeps no value). `secret` for a password
 /// field, whose text is never echoed.
@@ -4532,19 +4581,35 @@ async fn clear_typed_marks(page: &Page) {
 /// Select everything in a field before typing, so the first key replaces
 /// it, the way a person clears a field. Setting `value` directly doesn't
 /// stick on framework-controlled inputs (React keeps its own state), and
-/// typing then appended to the old text. Best effort.
+/// typing then appended to the old text. When what has focus after the
+/// click isn't the field itself as a plain input (a rich text editor, or a
+/// date field whose visible boxes stand in front of a hidden input), the
+/// page's own select all and delete clear it: Control+A and Backspace as
+/// keys, which those widgets handle as they would for a person. Best effort.
 async fn clear_field(page: &Page, css: &str) {
     let decl = format!(
         "function() {{ {deep} const h = __bsDeep({sel}); if (!h) return false; const el = h.el; \
+         let active = el.ownerDocument.activeElement; \
+         while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement; \
+         if (active !== el) active = active && active !== el.ownerDocument.body ? active : null; \
+         const plain = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && (!active || active === el); \
+         if (!plain) return 'keys'; \
          el.focus(); \
-         if (el.isContentEditable) {{ const r = el.ownerDocument.createRange(); r.selectNodeContents(el); \
-           const s = el.ownerDocument.getSelection(); s.removeAllRanges(); s.addRange(r); }} \
-         else {{ try {{ el.select(); if (el.selectionStart === null) el.value = ''; }} \
-           catch (e) {{ el.value = ''; }} }} return true; }}",
+         try {{ el.select(); if (el.selectionStart === null) el.value = ''; }} catch (e) {{ el.value = ''; }} \
+         return true; }}",
         deep = jev::DEEP_FIND_JS,
         sel = serde_json::to_string(css).unwrap_or_else(|_| "''".to_string()),
     );
-    let _ = iso_eval_function(page, &decl).await;
+    if iso_eval_function(page, &decl)
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .as_deref()
+        == Some("keys")
+    {
+        dispatch_key(page, "Control+a").await.ok();
+        dispatch_key(page, "Backspace").await.ok();
+    }
 }
 
 /// Put the caret after a field's text. The click that focuses a field puts
@@ -4706,6 +4771,9 @@ const DESCRIBE_JS: &str = concat!(
     icon_hint_js!(),
     r#"var __bsDesc = function(el) {
   if (!el || !el.tagName) return 'nothing';
+  // A shape inside an icon (a path, a line) names nothing: name the control
+  // around it, or the icon.
+  if (el.ownerSVGElement) el = el.closest('a, button, label, [role=button], [role=link], [role=menuitem], [role=tab], [role=checkbox], [role=switch], [role=option]') || el.ownerSVGElement;
   var t = el.tagName.toLowerCase();
   if (el.id) t += '#' + el.id;
   else if (typeof el.className === 'string' && el.className.trim()) t += '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.');
@@ -4796,6 +4864,16 @@ async fn check_point(
     }
     let hit = hit_at(page, at, target).await?;
     if hit.off {
+        // An element is scrolled into view before its point is taken, so a
+        // target still off the screen sits where it can't be scrolled to:
+        // where pages hide things ("Skip to content" links).
+        if target.is_some() {
+            bail!(
+                "{label} sits off the page at ({:.0}, {:.0}), where it can't be scrolled to, so nothing was clicked; pages put things there to hide them (a \"Skip to content\" link), so it is likely not what you meant",
+                at.0,
+                at.1
+            );
+        }
         bail!(
             "({:.0}, {:.0}) is outside the screen, so nothing was clicked; scroll it into view or use a selector",
             at.0,
@@ -4843,6 +4921,10 @@ struct AfterAction {
     /// answered since the last action, each accepted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     answered: Vec<String>,
+    /// A field `type` filled that the page changed once focus left it (a
+    /// date that reformats or reverts on blur), with both texts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changed: Option<String>,
     /// Fields the page rejected during the action, each with its message:
     /// the browser's own form check (a required field left empty), or the
     /// page marking them invalid. The form wasn't sent while any remain.
@@ -4860,39 +4942,60 @@ const AFTER_ACTION_SETTLE_MS: u64 = 250;
 /// Before an action: start noting fields the page rejects during it (see
 /// [`rejected_fields`]), and return the URL, for [`after_action`].
 async fn before_action(page: &Page) -> Option<String> {
-    let arm = "function() { var g = globalThis; g.__bsInvalid = []; \
-       if (!g.__bsInvalidOn) { g.__bsInvalidOn = true; \
-         document.addEventListener('invalid', function(e) { (g.__bsInvalid || (g.__bsInvalid = [])).push(e.target); }, true); } \
-       g.__bsWasInvalid = new Set(Array.from(document.querySelectorAll('[aria-invalid=true]'))); \
-       return true; }";
-    let _ = iso_eval_function(page, arm).await;
+    let arm = format!(
+        "function() {{ {docs} var g = globalThis; g.__bsInvalid = []; \
+         var was = new Set(); \
+         __bsDocs().forEach(function(d) {{ \
+           if (!d.__bsInvalidOn) {{ d.__bsInvalidOn = true; \
+             d.addEventListener('invalid', function(e) {{ (g.__bsInvalid || (g.__bsInvalid = [])).push(e.target); }}, true); }} \
+           d.querySelectorAll({bad}).forEach(function(el) {{ was.add(el); }}); }}); \
+         g.__bsWasInvalid = was; return true; }}",
+        docs = DOCS_JS,
+        bad = js_str(MARKED_INVALID),
+    );
+    let _ = iso_eval_function(page, &arm).await;
     page_url(page).await
 }
+
+/// `__bsDocs()`: this document and the same-origin frames inside it, a few
+/// levels deep, where a form's fields can sit (a demo form in an iframe).
+const DOCS_JS: &str = "var __bsDocs = function() { var out = [document]; \
+   for (var i = 0; i < out.length && i < 12; i++) { var fr = out[i].querySelectorAll('iframe, frame'); \
+     for (var k = 0; k < fr.length; k++) { var d = null; try { d = fr[k].contentDocument; } catch (e) {} \
+       if (d && out.indexOf(d) < 0) out.push(d); } } \
+   return out; };";
+
+/// Fields a page marks as wrong: aria-invalid, or the classes forms use for
+/// it when they mark nothing else (a red `invalid` field).
+const MARKED_INVALID: &str = "[aria-invalid=true], :is(input, select, textarea):is(.invalid, .is-invalid, .error, .has-error, .input-error, .field-error)";
 
 /// Fields the page rejected during the action [`before_action`] started:
 /// those the browser's own form check failed (a required field left empty,
 /// an email without an @), with the message it shows, and those the page's
-/// script newly marked aria-invalid, with the error text tied to them. Up
-/// to 10.
+/// script newly marked invalid (aria-invalid, or a class such as
+/// `invalid`), with the error text tied to them. Same-origin frames count.
+/// Up to 10.
 async fn rejected_fields(page: &Page) -> Vec<String> {
     let decl = format!(
-        "function() {{ {desc} var g = globalThis, out = [], seen = new Set(); \
+        "function() {{ {desc} {docs} var g = globalThis, out = [], seen = new Set(); \
          var text = function(n) {{ return n ? String(n.innerText || n.textContent || '').replace(/\\s+/g, ' ').trim() : ''; }}; \
          var byIds = function(el, attr) {{ var root = el.getRootNode(); \
            return (el.getAttribute(attr) || '').trim().split(/\\s+/).filter(Boolean) \
-             .map(function(id) {{ return text(root.getElementById ? root.getElementById(id) : document.getElementById(id)); }}) \
+             .map(function(id) {{ return text(root.getElementById ? root.getElementById(id) : el.ownerDocument.getElementById(id)); }}) \
              .filter(Boolean).join(' '); }}; \
          var said = function(el) {{ var m = byIds(el, 'aria-errormessage') || byIds(el, 'aria-describedby'); \
            for (var p = el.parentElement, i = 0; !m && p && i < 3; p = p.parentElement, i++) m = text(p.querySelector('[role=alert]')); \
            return m.slice(0, 160); }}; \
          (g.__bsInvalid || []).forEach(function(el) {{ if (seen.has(el)) return; seen.add(el); \
            out.push(__bsDesc(el) + ': ' + (el.validationMessage || said(el) || 'invalid')); }}); \
-         if (g.__bsWasInvalid) Array.from(document.querySelectorAll('[aria-invalid=true]')).forEach(function(el) {{ \
+         if (g.__bsWasInvalid) __bsDocs().forEach(function(d) {{ d.querySelectorAll({bad}).forEach(function(el) {{ \
            if (g.__bsWasInvalid.has(el) || seen.has(el)) return; seen.add(el); \
-           out.push(__bsDesc(el) + ': ' + (said(el) || 'marked invalid')); }}); \
+           out.push(__bsDesc(el) + ': ' + (said(el) || 'marked invalid')); }}); }}); \
          g.__bsInvalid = []; g.__bsWasInvalid = null; \
          return out.slice(0, 10); }}",
         desc = DESCRIBE_JS,
+        docs = DOCS_JS,
+        bad = js_str(MARKED_INVALID),
     );
     iso_eval_function(page, &decl)
         .await
@@ -4997,6 +5100,7 @@ async fn after_action(
     follow_focus(page).await;
     let answered = sessions.take_dialogs(session_id);
     let rejected = rejected_fields(page).await;
+    let changed = typed_changed(page).await;
     let decl = format!(
         "function() {{ {desc} {focused} \
          var dlg = Array.from(document.querySelectorAll('dialog[open], [role=dialog], [role=alertdialog], [aria-modal=true]')) \
@@ -5004,7 +5108,13 @@ async fn after_action(
              var de = document.documentElement; \
              return r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < de.clientWidth && r.top < de.clientHeight \
                && s.visibility !== 'hidden' && s.opacity !== '0'; }}); \
-         var text = dlg ? String(dlg.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 160) : null; \
+         var squash = function(x) {{ return String(x || '').replace(/\\s+/g, ' ').trim(); }}; \
+         var named = dlg ? squash(dlg.getAttribute('aria-label') || (dlg.getAttribute('aria-labelledby') || '').split(/\\s+/) \
+             .map(function(id) {{ var n = id && document.getElementById(id); return n ? n.textContent : ''; }}).join(' ') \
+             || (dlg.querySelector('h1, h2, h3, [role=heading]') || {{}}).textContent) : ''; \
+         var body = dlg ? squash(dlg.innerText) : ''; \
+         if (body.length > 160) body = body.slice(0, 160).replace(/\\s+\\S*$/, '') + '…'; \
+         var text = dlg ? (named ? named.slice(0, 120) + (body && body !== named ? ': ' + body : '') : body) : null; \
          var seen = function(o) {{ var r = o.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(o).visibility !== 'hidden'; }}; \
          var list = null; \
          if (el && el.getAttribute && el.getAttribute('aria-expanded') === 'true') {{ \
@@ -5063,6 +5173,7 @@ async fn after_action(
         focus_trail: None,
         answered,
         rejected,
+        changed,
     }
 }
 
@@ -5090,6 +5201,9 @@ impl AfterAction {
         }
         for d in &self.answered {
             s.push_str(&format!(" The page asked ({d}) and it was accepted."));
+        }
+        if let Some(c) = &self.changed {
+            s.push_str(&format!(" {c}."));
         }
         if !self.rejected.is_empty() {
             s.push_str(&format!(
@@ -5473,6 +5587,11 @@ async fn wait_for_selector(page: &Page, selector: &str, timeout_ms: u64) -> Resu
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
+            // A plain-language selector isn't waited for as CSS (see
+            // resolve_and_wait_for), so there was no wait to time out.
+            if timeout_ms == 0 {
+                bail!("nothing matches {sel} as CSS");
+            }
             bail!("timed out waiting for selector {sel}");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

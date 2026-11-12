@@ -779,6 +779,42 @@ const SCENARIOS = [
     },
   },
   {
+    id: "honest-reports",
+    about: "Reports match the page: a field changed on blur, clear in editors and widgets, rejected fields in frames, off page targets, icon controls, dialog names",
+    async run({ call, raw, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/reports.html` });
+      const value = (expr) => js(call, sessionId, expr);
+      // Typed text the field throws away once focus leaves it.
+      await call("type", { sessionId, selector: "#due", text: "2026-12-25", clear: true });
+      const tab = text(await raw("press_key", { sessionId, key: "Tab" }));
+      expect(tab.includes("changed after typing") && tab.includes("12/24/2026"), `the revert is reported: ${tab}`);
+      // Clear in a widget whose visible box stands in front of a hidden input.
+      await call("type", { sessionId, selector: "#when-input", text: "03/03/2028", clear: true });
+      expect((await value("document.getElementById('when-input').value")) === "03/03/2028", `widget cleared and typed: ${await value("document.getElementById('when-input').value")}`);
+      // Clear in a rich text editor leaves just the new text.
+      await call("type", { sessionId, selector: "#editor", text: "Fresh start", clear: true });
+      const editor = await value("document.getElementById('editor').innerText.trim()");
+      expect(editor === "Fresh start", `editor cleared: ${JSON.stringify(editor)}`);
+      // A form in a same-origin frame marking its field with a class.
+      const next = text(await raw("click", { sessionId, selector: "#next" }));
+      expect(next.includes("rejected 1 field") && next.includes("input#nick"), `rejected in a frame: ${next}`);
+      // A link parked off the page to hide it.
+      const skip = await raw("click", { sessionId, selector: "#skip" });
+      expect(skip.isError && text(skip).includes("can't be scrolled to"), `off page: ${text(skip)}`);
+      // A dialog reports its name, not a dump of its contents.
+      const pick = await call("click", { sessionId, selector: "#pick" });
+      expect(pick.dialog?.startsWith("Choose a year") && pick.dialog.length < 300, `dialog: ${pick.dialog}`);
+      // select_option on something that isn't a dropdown says so.
+      const notList = await raw("select_option", { sessionId, selector: "#pick" });
+      expect(notList.isError && text(notList).includes("isn't a dropdown"), `not a dropdown: ${text(notList)}`);
+      // A click on an icon names the button around it.
+      await call("navigate", { sessionId, url: `${SITE}/icons.html` });
+      const icon = await call("click", { sessionId, selector: "#actions button:nth-child(2) use" });
+      expect(icon.hit?.startsWith("button") && icon.hit.includes('(icon "archive")'), `hit names the button: ${icon.hit}`);
+    },
+  },
+  {
     id: "radio-questions",
     needs: "TYPESAFE_API_KEY",
     about: "Plain language finds radio questions that only their question text tells apart",

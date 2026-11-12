@@ -1,44 +1,44 @@
 {
- "inputs": "222a25163e2834cdb781c06a85d3b93644de483e0bf68dbe53521ac22983ddfe",
+ "inputs": "3ccd99ffd0f7c8fe3644ecc23d43959e4e3b940d41190ed5dcf4d8499a8053c2",
  "answers": {
   "0595f537bf5a8fc67180": {
    "model": "jev-1.14.0",
    "answers": {
     "bot_check": {
      "type": "noul",
-     "noul": 0.04
+     "noul": 0.03
     },
     "element": {
      "type": "choice",
      "choice": "e2",
-     "confidence": 0.92,
+     "confidence": 0.95,
      "probabilities": {
       "back": 0,
       "e1": 0.01,
-      "e2": 0.93,
+      "e2": 0.96,
       "e3": 0,
       "press_key": 0,
-      "scroll_down": 0.05,
+      "scroll_down": 0.03,
       "scroll_up": 0,
-      "wait": 0.01
+      "wait": 0
      }
     },
     "error": {
      "type": "noul",
-     "noul": 0.05
+     "noul": 0.04
     },
     "goal_met": {
      "type": "noul",
-     "noul": 0.09
+     "noul": 0.08
     },
     "irreversible": {
      "type": "noul",
-     "noul": 0.76
+     "noul": 0.8
     },
     "key": {
      "type": "choice",
      "choice": "Enter",
-     "confidence": 0.98,
+     "confidence": 0.99,
      "probabilities": {
       "ArrowDown": 0,
       "ArrowLeft": 0,
@@ -47,19 +47,19 @@
       "Backspace": 0,
       "Delete": 0,
       "End": 0,
-      "Enter": 0.98,
+      "Enter": 0.99,
       "Escape": 0,
       "Home": 0,
       "PageDown": 0,
       "PageUp": 0,
       "Shift+Tab": 0,
       "Space": 0,
-      "Tab": 0.02
+      "Tab": 0.01
      }
     },
     "login": {
      "type": "noul",
-     "noul": 0.03
+     "noul": 0.02
     },
     "operation": {
      "type": "choice",
@@ -230,20 +230,20 @@
     },
     "error": {
      "type": "noul",
-     "noul": 0.04
+     "noul": 0.06
     },
     "goal_met": {
      "type": "noul",
-     "noul": 0.01
+     "noul": 0.02
     },
     "irreversible": {
      "type": "noul",
-     "noul": 0.25
+     "noul": 0.24
     },
     "key": {
      "type": "choice",
      "choice": "Enter",
-     "confidence": 0.79,
+     "confidence": 0.73,
      "probabilities": {
       "ArrowDown": 0,
       "ArrowLeft": 0,
@@ -252,14 +252,14 @@
       "Backspace": 0,
       "Delete": 0,
       "End": 0,
-      "Enter": 0.8,
+      "Enter": 0.75,
       "Escape": 0,
       "Home": 0,
       "PageDown": 0,
       "PageUp": 0,
       "Shift+Tab": 0.01,
       "Space": 0,
-      "Tab": 0.19
+      "Tab": 0.24
      }
     },
     "login": {
@@ -284,19 +284,19 @@
     "value_e2": {
      "type": "choice",
      "choice": "email",
-     "confidence": 0.24,
+     "confidence": 0.42,
      "probabilities": {
-      "__none__": 0.38,
-      "email": 0.62
+      "__none__": 0.29,
+      "email": 0.71
      }
     },
     "value_key": {
      "type": "choice",
      "choice": "email",
-     "confidence": 0.66,
+     "confidence": 0.8,
      "probabilities": {
-      "__none__": 0.17,
-      "email": 0.83
+      "__none__": 0.1,
+      "email": 0.9
      }
     }
    },
@@ -353,22 +353,22 @@
     "element": {
      "type": "choice",
      "choice": "e2",
-     "confidence": 0.88,
+     "confidence": 0.83,
      "probabilities": {
       "back": 0,
-      "e1": 0.02,
-      "e2": 0.89,
-      "e3": 0.05,
+      "e1": 0.05,
+      "e2": 0.85,
+      "e3": 0.07,
       "e4": 0,
       "press_key": 0,
-      "scroll_down": 0.04,
+      "scroll_down": 0.03,
       "scroll_up": 0,
       "wait": 0
      }
     },
     "error": {
      "type": "noul",
-     "noul": 0.02
+     "noul": 0.03
     },
     "goal_met": {
      "type": "noul",
@@ -381,7 +381,7 @@
     "key": {
      "type": "choice",
      "choice": "Enter",
-     "confidence": 0.51,
+     "confidence": 0.46,
      "probabilities": {
       "ArrowDown": 0,
       "ArrowLeft": 0,
@@ -390,14 +390,14 @@
       "Backspace": 0,
       "Delete": 0,
       "End": 0,
-      "Enter": 0.54,
+      "Enter": 0.5,
       "Escape": 0,
       "Home": 0,
       "PageDown": 0,
       "PageUp": 0,
-      "Shift+Tab": 0.01,
+      "Shift+Tab": 0,
       "Space": 0,
-      "Tab": 0.45
+      "Tab": 0.5
      }
     },
     "login": {
@@ -422,21 +422,21 @@
     "value_e2": {
      "type": "choice",
      "choice": "last",
-     "confidence": 0.85,
+     "confidence": 0.74,
      "probabilities": {
-      "__none__": 0.1,
-      "email": 0,
-      "last": 0.9
+      "__none__": 0.16,
+      "email": 0.01,
+      "last": 0.83
      }
     },
     "value_key": {
      "type": "choice",
      "choice": "last",
-     "confidence": 0.91,
+     "confidence": 0.94,
      "probabilities": {
-      "__none__": 0.05,
+      "__none__": 0.03,
       "email": 0.01,
-      "last": 0.94
+      "last": 0.96
      }
     }
    },
@@ -518,14 +518,14 @@
     "element": {
      "type": "choice",
      "choice": "e2",
-     "confidence": 0.46,
+     "confidence": 0.44,
      "probabilities": {
       "back": 0,
-      "e1": 0.05,
-      "e2": 0.53,
+      "e1": 0.03,
+      "e2": 0.51,
       "e3": 0.01,
-      "press_key": 0.02,
-      "scroll_down": 0.38,
+      "press_key": 0.01,
+      "scroll_down": 0.43,
       "scroll_up": 0,
       "wait": 0.01
      }
@@ -540,12 +540,12 @@
     },
     "irreversible": {
      "type": "noul",
-     "noul": 0.49
+     "noul": 0.47
     },
     "key": {
      "type": "choice",
      "choice": "Enter",
-     "confidence": 0.8,
+     "confidence": 0.85,
      "probabilities": {
       "ArrowDown": 0,
       "ArrowLeft": 0,
@@ -554,14 +554,14 @@
       "Backspace": 0,
       "Delete": 0,
       "End": 0,
-      "Enter": 0.81,
+      "Enter": 0.86,
       "Escape": 0,
       "Home": 0,
       "PageDown": 0,
       "PageUp": 0,
       "Shift+Tab": 0,
       "Space": 0,
-      "Tab": 0.19
+      "Tab": 0.14
      }
     },
     "login": {
@@ -571,17 +571,17 @@
     "operation": {
      "type": "choice",
      "choice": "click",
-     "confidence": 1,
+     "confidence": 0.99,
      "probabilities": {
-      "click": 1,
+      "click": 0.99,
       "drag": 0,
-      "hover": 0,
+      "hover": 0.01,
       "right_click": 0
      }
     },
     "stuck": {
      "type": "noul",
-     "noul": 0.11
+     "noul": 0.1
     }
    },
    "usage": {
@@ -675,7 +675,7 @@
     "element": {
      "type": "choice",
      "choice": "e5",
-     "confidence": 1,
+     "confidence": 0.99,
      "probabilities": {
       "back": 0,
       "e1": 0,
@@ -683,9 +683,9 @@
       "e2": 0,
       "e3": 0,
       "e4": 0,
-      "e5": 1,
+      "e5": 0.99,
       "e6": 0,
-      "e7": 0,
+      "e7": 0.01,
       "e8": 0,
       "e9": 0,
       "press_key": 0,
@@ -700,7 +700,7 @@
     },
     "goal_met": {
      "type": "noul",
-     "noul": 0.06
+     "noul": 0.07
     },
     "irreversible": {
      "type": "noul",
@@ -709,7 +709,7 @@
     "key": {
      "type": "choice",
      "choice": "Enter",
-     "confidence": 0.79,
+     "confidence": 0.82,
      "probabilities": {
       "ArrowDown": 0,
       "ArrowLeft": 0,
@@ -718,14 +718,14 @@
       "Backspace": 0,
       "Delete": 0,
       "End": 0,
-      "Enter": 0.8,
+      "Enter": 0.83,
       "Escape": 0,
       "Home": 0,
       "PageDown": 0,
       "PageUp": 0,
       "Shift+Tab": 0.01,
       "Space": 0,
-      "Tab": 0.19
+      "Tab": 0.16
      }
     },
     "login": {
@@ -745,7 +745,7 @@
     },
     "stuck": {
      "type": "noul",
-     "noul": 0.04
+     "noul": 0.03
     },
     "value_e1": {
      "type": "choice",
@@ -768,10 +768,10 @@
     "value_e3": {
      "type": "choice",
      "choice": "__none__",
-     "confidence": 0.94,
+     "confidence": 0.96,
      "probabilities": {
-      "__none__": 0.97,
-      "code": 0.03
+      "__none__": 0.98,
+      "code": 0.02
      }
     },
     "value_e4": {
@@ -786,10 +786,10 @@
     "value_e5": {
      "type": "choice",
      "choice": "code",
-     "confidence": 0.28,
+     "confidence": 0.36,
      "probabilities": {
-      "__none__": 0.36,
-      "code": 0.64
+      "__none__": 0.32,
+      "code": 0.68
      }
     },
     "value_e6": {
@@ -804,10 +804,10 @@
     "value_e8": {
      "type": "choice",
      "choice": "__none__",
-     "confidence": 0.9,
+     "confidence": 0.92,
      "probabilities": {
-      "__none__": 0.95,
-      "code": 0.05
+      "__none__": 0.96,
+      "code": 0.04
      }
     },
     "value_key": {
@@ -830,19 +830,19 @@
    "answers": {
     "bot_check": {
      "type": "noul",
-     "noul": 0.05
+     "noul": 0.06
     },
     "element": {
      "type": "choice",
      "choice": "e2",
-     "confidence": 0.49,
+     "confidence": 0.6,
      "probabilities": {
       "back": 0,
-      "e1": 0.05,
-      "e2": 0.55,
-      "e3": 0.01,
-      "press_key": 0.04,
-      "scroll_down": 0.35,
+      "e1": 0.04,
+      "e2": 0.65,
+      "e3": 0,
+      "press_key": 0.03,
+      "scroll_down": 0.28,
       "scroll_up": 0,
       "wait": 0
      }
@@ -857,12 +857,12 @@
     },
     "irreversible": {
      "type": "noul",
-     "noul": 0.28
+     "noul": 0.27
     },
     "key": {
      "type": "choice",
      "choice": "Enter",
-     "confidence": 0.6,
+     "confidence": 0.71,
      "probabilities": {
       "ArrowDown": 0,
       "ArrowLeft": 0,
@@ -871,19 +871,19 @@
       "Backspace": 0,
       "Delete": 0,
       "End": 0,
-      "Enter": 0.63,
+      "Enter": 0.73,
       "Escape": 0,
       "Home": 0,
       "PageDown": 0,
       "PageUp": 0,
-      "Shift+Tab": 0.01,
+      "Shift+Tab": 0,
       "Space": 0,
-      "Tab": 0.36
+      "Tab": 0.27
      }
     },
     "login": {
      "type": "noul",
-     "noul": 0.04
+     "noul": 0.06
     },
     "operation": {
      "type": "choice",
@@ -898,7 +898,7 @@
     },
     "stuck": {
      "type": "noul",
-     "noul": 0.07
+     "noul": 0.05
     }
    },
    "usage": {
@@ -950,14 +950,14 @@
     "element": {
      "type": "choice",
      "choice": "e12",
-     "confidence": 0.93,
+     "confidence": 0.92,
      "probabilities": {
       "__none__": 0.04,
       "e1": 0,
       "e10": 0,
       "e11": 0,
-      "e12": 0.93,
-      "e13": 0.02,
+      "e12": 0.92,
+      "e13": 0.03,
       "e14": 0.01,
       "e15": 0,
       "e16": 0,
@@ -992,23 +992,23 @@
     "element": {
      "type": "choice",
      "choice": "e2",
-     "confidence": 0.93,
+     "confidence": 0.92,
      "probabilities": {
       "back": 0,
-      "e1": 0.02,
-      "e2": 0.94,
+      "e1": 0.01,
+      "e2": 0.93,
       "e3": 0,
       "e4": 0,
       "e5": 0,
       "press_key": 0,
-      "scroll_down": 0.04,
+      "scroll_down": 0.06,
       "scroll_up": 0,
       "wait": 0
      }
     },
     "error": {
      "type": "noul",
-     "noul": 0.02
+     "noul": 0.03
     },
     "goal_met": {
      "type": "noul",
@@ -1016,12 +1016,12 @@
     },
     "irreversible": {
      "type": "noul",
-     "noul": 0.16
+     "noul": 0.15
     },
     "key": {
      "type": "choice",
      "choice": "Enter",
-     "confidence": 0.67,
+     "confidence": 0.69,
      "probabilities": {
       "ArrowDown": 0,
       "ArrowLeft": 0,
@@ -1030,14 +1030,14 @@
       "Backspace": 0,
       "Delete": 0,
       "End": 0,
-      "Enter": 0.69,
+      "Enter": 0.71,
       "Escape": 0,
       "Home": 0,
       "PageDown": 0,
       "PageUp": 0,
       "Shift+Tab": 0,
       "Space": 0,
-      "Tab": 0.31
+      "Tab": 0.29
      }
     },
     "login": {
@@ -1057,39 +1057,39 @@
     },
     "stuck": {
      "type": "noul",
-     "noul": 0.03
+     "noul": 0.04
     },
     "value_e2": {
      "type": "choice",
      "choice": "first",
-     "confidence": 0.67,
+     "confidence": 0.73,
      "probabilities": {
-      "__none__": 0.25,
+      "__none__": 0.2,
       "email": 0,
-      "first": 0.75,
+      "first": 0.8,
       "last": 0
      }
     },
     "value_e3": {
      "type": "choice",
      "choice": "last",
-     "confidence": 0.69,
+     "confidence": 0.76,
      "probabilities": {
-      "__none__": 0.22,
+      "__none__": 0.17,
       "email": 0,
       "first": 0.01,
-      "last": 0.77
+      "last": 0.82
      }
     },
     "value_key": {
      "type": "choice",
      "choice": "first",
-     "confidence": 0.89,
+     "confidence": 0.83,
      "probabilities": {
-      "__none__": 0.08,
-      "email": 0,
-      "first": 0.92,
-      "last": 0
+      "__none__": 0.11,
+      "email": 0.01,
+      "first": 0.87,
+      "last": 0.01
      }
     }
    },
@@ -1180,12 +1180,12 @@
     "element": {
      "type": "choice",
      "choice": "e3",
-     "confidence": 0.76,
+     "confidence": 0.8,
      "probabilities": {
-      "__none__": 0.17,
+      "__none__": 0.15,
       "e1": 0,
-      "e2": 0.01,
-      "e3": 0.82
+      "e2": 0,
+      "e3": 0.85
      }
     }
    },
@@ -1200,9 +1200,9 @@
     "element": {
      "type": "choice",
      "choice": "e8",
-     "confidence": 0.85,
+     "confidence": 0.83,
      "probabilities": {
-      "__none__": 0.06,
+      "__none__": 0.09,
       "e1": 0,
       "e10": 0,
       "e11": 0,
@@ -1222,8 +1222,8 @@
       "e5": 0,
       "e6": 0,
       "e7": 0,
-      "e8": 0.86,
-      "e9": 0.07
+      "e8": 0.84,
+      "e9": 0.06
      }
     }
    },
