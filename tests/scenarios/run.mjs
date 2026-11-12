@@ -494,7 +494,7 @@ const SCENARIOS = [
   {
     id: "file-upload",
     about: "upload_file attaches through a hidden input behind an Attach button, from bytes or a path, and drops onto a drop zone",
-    async run({ call, raw, session }) {
+    async run({ call, raw, tools, session }) {
       const sessionId = await session();
       await call("navigate", { sessionId, url: `${SITE}/apply.html` });
       const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
@@ -507,9 +507,14 @@ const SCENARIOS = [
       // A file the page's accept list doesn't take still goes in, with a warning.
       const png = await raw("upload_file", { sessionId, selector: "#resume", content: "iVBORw0KGgo=", name: "photo.png" });
       expect(text(png).includes("only accepts"), `it warns about accept: ${text(png).slice(0, 300)}`);
-      // From a path on the server's machine.
-      const file = path.join(mkdtempSync(path.join(tmpdir(), "bs-upload-")), "cv.txt");
+      // From the shared uploads folder, which the tool's description names.
+      const uploads = path.join(stateDir, "uploads");
+      const described = (await tools()).find((t) => t.name === "upload_file").description;
+      expect(described.includes(`Save the file into ${uploads}/`), `the description names the folder: ${described}`);
+      const file = path.join(uploads, "cv.txt");
       writeFileSync(file, "Plain text CV");
+      const missing = await raw("upload_file", { sessionId, selector: "#resume", path: path.join(uploads, "nope.pdf") });
+      expect(missing.isError && text(missing).includes(`save the file into ${uploads}/`), `a missing file points at the folder: ${text(missing)}`);
       const fromPath = await call("upload_file", { sessionId, selector: "#resume", path: file });
       await call("wait_for", { sessionId, expression: "window.formValues.resume.name === 'cv.txt'", timeout: 3000 });
       expect(fromPath.pageShowsName && (await values()).resume.size === 13, `a path works: ${JSON.stringify(fromPath)}`);
@@ -810,7 +815,7 @@ if (jev) {
   process.env.JEV_BASE_URL = jev.url;
   process.env.TYPESAFE_API_KEY ||= "recorded-answers";
 }
-const { call, raw, close } = await connect();
+const { call, raw, tools, close } = await connect();
 let failed = 0;
 for (const s of SCENARIOS.filter((s) => !only || only.includes(s.id))) {
   const opened = [];
@@ -827,7 +832,7 @@ for (const s of SCENARIOS.filter((s) => !only || only.includes(s.id))) {
     // A hung call (a page dialog nobody answers) fails the scenario, not the run.
     let timer;
     await Promise.race([
-      s.run({ call, raw, session, opened }),
+      s.run({ call, raw, tools, session, opened }),
       new Promise((_, reject) => (timer = setTimeout(() => reject(new Failed("hung for 60s")), 60_000))),
     ]).finally(() => clearTimeout(timer));
   } catch (e) {

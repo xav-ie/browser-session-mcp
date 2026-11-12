@@ -1,7 +1,7 @@
 // A minimal MCP stdio client for `browser-session mcp`, shared by the
 // scenarios (tests/scenarios/run.mjs) and the benchmark (bench/run.mjs).
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -13,6 +13,8 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 // temporary directory, one per run so every connection shares it, as the
 // processes of one deployment do.
 export const stateDir = mkdtempSync(path.join(tmpdir(), "bs-bench-"));
+// The shared uploads folder the NixOS module creates, so upload_file names it.
+mkdirSync(path.join(stateDir, "uploads"));
 export const mcpBin = process.env.MCP_BIN ?? path.join(root, "target/release/browser-session");
 
 export async function connect() {
@@ -45,5 +47,7 @@ export async function connect() {
     if (r.isError) throw new Error(r.content?.[0]?.text ?? "tool error");
     return r.structuredContent ?? {};
   };
-  return { raw, call, close: () => server.kill() };
+  // The tools the server lists, with their descriptions.
+  const tools = async () => (await send("tools/list", {})).tools;
+  return { raw, call, tools, close: () => server.kill() };
 }

@@ -259,6 +259,10 @@ in
           "d ${cfg.stateDir} 0755 ${cfg.user} ${cfg.group} - -"
           "d ${cfg.stateDir}/logs 0755 ${cfg.user} ${cfg.group} - -"
           "d ${cfg.stateDir}/states 0700 ${cfg.user} ${cfg.group} - -"
+          # Files agents hand upload_file by path, so their bytes don't pass
+          # through the model: any local user may write (sticky, like /tmp),
+          # and files older than a day are cleared.
+          "d ${cfg.stateDir}/uploads 1777 ${cfg.user} ${cfg.group} 1d -"
         ];
       }
 

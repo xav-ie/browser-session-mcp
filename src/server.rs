@@ -81,7 +81,7 @@ impl ServerHandler for BrowserSessionServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
-            tools: tool_defs(),
+            tools: with_uploads_dir(tool_defs(), crate::uploads_dir().as_deref()),
             ..Default::default()
         })
     }
@@ -823,7 +823,10 @@ impl BrowserSessionServer {
         let (bytes, name) = match (optional_str(&args, "path"), optional_str(&args, "content")) {
             (Some(path), None) => {
                 let bytes = std::fs::read(path).with_context(|| {
-                    format!("reading {path} on the server; a file on another machine goes in `content` as base64")
+                    match crate::uploads_dir() {
+                        Some(d) => format!("reading {path} on the server; save the file into {}/ and pass that path, or send it as `content` (base64)", d.display()),
+                        None => format!("reading {path} on the server; a file on another machine goes in `content` as base64"),
+                    }
                 })?;
                 let name = optional_str(&args, "name")
                     .map(str::to_string)
@@ -4099,6 +4102,11 @@ fn mime_for(name: &str) -> &'static str {
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
         Some("svg") => "image/svg+xml",
+        Some("avif") => "image/avif",
+        Some("heic") => "image/heic",
+        Some("heif") => "image/heif",
+        Some("bmp") => "image/bmp",
+        Some("tif" | "tiff") => "image/tiff",
         Some("zip") => "application/zip",
         _ => "application/octet-stream",
     }
@@ -6004,7 +6012,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "upload_file",
-            "Attach a file in the session's active tab, as if picked in the file dialog (which can't be driven): the page gets a real File with input and change events. `selector` is the file input, or what stands for it on the page: an \"Attach\" or \"Upload\" button, its label or the box around it, whose hidden file input is used. An element with no file input behind it is treated as a drop zone and receives the drag and drop a person dropping the file would make. Give the file as `content` (base64) with its `name`, or as a `path` on the machine the server runs on (the server and Chrome may run in containers that don't see your files; send `content` then). Up to 25 MB. Returns what received the file and whether the page then shows its name, with where the page is as for click; warns when the input's `accept` list doesn't take the file.",
+            "Attach a file in the session's active tab, as if picked in the file dialog (which can't be driven): the page gets a real File with input and change events. `selector` is the file input, or what stands for it on the page: an \"Attach\" or \"Upload\" button, its label or the box around it, whose hidden file input is used. An element with no file input behind it is treated as a drop zone and receives the drag and drop a person dropping the file would make. Give the file as a `path` the server can read, or as `content` (base64) with its `name`. Prefer `path`: `content` passes the whole file through your context.@@UPLOADS@@ Up to 25 MB. Returns what received the file and whether the page then shows its name, with where the page is as for click; warns when the input's `accept` list doesn't take the file.",
             object_schema(
                 &[
                     session_id,
@@ -6475,6 +6483,27 @@ fn tool_defs() -> Vec<Tool> {
     ]
 }
 
+/// Fill in where `upload_file` reads files from: the shared uploads folder
+/// when this server has one, else a note that `path` is on the server's
+/// machine, which may be a container that doesn't see the agent's files.
+fn with_uploads_dir(mut tools: Vec<Tool>, dir: Option<&std::path::Path>) -> Vec<Tool> {
+    let note = match dir {
+        Some(d) => format!(
+            " Save the file into {}/ (shared with the host this server runs on; files older than a day are deleted) and pass that path.",
+            d.display()
+        ),
+        None => " `path` is on the machine the server runs on, which may be a container that doesn't see your files; send `content` then.".to_string(),
+    };
+    for t in &mut tools {
+        if t.name == "upload_file" {
+            if let Some(d) = &t.description {
+                t.description = Some(d.replace("@@UPLOADS@@", &note).into());
+            }
+        }
+    }
+    tools
+}
+
 fn tool(
     name: &'static str,
     description: &'static str,
@@ -6547,6 +6576,26 @@ fn object_schema(props: &[(&str, &Value, &str)], required: &[&str]) -> JsonObjec
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn upload_file_names_the_shared_folder() {
+        let upload = |dir: Option<&std::path::Path>| {
+            with_uploads_dir(tool_defs(), dir)
+                .into_iter()
+                .find(|t| t.name == "upload_file")
+                .and_then(|t| t.description)
+                .unwrap()
+                .to_string()
+        };
+        let shared = upload(Some(std::path::Path::new("/var/lib/bs/uploads")));
+        assert!(
+            shared.contains("Save the file into /var/lib/bs/uploads/"),
+            "{shared}"
+        );
+        let alone = upload(None);
+        assert!(alone.contains("send `content` then"), "{alone}");
+        assert!(!shared.contains("@@") && !alone.contains("@@"));
+    }
 
     #[test]
     fn prose_selectors_skip_the_css_wait() {
