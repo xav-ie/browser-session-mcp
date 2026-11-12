@@ -867,7 +867,7 @@ endBtn.addEventListener("click", async () => {
   }
 });
 
-function showEnded() {
+function showEnded(why?: string) {
   if (ended) return;
   ended = true;
   if (ws) {
@@ -883,6 +883,7 @@ function showEnded() {
   hidePopovers();
   setStatus("ended", "ok");
   overlayEl.textContent =
+    why ||
     "This link has ended and the agent has control. You can close this tab.";
   overlayEl.style.display = "flex";
 }
@@ -931,7 +932,12 @@ async function start() {
     return;
   }
   if (r.status === 410) {
-    showEnded();
+    const why = await r.text().catch(() => "");
+    showEnded(
+      /session .* closed/.test(why)
+        ? "The browser session this link was for has closed. You can close this tab."
+        : undefined,
+    );
     return;
   }
   if (!r.ok) {

@@ -2,7 +2,7 @@
 default: patch
 ---
 
-# Radio questions and upload widgets by plain language
+# Radio questions, upload widgets, and links of closed sessions
 
 - `select_option` lists and picks options in radio groups, clicking through
   the label when the radio itself is hidden, and checks it took.
@@ -11,4 +11,7 @@ default: patch
 - A see-through or sliver-thin file input (FilePond) is offered as the widget
   drawn over it.
 - A selector is looked for in all frames at once.
-- `tests/scenarios` covers radio groups and FilePond-like widgets.
+- A takeover link whose browser session closed ends, and its page says so,
+  instead of reconnecting to a tab that's gone.
+- `tests/scenarios` covers radio groups, FilePond-like widgets and a
+  takeover link outliving its session.

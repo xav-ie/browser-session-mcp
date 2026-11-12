@@ -670,6 +670,45 @@ const SCENARIOS = [
     },
   },
   {
+    id: "takeover-session-closed",
+    about: "A takeover link whose session closed ends instead of reconnecting the page to a tab that's gone",
+    async run() {
+      const port = await new Promise((r) => { const p = http.createServer(); p.listen(0, "127.0.0.1", () => { const n = p.address().port; p.close(() => r(n)); }); });
+      const base = `http://127.0.0.1:${port}`;
+      const daemon = spawn(mcpBin, ["takeover"], {
+        env: { ...process.env, STATE_DIR: stateDir, TAKEOVER_BIND: `127.0.0.1:${port}` },
+        stdio: "ignore",
+      });
+      const saved = process.env.TAKEOVER_BASE_URL;
+      process.env.TAKEOVER_BASE_URL = base;
+      const client = await connect();
+      if (saved === undefined) delete process.env.TAKEOVER_BASE_URL;
+      else process.env.TAKEOVER_BASE_URL = saved;
+      try {
+        for (let i = 0; i < 50 && !(await fetch(`${base}/healthz`).then((r) => r.ok, () => false)); i++) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        const { sessionId } = await client.call("open_browser_session", {});
+        const { token } = await client.call("request_human_takeover", { sessionId, ttlMinutes: 1 });
+        const claim = (cookie) => fetch(`${base}/takeover/${token}/claim`, { method: "POST", headers: cookie ? { cookie } : {} });
+        const first = await claim();
+        expect(first.status === 200, `the open session's link claims: ${first.status}`);
+        const cookie = (first.headers.get("set-cookie") || "").split(";")[0];
+        // Handed back, the page stays open to watch; then the agent closes the session.
+        const back = await fetch(`${base}/takeover/${token}/release`, { method: "POST", headers: { cookie } });
+        expect(back.ok, `handed back: ${back.status}`);
+        await client.call("await_human_takeover", { token, timeout: 3000 });
+        await client.call("close_browser_session", { sessionId });
+        const again = await claim(cookie);
+        const why = await again.text();
+        expect(again.status === 410 && why.includes("closed"), `the closed session's link has ended: ${again.status} ${why}`);
+      } finally {
+        client.close();
+        daemon.kill();
+      }
+    },
+  },
+  {
     id: "takeover-wait",
     needs: "TAKEOVER_BASE_URL",
     about: "await_human_takeover returns at its timeout, not finished and not expired",

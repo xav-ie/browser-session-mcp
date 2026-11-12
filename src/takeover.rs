@@ -504,7 +504,7 @@ async fn handle_conn(mut stream: TcpStream, browser_url: &str) -> Result<()> {
                 .await;
             }
         }
-        route(method, path, cookie.as_deref()).await
+        route(method, path, cookie.as_deref(), browser_url).await
     };
     // Mark the claim cookie Secure whenever the browser reached us over a
     // secure origin: https via the reverse proxy, or loopback (an SSH tunnel to
@@ -598,7 +598,7 @@ fn extract_cookie(head: &str, name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn route(method: &str, path: &str, cookie: Option<&str>) -> Resp {
+async fn route(method: &str, path: &str, cookie: Option<&str>, browser_url: &str) -> Resp {
     // Strip a query string if any.
     let path = path.split('?').next().unwrap_or(path);
 
@@ -612,7 +612,7 @@ async fn route(method: &str, path: &str, cookie: Option<&str>) -> Resp {
             // page load. Unfurl bots / prefetchers issue GETs and don't run JS,
             // so they never reach this and never learn the targetId.
             if let Some(token) = rest.strip_suffix("/claim") {
-                return claim_response(token, cookie).await;
+                return claim_response(token, cookie, browser_url).await;
             }
             // POST /takeover/<token>/{release,control,done}: hand control
             // back, take it again, or end the link. Only the claimant
@@ -709,14 +709,33 @@ async fn serve_file(rel: &str) -> Resp {
 /// First-come-first-serve claim, triggered by the page's on-load POST. Returns
 /// the target and the relay base (a path on this daemon) only to the winning
 /// claimant or a matching reload; a different client gets 409.
-async fn claim_response(token: &str, cookie: Option<&str>) -> Resp {
+async fn claim_response(token: &str, cookie: Option<&str>, browser_url: &str) -> Resp {
     if !valid_token(token) {
         return Resp::new("400 Bad Request", "text/plain", "bad token");
     }
     let ended = tokio::fs::try_exists(done_path(token))
         .await
         .unwrap_or(false);
-    match read_ticket(token).await {
+    let ticket = read_ticket(token).await;
+    // The session closed (its tabs are gone): the link has nothing left to
+    // show, so it ends, rather than the page reconnecting to a tab that will
+    // never come back. Chrome out of reach says nothing either way.
+    if let Ok(t) = &ticket {
+        if !ended
+            && t.expires_at_ms > now_ms()
+            && crate::takeover_relay::session_open(browser_url, &t.session_id).await == Some(false)
+        {
+            if let Err(err) = apply(token, Change::Ended).await {
+                tracing::warn!(error = %err, "ending a takeover whose session closed failed");
+            }
+            return Resp::new(
+                "410 Gone",
+                "text/plain",
+                "the browser session this link was for has closed",
+            );
+        }
+    }
+    match ticket {
         Ok(_) if ended => Resp::new("410 Gone", "text/plain", "this takeover link has ended"),
         Ok(t) if t.expires_at_ms > now_ms() => match claim(token, cookie).await {
             Ok(maybe_secret) => {

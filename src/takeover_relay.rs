@@ -249,13 +249,18 @@ fn same_origin(head: &str) -> bool {
     })
 }
 
-/// Ask Chrome (browser-level socket) for the session's targets. Returns the
-/// requested tab's DevTools URL and every target id in the session.
-async fn session_targets(
-    browser_url: &str,
-    ctx: &str,
-    target_id: &str,
-) -> Result<(Url, HashSet<String>)> {
+/// Whether the session with browser context `ctx` still has a tab: `None`
+/// when Chrome can't be asked.
+pub(crate) async fn session_open(browser_url: &str, ctx: &str) -> Option<bool> {
+    let infos = all_targets(browser_url).await.ok()?;
+    Some(infos.iter().any(|t| {
+        t.get("browserContextId").and_then(Value::as_str) == Some(ctx)
+            && t.get("type").and_then(Value::as_str) == Some("page")
+    }))
+}
+
+/// Every target Chrome has, from a browser-level socket.
+async fn all_targets(browser_url: &str) -> Result<Vec<Value>> {
     let browser_ws = chrome::resolve_ws_endpoint(browser_url).await?;
     let (mut ws, _) = async_tungstenite::tokio::connect_async(browser_ws.as_str())
         .await
@@ -280,6 +285,18 @@ async fn session_targets(
         }
     };
     let _ = ws.close(None).await;
+    Ok(infos)
+}
+
+/// Ask Chrome (browser-level socket) for the session's targets. Returns the
+/// requested tab's DevTools URL and every target id in the session.
+async fn session_targets(
+    browser_url: &str,
+    ctx: &str,
+    target_id: &str,
+) -> Result<(Url, HashSet<String>)> {
+    let browser_ws = chrome::resolve_ws_endpoint(browser_url).await?;
+    let infos = all_targets(browser_url).await?;
     let known = infos
         .iter()
         .filter(|t| t.get("browserContextId").and_then(Value::as_str) == Some(ctx))
