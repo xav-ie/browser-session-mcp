@@ -14,7 +14,7 @@
 // Scenarios that need Jev or takeover are skipped without them. MCP_BIN and
 // STATE_DIR: see tests/mcp.mjs.
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import http from "node:http";
 import path from "node:path";
@@ -402,6 +402,68 @@ const SCENARIOS = [
       // Named, not guessed: unnamed buttons can still be picked by position.
       expect(text(r).includes('"Add gift card product"'), `Jev saw the button's text: ${text(r).slice(0, 200)}`);
       expect((await js(call, sessionId, "document.title")) === "clicked Add gift card product", "the right button was clicked");
+    },
+  },
+  {
+    id: "custom-dropdowns",
+    about: "select_option picks from script-drawn dropdowns (long, searched, portal menus) and native selects, and reads the field back",
+    async run({ call, raw, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/apply.html` });
+      const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
+      // Far down a scrolling menu drawn at the end of the body.
+      const state = await call("select_option", { sessionId, selector: "#state", option: "massachusetts" });
+      expect(state.chosen === "Massachusetts" && state.confirmed, `state: ${JSON.stringify(state)}`);
+      const sponsor = await call("select_option", { sessionId, selector: "#sponsor", option: "No" });
+      expect(sponsor.chosen === "No" && sponsor.confirmed && sponsor.shown.startsWith("No"), `sponsorship: ${JSON.stringify(sponsor)}`);
+      // Only the first 50 countries are drawn until you type; the shortest match wins.
+      const country = await call("select_option", { sessionId, selector: "#country", option: "United States" });
+      expect(country.chosen === "United States +1" && country.confirmed, `country: ${JSON.stringify(country)}`);
+      // Searched as you type, answered after a delay.
+      const school = await call("select_option", { sessionId, selector: "#school", option: "Boston University" });
+      expect(school.chosen === "Boston University" && school.confirmed, `school: ${JSON.stringify(school)}`);
+      // A native select, by the start of its text.
+      const pronouns = await call("select_option", { sessionId, selector: "#pronouns", option: "they" });
+      expect(pronouns.chosen === "They/them" && pronouns.confirmed, `pronouns: ${JSON.stringify(pronouns)}`);
+      const v = await values();
+      expect(v.state === "Massachusetts" && v.sponsor === "No" && v.country === "United States +1" && v.school === "Boston University" && v.pronouns === "They/them",
+        `the form took every choice: ${JSON.stringify(v)}`);
+      const missing = await raw("select_option", { sessionId, selector: "#sponsor", option: "Maybe" });
+      expect(missing.isError && text(missing).includes('"Yes", "No"'), `a missing option fails listing the offered ones: ${text(missing).slice(0, 200)}`);
+      expect((await values()).sponsor === "No", "the failed choice changed nothing");
+      const notList = await raw("select_option", { sessionId, selector: "#first_name", option: "Alex" });
+      expect(notList.isError && text(notList).includes("no list of options opened"), `a plain field fails: ${text(notList).slice(0, 200)}`);
+      expect((await js(call, sessionId, "document.getElementById('first_name').value")) === "", "nothing was typed into the plain field");
+    },
+  },
+  {
+    id: "file-upload",
+    about: "upload_file attaches through a hidden input behind an Attach button, from bytes or a path, and drops onto a drop zone",
+    async run({ call, raw, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/apply.html` });
+      const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
+      const pdf = Buffer.from("%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n");
+      const r = await call("upload_file", { sessionId, selector: "#attach", content: pdf.toString("base64"), name: "resume.pdf" });
+      expect(r.how === "input" && r.into.startsWith("input#resume") && r.mimeType === "application/pdf", `it used the hidden input: ${JSON.stringify(r)}`);
+      await call("wait_for", { sessionId, expression: "window.formValues.resume", timeout: 3000 });
+      const got = (await values()).resume;
+      expect(got.name === "resume.pdf" && got.size === pdf.length && got.type === "application/pdf" && got.head === "%PDF-", `the page read the file: ${JSON.stringify(got)}`);
+      // A file the page's accept list doesn't take still goes in, with a warning.
+      const png = await raw("upload_file", { sessionId, selector: "#resume", content: "iVBORw0KGgo=", name: "photo.png" });
+      expect(text(png).includes("only accepts"), `it warns about accept: ${text(png).slice(0, 300)}`);
+      // From a path on the server's machine.
+      const file = path.join(mkdtempSync(path.join(tmpdir(), "bs-upload-")), "cv.txt");
+      writeFileSync(file, "Plain text CV");
+      const fromPath = await call("upload_file", { sessionId, selector: "#resume", path: file });
+      await call("wait_for", { sessionId, expression: "window.formValues.resume.name === 'cv.txt'", timeout: 3000 });
+      expect(fromPath.pageShowsName && (await values()).resume.size === 13, `a path works: ${JSON.stringify(fromPath)}`);
+      // No file input behind it: dropped.
+      const cover = await call("upload_file", { sessionId, selector: "#cover-drop", content: Buffer.from("Dear team").toString("base64"), name: "cover.txt" });
+      await call("wait_for", { sessionId, expression: "window.formValues.cover", timeout: 3000 });
+      expect(cover.how === "drop" && (await values()).cover.text === "Dear team", `the drop zone took it: ${JSON.stringify(cover)}`);
+      const none = await raw("upload_file", { sessionId, selector: "#resume", content: "AAAA" });
+      expect(none.isError && text(none).includes("needs a file `name`"), "content without a name fails");
     },
   },
   {

@@ -744,6 +744,149 @@ impl BrowserSessionServer {
         )))
     }
 
+    async fn select_option(&self, args: JsonObject) -> Result<Structured<SelectOut>> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let selector = required_str(&args, "selector")?.to_string();
+        let want = required_str(&args, "option")?.to_string();
+        let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
+        let page = sessions.active_page(&session_id).await?;
+        let (css, note) = resolve_and_wait(&page, &selector, timeout).await?;
+        let label = note.unwrap_or(css.clone());
+        let before = page_url(&page).await;
+        let chosen = choose_option(&page, &css, &label, &want).await?;
+        let after = after_action(&page, before, None, (&sessions, &session_id)).await;
+        let (shown, confirmed) = shown_value(&page, &css, &chosen).await;
+        let mut text = after.render(&format!("Chose {chosen:?} in {label}"));
+        if confirmed {
+            text.push_str(&format!(" The field shows {shown:?}."));
+        } else {
+            text.push_str(&format!(
+                " The field doesn't show it (it shows {shown:?}); check with take_screenshot or read before moving on."
+            ));
+        }
+        Ok(ok_text_struct(
+            text,
+            SelectOut {
+                chosen,
+                shown,
+                confirmed,
+                after,
+            },
+        ))
+    }
+
+    async fn upload_file(&self, args: JsonObject) -> Result<Structured<UploadOut>> {
+        let sessions = self.ctx.sessions().await?;
+        let session_id = required_str(&args, "sessionId")?.to_string();
+        let selector = required_str(&args, "selector")?.to_string();
+        let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
+        let (bytes, name) = match (optional_str(&args, "path"), optional_str(&args, "content")) {
+            (Some(path), None) => {
+                let bytes = std::fs::read(path).with_context(|| {
+                    format!("reading {path} on the server; a file on another machine goes in `content` as base64")
+                })?;
+                let name = optional_str(&args, "name")
+                    .map(str::to_string)
+                    .or_else(|| {
+                        std::path::Path::new(path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_else(|| "file".to_string());
+                (bytes, name)
+            }
+            (None, Some(content)) => {
+                let name = optional_str(&args, "name")
+                    .ok_or_else(|| anyhow!("`content` needs a file `name`, such as resume.pdf"))?;
+                let clean: String = content.split_whitespace().collect();
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(clean.as_bytes())
+                    .context("`content` is not valid base64")?;
+                (bytes, name.to_string())
+            }
+            _ => bail!("upload_file takes either `path` or `content` (base64) with `name`"),
+        };
+        if bytes.len() > MAX_UPLOAD_BYTES {
+            bail!(
+                "the file is {} bytes; upload_file takes up to {MAX_UPLOAD_BYTES}",
+                bytes.len()
+            );
+        }
+        let mime = optional_str(&args, "mimeType")
+            .unwrap_or_else(|| mime_for(&name))
+            .to_string();
+        let page = sessions.active_page(&session_id).await?;
+        let (css, note) = resolve_and_wait(&page, &selector, timeout).await?;
+        let label = note.unwrap_or(css.clone());
+        let before = page_url(&page).await;
+        let decl = UPLOAD_JS
+            .replace("@@DEEP@@", jev::DEEP_FIND_JS)
+            .replace("@@DESC@@", DESCRIBE_JS)
+            .replace("@@SEL@@", &js_str(&css))
+            .replace("@@NAME@@", &js_str(&name))
+            .replace("@@TYPE@@", &js_str(&mime))
+            .replace(
+                "@@B64@@",
+                &js_str(&base64::engine::general_purpose::STANDARD.encode(&bytes)),
+            );
+        let v = iso_eval_function(&page, &decl).await?;
+        if v.is_null() {
+            bail!("element `{css}` not found");
+        }
+        let how = v
+            .get("how")
+            .and_then(Value::as_str)
+            .unwrap_or("input")
+            .to_string();
+        let into = v
+            .get("into")
+            .and_then(Value::as_str)
+            .unwrap_or("the page")
+            .to_string();
+        let accept = v.get("accept").and_then(Value::as_str).unwrap_or_default();
+        let after = after_action(&page, before, None, (&sessions, &session_id)).await;
+        let page_shows_name = iso_eval_function(
+            &page,
+            &format!(
+                "function() {{ return String(document.body && document.body.innerText || '').indexOf({}) >= 0; }}",
+                js_str(&name)
+            ),
+        )
+        .await
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+        let mut text = after.render(&format!(
+            "{} {name} ({} bytes, {mime}) {} {into} (for {label})",
+            if how == "drop" { "Dropped" } else { "Attached" },
+            bytes.len(),
+            if how == "drop" { "onto" } else { "to" },
+        ));
+        if !accepts(accept, &name, &mime) {
+            text.push_str(&format!(
+                " The input only accepts {accept}, so the page may reject it."
+            ));
+        }
+        text.push_str(if page_shows_name {
+            " The page shows the file name."
+        } else {
+            " The page doesn't show the file name; check with take_screenshot that it took the file."
+        });
+        Ok(ok_text_struct(
+            text,
+            UploadOut {
+                name,
+                bytes: bytes.len(),
+                mime_type: mime,
+                how,
+                into,
+                page_shows_name,
+                after,
+            },
+        ))
+    }
+
     async fn ask(&self, args: JsonObject) -> Result<Structured<AskOut>> {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
@@ -2241,6 +2384,8 @@ tools! {
     "tap" => tap,
     "swipe" => swipe,
     "type" => type_text,
+    "select_option" => select_option,
+    "upload_file" => upload_file,
     "press_key" => press_key,
     "scroll" => scroll,
     "move_mouse" => move_mouse,
@@ -2370,6 +2515,37 @@ struct ReadOut {
     kept: usize,
     /// False when the page was short enough to return whole, without Jev.
     filtered: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct SelectOut {
+    /// The option picked, as the list shows it.
+    chosen: String,
+    /// What the field shows after: a native select's option, or the text
+    /// by a custom dropdown.
+    shown: String,
+    /// Whether the field shows the chosen option.
+    confirmed: bool,
+    #[serde(flatten)]
+    after: AfterAction,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct UploadOut {
+    /// The file name the page received.
+    name: String,
+    bytes: usize,
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    /// "input" when set on a file input, "drop" when dropped on an element.
+    how: String,
+    /// The file input or drop zone that received it.
+    into: String,
+    /// Whether the file's name appears on the page after.
+    #[serde(rename = "pageShowsName")]
+    page_shows_name: bool,
+    #[serde(flatten)]
+    after: AfterAction,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -3185,11 +3361,12 @@ async fn scroll_viewport(page: &Page, fraction: f64) -> Result<()> {
 /// for Jev, so matching on text could miss long ones.
 async fn set_select_option(page: &Page, css: &str, index: u64, label: &str) -> Result<()> {
     let decl = format!(
-        "function() {{ {deep} const h = __bsDeep({css}); if (!h) return false; const el = h.el; \
-         const o = el.options[{index}]; if (!o) return false; el.value = o.value; \
+        "function() {{ {deep} {native} const h = __bsDeep({css}); if (!h) return false; const el = __bsSelect(h.el); \
+         if (!el) return false; const o = el.options[{index}]; if (!o) return false; el.value = o.value; \
          el.dispatchEvent(new Event('input', {{bubbles: true}})); \
          el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }}",
         deep = jev::DEEP_FIND_JS,
+        native = NATIVE_SELECT_JS,
         css = serde_json::to_string(css).unwrap_or_else(|_| "''".to_string()),
     );
     let v = iso_eval_function(page, &decl).await?;
@@ -3197,6 +3374,339 @@ async fn set_select_option(page: &Page, css: &str, index: u64, label: &str) -> R
         bail!("option {index} ({label:?}) is not in the dropdown");
     }
     Ok(())
+}
+
+/// Sets `__bsSelect(el)`: the native `<select>` an element stands for (the
+/// element itself, the control of a `<label>`, or one inside a wrapper), or
+/// null for a custom dropdown.
+const NATIVE_SELECT_JS: &str = r#"var __bsSelect = function(el) {
+  if (!el) return null;
+  if (el.tagName === 'SELECT') return el;
+  if (el.tagName === 'LABEL' && el.control && el.control.tagName === 'SELECT') return el.control;
+  return (el.querySelector && el.querySelector('select')) || null;
+};"#;
+
+/// Where a custom dropdown's options are kept in the isolated world, for
+/// `jev-ref:` lookups (see DEEP_FIND_JS).
+const OPTION_PICKS: &str = "5e1";
+
+/// The options a custom dropdown shows now, as text, kept under
+/// `OPTION_PICKS` in order. The list is the one the field's
+/// `aria-controls`/`aria-owns` names (on it, inside it or on the focused
+/// element), else every visible `role=option` on the page and in open
+/// shadow roots: menus are often drawn in a portal at the end of the body.
+const OPTIONS_JS: &str = r#"function() { @@DEEP@@
+  var h = __bsDeep(@@SEL@@), el = h && h.el;
+  var vis = function(o) { var r = o.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(o).visibility !== 'hidden'; };
+  var lists = [];
+  [el, el && el.querySelector && el.querySelector('[role=combobox], input'), document.activeElement].forEach(function(n) {
+    if (!n || !n.getAttribute) return;
+    ((n.getAttribute('aria-controls') || '') + ' ' + (n.getAttribute('aria-owns') || '')).split(/\s+/).forEach(function(id) {
+      var l = id && (n.getRootNode().getElementById ? n.getRootNode().getElementById(id) : document.getElementById(id));
+      if (l && lists.indexOf(l) < 0) lists.push(l);
+    });
+  });
+  var opts = [];
+  var take = function(root) { root.querySelectorAll('[role=option]').forEach(function(o) { if (vis(o) && opts.indexOf(o) < 0) opts.push(o); }); };
+  lists.forEach(take);
+  if (!opts.length) {
+    var walk = function(root, depth) { take(root); if (depth > 3) return;
+      root.querySelectorAll('*').forEach(function(n) { if (n.shadowRoot) walk(n.shadowRoot, depth + 1); }); };
+    walk(document, 0);
+  }
+  var store = globalThis.__bsPicks || (globalThis.__bsPicks = { order: [] });
+  store[@@KEY@@] = opts;
+  return opts.map(function(o) { return String(o.innerText || o.textContent || o.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim(); });
+}"#;
+
+/// What a dropdown shows as its value: a native select's chosen option, or
+/// the text nearest the field (its own value, then its ancestors' text up
+/// to four levels, leaving out any open option list), and whether `want`
+/// is in it.
+const SHOWN_JS: &str = r#"function() { @@DEEP@@ @@NATIVE@@
+  var h = __bsDeep(@@SEL@@), el = h && h.el; if (!el) return null;
+  var want = @@WANT@@.toLowerCase();
+  var sel = __bsSelect(el);
+  if (sel) { var o = sel.selectedOptions[0]; var t = o ? o.text.trim() : ''; return { shown: t, has: t.toLowerCase() === want }; }
+  var text = function(n) {
+    var out = '', w = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+    while (w.nextNode()) { var p = w.currentNode.parentElement;
+      if (p && p.closest('[role=listbox], [role=option]')) continue;
+      if (p && getComputedStyle(p).visibility === 'hidden') continue;
+      out += ' ' + w.currentNode.nodeValue; }
+    return out.replace(/\s+/g, ' ').trim();
+  };
+  var first = '';
+  if (el.value) { first = String(el.value).trim(); if (first.toLowerCase().indexOf(want) >= 0) return { shown: first, has: true }; }
+  for (var n = el, i = 0; n && n !== document.body && i < 5; n = n.parentElement, i++) {
+    var t = text(n);
+    if (!t || t.length > 300) continue;
+    if (!first) first = t;
+    if (t.toLowerCase().indexOf(want) >= 0) return { shown: t, has: true };
+  }
+  return { shown: first, has: false };
+}"#;
+
+/// The index of the option `want` names: an exact match (ignoring case and
+/// spacing), else the shortest option that starts with it, else the
+/// shortest that contains it ("United States" picks "United States +1"
+/// over "United States Minor Outlying Islands +1").
+fn pick_option(options: &[String], want: &str) -> Option<usize> {
+    let norm = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let want = norm(want);
+    if want.is_empty() {
+        return None;
+    }
+    let opts: Vec<String> = options.iter().map(|o| norm(o)).collect();
+    if let Some(i) = opts.iter().position(|o| *o == want) {
+        return Some(i);
+    }
+    let shortest = |f: &dyn Fn(&str) -> bool| {
+        opts.iter()
+            .enumerate()
+            .filter(|(_, o)| f(o))
+            .min_by_key(|(_, o)| o.len())
+            .map(|(i, _)| i)
+    };
+    shortest(&|o| o.starts_with(&want)).or_else(|| shortest(&|o| o.contains(&want)))
+}
+
+/// A short list of options for an error message.
+fn option_list(options: &[String]) -> String {
+    let mut s = options
+        .iter()
+        .take(30)
+        .map(|o| format!("{o:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if options.len() > 30 {
+        s.push_str(&format!(" and {} more", options.len() - 30));
+    }
+    s
+}
+
+fn js_str(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "''".to_string())
+}
+
+/// A native select's option labels, or `None` for a custom dropdown.
+async fn native_options(page: &Page, css: &str) -> Result<Option<Vec<String>>> {
+    let decl = format!(
+        "function() {{ {deep} {native} var h = __bsDeep({sel}); var s = h && __bsSelect(h.el); \
+         return s ? Array.from(s.options).map(function(o) {{ return o.text.replace(/\\s+/g, ' ').trim(); }}) : null; }}",
+        deep = jev::DEEP_FIND_JS,
+        native = NATIVE_SELECT_JS,
+        sel = js_str(css),
+    );
+    let v = iso_eval_function(page, &decl).await?;
+    Ok(v.as_array().map(|a| {
+        a.iter()
+            .map(|o| o.as_str().unwrap_or_default().to_string())
+            .collect()
+    }))
+}
+
+/// The options a custom dropdown shows, polled for up to `wait_ms` until
+/// one matches `want` (or, with no match by then, whatever is showing).
+async fn shown_options(page: &Page, css: &str, want: &str, wait_ms: u64) -> Vec<String> {
+    let decl = OPTIONS_JS
+        .replace("@@DEEP@@", jev::DEEP_FIND_JS)
+        .replace("@@KEY@@", &js_str(OPTION_PICKS))
+        .replace("@@SEL@@", &js_str(css));
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        let opts: Vec<String> = iso_eval_function(page, &decl)
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        if pick_option(&opts, want).is_some() || tokio::time::Instant::now() >= deadline {
+            return opts;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// What the dropdown at `css` shows, and whether it is `want`.
+async fn shown_value(page: &Page, css: &str, want: &str) -> (String, bool) {
+    let decl = SHOWN_JS
+        .replace("@@DEEP@@", jev::DEEP_FIND_JS)
+        .replace("@@NATIVE@@", NATIVE_SELECT_JS)
+        .replace("@@SEL@@", &js_str(css))
+        .replace("@@WANT@@", &js_str(want));
+    let v = iso_eval_function(page, &decl).await.unwrap_or(Value::Null);
+    (
+        v.get("shown")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        v.get("has").and_then(Value::as_bool).unwrap_or(false),
+    )
+}
+
+/// Whether the focused element is a dropdown you can search: it takes
+/// typing and says it has a list (`role=combobox`, `aria-autocomplete`,
+/// `aria-haspopup`, `aria-expanded` or a `list` attribute), so typing into
+/// a plain text field never happens by mistake.
+async fn focused_is_combobox(page: &Page) -> bool {
+    iso_eval_function(
+        page,
+        "function() { var el = document.activeElement; \
+         while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement; \
+         var editable = !!el && (el.isContentEditable || \
+           (el.tagName === 'INPUT' && !/^(button|checkbox|radio|submit|reset|file|image|hidden)$/i.test(el.type))); \
+         return editable && (el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-autocomplete') || \
+           el.hasAttribute('aria-haspopup') || el.hasAttribute('aria-expanded') || el.hasAttribute('list')); }",
+    )
+    .await
+    .ok()
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false)
+}
+
+/// Pick `want` in the dropdown at `css`. A native select is set directly.
+/// A custom one is opened with a real click; when the option isn't showing
+/// (a long list drawn in part, or one searched as you type) its text is
+/// typed to filter; then the option is clicked. Returns the option chosen.
+async fn choose_option(page: &Page, css: &str, label: &str, want: &str) -> Result<String> {
+    if let Some(opts) = native_options(page, css).await? {
+        let i = pick_option(&opts, want).ok_or_else(|| {
+            anyhow!(
+                "{label} has no option {want:?}; it offers {}",
+                option_list(&opts)
+            )
+        })?;
+        set_select_option(page, css, i as u64, &opts[i]).await?;
+        return Ok(opts[i].clone());
+    }
+    let (x, y) = element_center(page, css).await?;
+    check_point(page, (x, y), Some(css), label).await?;
+    page.click(Point::new(x, y))
+        .await
+        .with_context(|| format!("opening {label}"))?;
+    let mut opts = shown_options(page, css, want, 1_000).await;
+    // What showed before typing, for the error when typing filters it all out.
+    let offered = opts.clone();
+    let mut typed = false;
+    if pick_option(&opts, want).is_none() && focused_is_combobox(page).await {
+        type_chars(page, want, 0).await?;
+        typed = true;
+        opts = shown_options(page, css, want, 3_000).await;
+    }
+    let Some(i) = pick_option(&opts, want) else {
+        dispatch_key(page, "Escape").await.ok();
+        if opts.is_empty() {
+            opts = offered;
+        }
+        if opts.is_empty() {
+            bail!(
+                "no list of options opened from {label}{}; if it isn't a dropdown, use click or type",
+                if typed {
+                    format!(" (typed {want:?} too)")
+                } else {
+                    String::new()
+                }
+            );
+        }
+        bail!(
+            "{label} has no option {want:?}{}; it offers {}",
+            if typed { " (after typing it)" } else { "" },
+            option_list(&opts)
+        );
+    };
+    let opt = format!("jev-ref:{OPTION_PICKS}:{i}");
+    let at = element_center(page, &opt).await?;
+    let what = format!("the option {:?}", opts[i]);
+    check_point(page, at, Some(&opt), &what).await?;
+    page.click(Point::new(at.0, at.1))
+        .await
+        .with_context(|| format!("clicking {what}"))?;
+    Ok(opts[i].clone())
+}
+
+/// Most bytes upload_file attaches.
+const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+
+/// A file's type from its name, for the `File` the page receives.
+fn mime_for(name: &str) -> &'static str {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("pdf") => "application/pdf",
+        Some("doc") => "application/msword",
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("rtf") => "application/rtf",
+        Some("txt") => "text/plain",
+        Some("csv") => "text/csv",
+        Some("json") => "application/json",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("zip") => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Attach a file to the element at SEL. A file input gets it as its
+/// `files`, with input and change events; an element standing for one (a
+/// label, a box holding one, or an "Attach" button with one beside it) gets
+/// its input's; anything else is treated as a drop zone and receives the
+/// drag and drop events a person dropping the file would send.
+const UPLOAD_JS: &str = r#"function() { @@DEEP@@ @@DESC@@
+  var h = __bsDeep(@@SEL@@); if (!h) return null; var el = h.el;
+  var bin = atob(@@B64@@), bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  var dt = new DataTransfer();
+  dt.items.add(new File([bytes], @@NAME@@, { type: @@TYPE@@, lastModified: Date.now() }));
+  var isFile = function(n) { return n && n.tagName === 'INPUT' && n.type === 'file'; };
+  var input = isFile(el) ? el : null;
+  if (!input && el.tagName === 'LABEL' && isFile(el.control)) input = el.control;
+  if (!input && el.querySelector) input = el.querySelector('input[type=file]');
+  // A button or label stands for the file input beside it; a box with no
+  // input inside is a drop zone, not a way to reach one further up.
+  var control = /^(BUTTON|A|LABEL)$/.test(el.tagName) || el.getAttribute('role') === 'button';
+  for (var n = el.parentElement, up = 0; control && !input && n && up < 2; n = n.parentElement, up++) {
+    var inside = n.querySelectorAll('input[type=file]');
+    if (inside.length === 1) input = inside[0];
+  }
+  if (input) {
+    input.files = dt.files;
+    input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    return { how: 'input', into: __bsDesc(input), accept: input.getAttribute('accept') || '', count: input.files.length };
+  }
+  var r = el.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+  ['dragenter', 'dragover', 'drop'].forEach(function(type) {
+    el.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, dataTransfer: dt }));
+  });
+  return { how: 'drop', into: __bsDesc(el), accept: '', count: 1 };
+}"#;
+
+/// Whether a file input's `accept` list (empty takes anything) takes
+/// `name` of type `mime`.
+fn accepts(accept: &str, name: &str, mime: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let list: Vec<String> = accept
+        .split(',')
+        .map(|a| a.trim().to_ascii_lowercase())
+        .filter(|a| !a.is_empty())
+        .collect();
+    list.is_empty()
+        || list.iter().any(|a| {
+            if let Some(ext) = a.strip_prefix('.') {
+                name.ends_with(&format!(".{ext}"))
+            } else if let Some(group) = a.strip_suffix("/*") {
+                mime.starts_with(&format!("{group}/"))
+            } else {
+                a == mime
+            }
+        })
 }
 
 /// Go back one entry in history — `act`'s `back` pseudo-action.
@@ -4625,6 +5135,73 @@ fn tool_defs() -> Vec<Tool> {
                 &["sessionId", "selector", "text"],
             ),
             writes(true, true),
+        ),
+        tool(
+            "select_option",
+            "Choose an option in a dropdown by its text, in the session's active tab. Works on a native `<select>` (set directly, firing input and change) and on custom dropdowns drawn by scripts (a combobox, a React or other component select, a searchable list): it opens the dropdown with a real click, types `option` to filter when the option isn't in the list showing (long lists drawn in part, and lists searched as you type), clicks the option, and reads the field back. `option` matches exactly ignoring case, else the shortest option starting with it, else the shortest containing it. `selector` is the dropdown: the select, the combobox input or the box you'd click to open it (CSS, or plain words as for click). Returns what was chosen, what the field shows after and whether that is the option (`confirmed`), with where the page is as for click. Fails listing the options offered when none matches, or when no list opens.",
+            object_schema(
+                &[
+                    session_id,
+                    (
+                        "selector",
+                        &str_t,
+                        "The dropdown: a `<select>` (or its label), the combobox input, or the box you'd click to open it. CSS, or plain words as for click.",
+                    ),
+                    (
+                        "option",
+                        &str_t,
+                        "The option's text, or the start of it (\"United States\" picks \"United States +1\").",
+                    ),
+                    (
+                        "timeout",
+                        &pos_int_t,
+                        "Milliseconds to wait for `selector` to appear. Default 5000.",
+                    ),
+                ],
+                &["sessionId", "selector", "option"],
+            ),
+            writes(false, true),
+        ),
+        tool(
+            "upload_file",
+            "Attach a file in the session's active tab, as if picked in the file dialog (which can't be driven): the page gets a real File with input and change events. `selector` is the file input, or what stands for it on the page: an \"Attach\" or \"Upload\" button, its label or the box around it, whose hidden file input is used. An element with no file input behind it is treated as a drop zone and receives the drag and drop a person dropping the file would make. Give the file as `content` (base64) with its `name`, or as a `path` on the machine the server runs on (the server and Chrome may run in containers that don't see your files; send `content` then). Up to 25 MB. Returns what received the file and whether the page then shows its name, with where the page is as for click; warns when the input's `accept` list doesn't take the file.",
+            object_schema(
+                &[
+                    session_id,
+                    (
+                        "selector",
+                        &str_t,
+                        "The file input, an Attach/Upload button or label for it, or a drop zone. CSS, or plain words as for click.",
+                    ),
+                    (
+                        "content",
+                        &str_t,
+                        "The file's bytes as base64. Needs `name`.",
+                    ),
+                    (
+                        "name",
+                        &str_t,
+                        "The file name the page sees, such as resume.pdf. Defaults to the name in `path`.",
+                    ),
+                    (
+                        "path",
+                        &str_t,
+                        "A file on the machine the server runs on, instead of `content`.",
+                    ),
+                    (
+                        "mimeType",
+                        &str_t,
+                        "The file's type. Default from the name's extension (application/pdf for .pdf).",
+                    ),
+                    (
+                        "timeout",
+                        &pos_int_t,
+                        "Milliseconds to wait for `selector` to appear. Default 5000.",
+                    ),
+                ],
+                &["sessionId", "selector"],
+            ),
+            writes(false, true),
         ),
         tool(
             "press_key",

@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Apply</title>
+<style>
+  body { font: 15px system-ui, sans-serif; margin: 2rem auto; max-width: 640px; }
+  .field { margin: 1.2rem 0; }
+  label { display: block; font-weight: 600; margin-bottom: .3rem; }
+  /* A searchable select drawn like the common React select component: the
+     input is a few pixels wide, the value sits in a sibling, and the menu
+     opens on mousedown in a portal at the end of the body. */
+  .select__control { display: flex; align-items: center; border: 1px solid #999; border-radius: 4px; min-height: 36px; padding: 0 8px; cursor: default; position: relative; }
+  .select__value { position: absolute; left: 8px; color: #222; pointer-events: none; }
+  .select__value.placeholder { color: #888; }
+  .select__input { border: 0; outline: 0; font: inherit; width: 2px; min-width: 2px; background: transparent; }
+  .select__input.typing { width: 100%; }
+  .select__arrow { margin-left: auto; color: #666; }
+  .select__menu { position: absolute; background: #fff; border: 1px solid #999; border-radius: 4px; max-height: 180px; overflow-y: auto; z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,.15); }
+  .select__option { padding: 6px 10px; }
+  .select__option:hover, .select__option.focused { background: #def; }
+  .select__empty { padding: 6px 10px; color: #888; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  #cover-drop { border: 2px dashed #999; padding: 1.5rem; text-align: center; color: #555; }
+  #cover-drop.over { border-color: #36c; }
+</style>
+</head>
+<body>
+<h1>Software Engineer application</h1>
+<form id="form" onsubmit="return false">
+  <div class="field">
+    <label for="first_name">First name</label>
+    <input id="first_name" autocomplete="given-name">
+  </div>
+
+  <div class="field">
+    <label id="state-label" for="state">State</label>
+    <div class="select" data-name="state" data-options="states"></div>
+  </div>
+
+  <div class="field">
+    <label id="sponsor-label" for="sponsor">Will you now or in the future require sponsorship?</label>
+    <div class="select" data-name="sponsor" data-options="yesno"></div>
+  </div>
+
+  <div class="field">
+    <label id="country-label" for="country">Country</label>
+    <div class="select" data-name="country" data-options="countries" data-limit="50"></div>
+  </div>
+
+  <div class="field">
+    <label id="school-label" for="school">School</label>
+    <div class="select" data-name="school" data-options="schools" data-async="1"></div>
+  </div>
+
+  <div class="field">
+    <label for="pronouns">Pronouns</label>
+    <select id="pronouns">
+      <option value="">Select...</option>
+      <option value="he">He/him</option>
+      <option value="she">She/her</option>
+      <option value="they">They/them</option>
+      <option value="other">Prefer to self describe</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label>Resume/CV</label>
+    <button type="button" id="attach">Attach</button>
+    <input type="file" id="resume" class="visually-hidden" accept=".pdf,.doc,.docx,.txt,.rtf" tabindex="-1">
+    <span id="resume-name"></span>
+  </div>
+
+  <div class="field">
+    <label>Cover letter</label>
+    <div id="cover-drop">Drop your cover letter here</div>
+  </div>
+
+  <button id="submit">Submit</button>
+</form>
+
+<script>
+const LISTS = {
+  states: ["Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", "District of Columbia", "Florida", "Georgia", "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming"],
+  yesno: ["Yes", "No"],
+  // Long lists only render their first `data-limit` matches, like a
+  // virtualized menu: the rest show up once you type.
+  countries: ["Afghanistan +93", "Albania +355", "Algeria +213", "Andorra +376", "Angola +244", "Argentina +54", "Armenia +374", "Australia +61", "Austria +43", "Azerbaijan +994", "Bahamas +1", "Bahrain +973", "Bangladesh +880", "Barbados +1", "Belarus +375", "Belgium +32", "Belize +501", "Benin +229", "Bhutan +975", "Bolivia +591", "Botswana +267", "Brazil +55", "Bulgaria +359", "Burundi +257", "Cambodia +855", "Cameroon +237", "Canada +1", "Chad +235", "Chile +56", "China +86", "Colombia +57", "Comoros +269", "Costa Rica +506", "Croatia +385", "Cuba +53", "Cyprus +357", "Czechia +420", "Denmark +45", "Djibouti +253", "Dominica +1", "Ecuador +593", "Egypt +20", "El Salvador +503", "Eritrea +291", "Estonia +372", "Eswatini +268", "Ethiopia +251", "Fiji +679", "Finland +358", "France +33", "Gabon +241", "Gambia +220", "Georgia +995", "Germany +49", "Ghana +233", "Greece +30", "Grenada +1", "Guatemala +502", "Guinea +224", "Guyana +592", "Haiti +509", "Honduras +504", "Hungary +36", "Iceland +354", "India +91", "Indonesia +62", "Iran +98", "Iraq +964", "Ireland +353", "Israel +972", "Italy +39", "Jamaica +1", "Japan +81", "Jordan +962", "Kazakhstan +7", "Kenya +254", "Mexico +52", "Netherlands +31", "Norway +47", "Peru +51", "Portugal +351", "Spain +34", "Sweden +46", "Turkey +90", "Uganda +256", "Ukraine +380", "United Kingdom +44", "United States +1", "United States Minor Outlying Islands +1", "Uruguay +598", "Vietnam +84", "Zambia +260", "Zimbabwe +263"],
+  // Searched on the server: nothing until two letters are typed.
+  schools: ["Boston University", "Boston College", "Northeastern University", "Massachusetts Institute of Technology", "University of Massachusetts Boston", "Arizona State University", "University of Arizona"],
+};
+const values = (window.formValues = {});
+
+for (const box of document.querySelectorAll(".select")) {
+  const name = box.dataset.name;
+  const all = LISTS[box.dataset.options];
+  const limit = +box.dataset.limit || Infinity;
+  const isAsync = !!box.dataset.async;
+  box.innerHTML = `<div class="select__control"><div class="select__value placeholder">Select...</div>` +
+    `<input class="select__input" id="${name}" role="combobox" aria-expanded="false" aria-autocomplete="list" ` +
+    `aria-haspopup="listbox" aria-labelledby="${name}-label" autocomplete="off">` +
+    `<span class="select__arrow">&#9662;</span></div>`;
+  const control = box.querySelector(".select__control");
+  const input = box.querySelector("input");
+  const shown = box.querySelector(".select__value");
+  let menu = null, seq = 0;
+
+  const close = () => {
+    menu?.remove();
+    menu = null;
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-controls");
+    input.value = "";
+    input.classList.remove("typing");
+    shown.style.visibility = "";
+  };
+  const render = (items, note) => {
+    if (!menu) {
+      menu = document.createElement("div");
+      menu.className = "select__menu";
+      menu.setAttribute("role", "listbox");
+      menu.id = `react-select-${name}-listbox`;
+      document.body.append(menu);
+      input.setAttribute("aria-expanded", "true");
+      input.setAttribute("aria-controls", menu.id);
+    }
+    const r = control.getBoundingClientRect();
+    Object.assign(menu.style, { left: `${r.left + scrollX}px`, top: `${r.bottom + scrollY + 2}px`, width: `${r.width}px` });
+    menu.innerHTML = "";
+    if (!items.length) {
+      menu.innerHTML = `<div class="select__empty">${note || "No options"}</div>`;
+      return;
+    }
+    items.forEach((label, i) => {
+      const o = document.createElement("div");
+      o.className = "select__option";
+      o.id = `react-select-${name}-option-${i}`;
+      o.setAttribute("role", "option");
+      o.textContent = label;
+      // The menu keeps focus in the input: mousedown would blur it and
+      // close the menu before the click.
+      o.addEventListener("mousedown", (e) => e.preventDefault());
+      o.addEventListener("click", () => {
+        values[name] = label;
+        shown.textContent = label;
+        shown.classList.remove("placeholder");
+        close();
+      });
+      menu.append(o);
+    });
+  };
+  const show = () => {
+    const q = input.value.trim().toLowerCase();
+    if (isAsync) {
+      if (q.length < 2) return render([], "Type to search");
+      const mine = ++seq;
+      render([], "Loading...");
+      setTimeout(() => mine === seq && menu && render(all.filter((s) => s.toLowerCase().includes(q))), 400);
+      return;
+    }
+    render(all.filter((s) => s.toLowerCase().includes(q)).slice(0, limit));
+  };
+  control.addEventListener("mousedown", (e) => {
+    if (e.target !== input) e.preventDefault();
+    input.focus();
+    if (menu) close(); else show();
+  });
+  input.addEventListener("input", () => {
+    input.classList.toggle("typing", !!input.value);
+    shown.style.visibility = input.value ? "hidden" : "";
+    show();
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+    if (e.key === "ArrowDown" && !menu) show();
+  });
+  input.addEventListener("blur", close);
+}
+
+document.getElementById("pronouns").addEventListener("change", (e) => (values.pronouns = e.target.selectedOptions[0].text));
+
+// The file input is hidden; the Attach button opens the file picker.
+const resume = document.getElementById("resume");
+document.getElementById("attach").addEventListener("click", () => resume.click());
+resume.addEventListener("change", async () => {
+  const f = resume.files[0];
+  if (!f) return;
+  const head = new TextDecoder().decode(await f.slice(0, 5).arrayBuffer());
+  values.resume = { name: f.name, size: f.size, type: f.type, head };
+  document.getElementById("resume-name").textContent = `${f.name} (${Math.round(f.size / 1024)} KB)`;
+});
+
+// A drop zone with no file input behind it.
+const drop = document.getElementById("cover-drop");
+drop.addEventListener("dragover", (e) => (e.preventDefault(), drop.classList.add("over")));
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", async (e) => {
+  e.preventDefault();
+  drop.classList.remove("over");
+  const f = e.dataTransfer.files[0];
+  if (!f) return;
+  values.cover = { name: f.name, size: f.size, text: await f.text() };
+  drop.textContent = `Attached ${f.name}`;
+});
+</script>
+</body>
+</html>
