@@ -37,7 +37,7 @@ credentials.
   keyboard input. Stealth can be switched on and off per session.
 - **Test like a slow phone.** Throttle a session's CPU and network, and run
   your own script before the page's to time what happens from the first byte.
-- **[40 tools](#all-40-tools)** for tabs, navigation, clicks and typing,
+- **[42 tools](#all-42-tools)** for tabs, navigation, clicks and typing,
   screenshots, accessibility snapshots, logs, page speed, CPU profiles and
   throttling.
 
@@ -172,7 +172,7 @@ type stays out of the model, and every miss is an error, never a guess.
 [Picking elements with Jev](docs/jev.md) covers the benefits, what Jev sees,
 and tuning.
 
-## All 40 tools
+## All 42 tools
 
 Most tools take a `sessionId` first. Tools marked ⚙ need one of the optional
 background roles from [Deployment](docs/deployment.md).
@@ -189,7 +189,7 @@ turns passkey prompts down, so sites fall back to a password or a code.
 | Tabs | `new_page`, `list_pages`, `switch_tab`, `close_tab` |
 | Navigation | `navigate` |
 | Seeing the page | `take_screenshot`, `take_snapshot` (the accessibility tree as text), `ask`, `read` |
-| Acting on it | `act`, `click`, `tap`, `swipe`, `type`, `press_key`, `scroll`, `move_mouse`, `wait_for`, `evaluate` |
+| Acting on it | `act`, `click`, `tap`, `swipe`, `type`, `select_option`, `upload_file`, `press_key`, `scroll`, `move_mouse`, `wait_for`, `evaluate` |
 | Logs ⚙ | `list_visits`, `list_console_messages`, `list_network_requests` |
 | Page speed and profiling | `measure_page`, `start_profiling`, `stop_profiling` |
 | Stealth | `set_stealth`, `get_stealth` |
@@ -226,7 +226,9 @@ turns passkey prompts down, so sites fall back to a password or a code.
 - `tap({ sessionId, selector | x,y, timeout? })`: a finger tap (touch events), for mobile sessions
 - `swipe({ sessionId, selector? | x,y?, direction? | toX,toY, distance?, durationMs? })`: a finger swipe, e.g. to close a drawer or move a carousel; short and slow drags partway
 - `type({ sessionId, selector, text, delay?, clear?, timeout? })`: `selector` may be plain language or a `jev:` goal; the text itself always comes from you, typed after what the field holds unless `clear`
-- `press_key({ sessionId, key, selector?, repeat?, timeout? })`: `key` is a name (Enter, Tab, ArrowDown…) or a character; `selector` may be plain language or a `jev:` goal and is optional; `repeat` presses it up to 50 times, with `focusTrail` listing focus after each press
+- `select_option({ sessionId, selector, option?, timeout? })` → `{ chosen, options, shown, confirmed, ... }`: picks an option by its text in a native `<select>` or a dropdown drawn by scripts, with or without ARIA roles, in frames too (it opens it, types to filter only lists that may be partial, clicks the option and reads the field back); without `option` it lists the options and closes the list, choosing nothing; fails listing the options when none matches
+- `upload_file({ sessionId, selector, content?, name?, path?, mimeType?, timeout? })` → `{ name, bytes, how, into, pageShowsName, ... }`: attaches a file given as base64 `content` (or a `path` on the server's machine) to a file input, or to the hidden one behind an Attach button or label; an element with no input behind it gets the file dropped on it
+- `press_key({ sessionId, key, selector?, repeat?, timeout? })`: `key` is a name (Enter, Tab, ArrowDown…) or a character; `selector` may be plain language or a `jev:` goal and is optional; `repeat` presses it up to 50 times, with `focusTrail` listing focus after each press; `click`, `tap` and `press_key` list a dropdown's `options` when the action leaves one open
 - `scroll({ sessionId, deltaY?, deltaX?, x?, y? })`
 - `move_mouse({ sessionId, x, y })`
 - `wait_for({ sessionId, selector? | text? | expression? | ms?, timeout? })`: a CSS selector, page text or a JavaScript expression turning truthy (no `jev:` here — it's a poll, not an action); `ms` alone just pauses, for hosts with no timer

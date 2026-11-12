@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Speed</title>
+<style>
+  body { font: 15px system-ui, sans-serif; margin: 1rem; }
+  #speed { display: inline-block; border: 1px solid #999; padding: 6px 10px; width: 200px; cursor: default; }
+  #speed-menu { list-style: none; margin: 0; padding: 0; border: 1px solid #999; width: 220px; }
+  #speed-menu[hidden] { display: none; }
+  #speed-menu div { padding: 5px 10px; }
+</style>
+</head>
+<body>
+<label id="speed-label">Speed</label>
+<span id="speed" tabindex="0" role="combobox" aria-expanded="false" aria-owns="speed-menu" aria-labelledby="speed-label">Medium</span>
+<ul id="speed-menu" role="listbox" hidden>
+  <li><div role="option">Slower</div></li><li><div role="option">Slow</div></li><li><div role="option">Medium</div></li>
+  <li><div role="option">Fast</div></li><li><div role="option">Faster</div></li>
+</ul>
+<script>
+const speed = document.getElementById("speed"), menu = document.getElementById("speed-menu");
+speed.addEventListener("click", () => {
+  menu.hidden = !menu.hidden;
+  speed.setAttribute("aria-expanded", String(!menu.hidden));
+});
+menu.addEventListener("click", (e) => {
+  const o = e.target.closest("[role=option]");
+  if (!o) return;
+  parent.formValues.speed = speed.textContent = o.textContent;
+  menu.hidden = true;
+  speed.setAttribute("aria-expanded", "false");
+});
+</script>
+</body>
+</html>

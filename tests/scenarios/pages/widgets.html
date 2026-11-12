@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Widgets</title>
+<style>
+  body { font: 15px system-ui, sans-serif; margin: 2rem auto; max-width: 640px; }
+  .field { margin: 1.4rem 0; position: relative; }
+  .field > label { display: block; font-weight: 600; margin-bottom: .3rem; }
+  .trigger { display: block; border: 1px solid #999; border-radius: 4px; padding: 8px; cursor: default; min-height: 20px; color: #222; text-decoration: none; }
+  .menu { position: absolute; left: 0; right: 0; background: #fff; border: 1px solid #999; z-index: 5; max-height: 200px; overflow-y: auto; }
+  .menu > * { padding: 6px 10px; }
+  .menu > *:hover { background: #def; }
+  /* Grows in; clicks are ignored until it has finished. */
+  #size-menu { transform: scale(.4); transform-origin: top left; transition: transform 300ms ease-out; }
+  #size-menu.shown { transform: none; }
+  /* The search input is parked off the screen until the box has focus. */
+  #theme-box { display: flex; gap: 6px; align-items: center; }
+  #theme-search { position: absolute; left: -10000px; width: 120px; }
+  #theme-box.focus #theme-search { position: static; }
+  .pill { background: #eee; border-radius: 10px; padding: 2px 8px; }
+  /* Closed, the menu is only moved off the screen. */
+  #country-drop { position: absolute; left: -9999px; top: 100%; width: 100%; z-index: 5; }
+  #country-drop.open { left: 0; }
+  #country-drop ul { list-style: none; margin: 0; padding: 0; background: #fff; border: 1px solid #999; max-height: 180px; overflow-y: auto; }
+  #country-drop li { padding: 5px 10px; }
+  #gender-menu { display: none; }
+  #gender.open #gender-menu { display: block; }
+  .spacer { height: 1400px; }
+  iframe { width: 100%; height: 260px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>Preferences</h1>
+
+<div class="field">
+  <label id="size-label">Size</label>
+  <div id="size" class="trigger" role="combobox" tabindex="0" aria-expanded="false" aria-controls="size-menu" aria-labelledby="size-label">Select...</div>
+  <div id="size-menu" class="menu" role="listbox" hidden>
+    <div role="option">Small</div><div role="option">Medium</div><div role="option">Large</div>
+  </div>
+</div>
+
+<div class="field">
+  <label>Theme</label>
+  <div id="theme-box" class="trigger"><span class="pill" id="theme-pill">Theme: Light</span>
+    <input id="theme-search" role="combobox" aria-expanded="false" aria-controls="theme-menu" autocomplete="off"></div>
+  <div id="theme-menu" class="menu" role="listbox" hidden>
+    <div role="option">Light</div><div role="option">Dark</div><div role="option">Auto</div>
+  </div>
+</div>
+
+<div class="field">
+  <label>Country</label>
+  <a href="javascript:void(0)" id="country-trigger" class="trigger">Choose a country</a>
+  <div id="country-drop"><ul id="country-list"></ul></div>
+</div>
+
+<div class="field">
+  <label>Gender</label>
+  <div id="gender" class="trigger"><span id="gender-text">Gender</span>
+    <div id="gender-menu" class="menu"><div class="item">Male</div><div class="item">Female</div><div class="item">Other</div></div>
+  </div>
+</div>
+
+<div class="field">
+  <label id="late-label">Plan</label>
+  <div id="late" class="trigger" role="combobox" tabindex="0" aria-expanded="false" aria-controls="late-menu" aria-labelledby="late-label">Select...</div>
+  <div id="late-menu" class="menu" role="listbox" hidden>
+    <div role="option">Free</div><div role="option">Pro</div><div role="option">Team</div>
+  </div>
+</div>
+
+<div class="spacer"></div>
+<iframe id="frame" src="widgets-frame.html"></iframe>
+
+<script>
+const values = (window.formValues = {});
+const closeAll = (except) => document.querySelectorAll('[role=listbox]').forEach((m) => {
+  if (m !== except) { m.hidden = true; m.classList.remove("shown"); }
+});
+
+// A list that grows in and ignores clicks until it has.
+const size = document.getElementById("size"), sizeMenu = document.getElementById("size-menu");
+let sizeOpenedAt = 0;
+size.addEventListener("click", () => {
+  if (!sizeMenu.hidden) { sizeMenu.hidden = true; sizeMenu.classList.remove("shown"); size.setAttribute("aria-expanded", "false"); return; }
+  sizeMenu.hidden = false;
+  sizeOpenedAt = performance.now();
+  size.setAttribute("aria-expanded", "true");
+  requestAnimationFrame(() => requestAnimationFrame(() => sizeMenu.classList.add("shown")));
+});
+sizeMenu.addEventListener("click", (e) => {
+  const o = e.target.closest("[role=option]");
+  if (!o || performance.now() - sizeOpenedAt < 350) return;
+  values.size = size.textContent = o.textContent;
+  sizeMenu.hidden = true; sizeMenu.classList.remove("shown"); size.setAttribute("aria-expanded", "false");
+});
+
+// A box whose search input is parked off the screen until it has focus.
+const themeBox = document.getElementById("theme-box"), themeSearch = document.getElementById("theme-search");
+const themeMenu = document.getElementById("theme-menu");
+themeBox.addEventListener("mousedown", (e) => {
+  e.preventDefault();
+  themeBox.classList.add("focus");
+  themeSearch.focus();
+  themeMenu.hidden = !themeMenu.hidden;
+  themeSearch.setAttribute("aria-expanded", String(!themeMenu.hidden));
+});
+themeSearch.addEventListener("blur", () => { themeBox.classList.remove("focus"); themeMenu.hidden = true; });
+themeMenu.addEventListener("mousedown", (e) => e.preventDefault());
+themeMenu.addEventListener("click", (e) => {
+  const o = e.target.closest("[role=option]");
+  if (!o) return;
+  values.theme = o.textContent;
+  document.getElementById("theme-pill").textContent = `Theme: ${o.textContent}`;
+  themeMenu.hidden = true;
+});
+
+// No roles at all, and closed means moved off the screen.
+const countries = ["United States", "United Kingdom", "Afghanistan", "Albania", "Algeria", "Andorra", "Angola", "Argentina", "Armenia", "Australia", "Austria", "Bahamas", "Bahrain", "Bangladesh", "Barbados", "Belarus", "Belgium", "Belize", "Benin", "Bhutan", "Bolivia", "Botswana", "Brazil", "Bulgaria", "Burundi", "Cambodia", "Cameroon", "Canada", "Chad", "Chile"];
+const countryList = document.getElementById("country-list"), countryDrop = document.getElementById("country-drop");
+const countryTrigger = document.getElementById("country-trigger");
+for (const c of countries) {
+  const li = document.createElement("li");
+  li.textContent = c;
+  li.addEventListener("mouseup", () => {
+    values.country = countryTrigger.textContent = c;
+    countryDrop.classList.remove("open");
+  });
+  countryList.append(li);
+}
+countryTrigger.addEventListener("mousedown", (e) => { e.preventDefault(); countryDrop.classList.toggle("open"); });
+
+// No roles, shown with display, and Escape does nothing: only a click closes it.
+const gender = document.getElementById("gender");
+gender.addEventListener("click", (e) => {
+  const item = e.target.closest(".item");
+  if (item) { values.gender = document.getElementById("gender-text").textContent = item.textContent; gender.classList.remove("open"); return; }
+  gender.classList.toggle("open");
+});
+
+// Handlers arrive a second after load, as when a page starts up late.
+setTimeout(() => {
+  const late = document.getElementById("late"), lateMenu = document.getElementById("late-menu");
+  late.addEventListener("click", () => {
+    lateMenu.hidden = !lateMenu.hidden;
+    late.setAttribute("aria-expanded", String(!lateMenu.hidden));
+  });
+  lateMenu.addEventListener("click", (e) => {
+    const o = e.target.closest("[role=option]");
+    if (!o) return;
+    values.plan = late.textContent = o.textContent;
+    lateMenu.hidden = true;
+    late.setAttribute("aria-expanded", "false");
+  });
+}, 1000);
+</script>
+</body>
+</html>
