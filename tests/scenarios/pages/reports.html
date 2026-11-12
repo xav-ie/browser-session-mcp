@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Reports</title>
+  <style>
+    .skip { position: absolute; top: -40px; left: 0; }
+    .widget { position: relative; width: 220px; height: 28px; border: 1px solid #999; }
+    .widget input { position: absolute; inset: 0; opacity: 0; pointer-events: none; }
+    .widget .view { position: absolute; inset: 0; padding: 4px; }
+    #editor { border: 1px solid #999; min-height: 60px; padding: 4px; }
+    iframe { width: 320px; height: 90px; border: 1px solid #999; }
+  </style>
+</head>
+<body>
+  <a href="#main" class="skip" id="skip">Skip to content</a>
+  <main id="main">
+    <label>Due date <input id="due" value="12/24/2026"></label>
+    <div class="widget" id="when"><input id="when-input" tabindex="-1" aria-hidden="true" value="04/17/2022"><span class="view" id="when-view" contenteditable="true">04/17/2022</span></div>
+    <div id="editor" contenteditable="true"><h1>Welcome</h1><p>First paragraph.</p><p>Second paragraph.</p></div>
+    <iframe id="frame" srcdoc="<form id='f'><input id='nick' placeholder='Nickname'><button type='button' id='next'>Next</button></form><script>document.getElementById('next').onclick=function(){var n=document.getElementById('nick');if(!n.value)n.className='invalid';};</script>"></iframe>
+    <button id="pick">Pick a year</button>
+    <div id="years" role="dialog" aria-label="Choose a year" hidden></div>
+  </main>
+  <script>
+    // Reverts to its last good date when focus leaves, as some date fields do.
+    var due = document.getElementById('due'), good = due.value;
+    due.addEventListener('blur', function () { if (!/^\d{2}\/\d{2}\/\d{4}$/.test(due.value)) due.value = good; else good = due.value; });
+    // A visible box in front of a hidden input, kept in step with it.
+    var view = document.getElementById('when-view'), hidden = document.getElementById('when-input');
+    view.addEventListener('input', function () { hidden.value = view.textContent; });
+    document.getElementById('when').addEventListener('mousedown', function (e) { e.preventDefault(); view.focus(); });
+    var years = document.getElementById('years');
+    for (var y = 1990; y <= 2030; y++) { var b = document.createElement('button'); b.textContent = y; years.appendChild(b); }
+    document.getElementById('pick').addEventListener('click', function () { years.hidden = false; });
+  </script>
+</body>
+</html>
