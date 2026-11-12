@@ -1,4 +1,71 @@
 # Changelog
+## 0.1.21 (2026-11-12)
+
+### Features
+
+#### Act inside forms embedded from another site
+
+- `click`, `tap`, `type`, `select_option`, `upload_file` and plain-language
+  selectors reach into cross-origin iframes, in the tab's process or their
+  own.
+- `take_snapshot` includes each frame's tree under its Iframe node.
+- A click inside a frame fails when the page around it covers the point.
+- Focus in a frame is reported as the field there, not the `<iframe>`.
+- `wait_for` finds `text` in frames; `evaluate` and `wait_for` take `frame`.
+- Frames with no size, such as tracking pixels, are skipped, at most 10
+  frames from other sites are searched, and a snapshot reads frames at once,
+  waiting at most 2 s for each.
+- `tests/scenarios` covers an application form embedded from another site.
+
+### Fixes
+
+#### Find drop zones by what they say
+
+- Plain-language selectors find a drop zone a script listens on with no file
+  input, by its class, id or "drop files here" text.
+- A picker with a file and a folder input is offered once, and files go to
+  the file input.
+- A file input parked in the page body is no longer offered as the page.
+- `upload_file` tells Jev it wants a file upload field, so "Resume" means
+  the upload, not an "Import resume" button beside it.
+
+#### Forms say what they did
+
+- `type` sets date, time, datetime-local, month, week, range and color inputs
+  directly, so typed dates no longer leave the field empty. Dates take
+  2026-03-14 or 03/14/2026, times 14:30 or 2:30 PM.
+- `type` reads the field back: it reports text the page reformatted and fails
+  when the field is empty afterwards.
+- `click`, `tap`, `press_key` and `select_option` report the fields a page
+  rejected during the action: the browser's own messages ("Please fill out
+  this field") and error text a page ties to a field it marks invalid.
+- `select_option` closes a multi-select's list after the pick.
+
+#### Radio questions, upload widgets, and links of closed sessions
+
+- `select_option` lists and picks options in radio groups, clicking through
+  the label when the radio itself is hidden, and checks it took.
+- Radios and checkboxes are described with their group's question, and
+  `select_option` counts a radio group's buttons as one answer.
+- A see-through or sliver-thin file input (FilePond) is offered as the widget
+  drawn over it.
+- A selector is looked for in all frames at once.
+- A takeover link whose browser session closed ends, and its page says so,
+  instead of reconnecting to a tab that's gone.
+- A click on something the page has disabled or greyed out fails saying so,
+  instead of reporting a click that did nothing.
+- `tests/scenarios` covers radio groups, FilePond-like widgets, a greyed out
+  question and a takeover link outliving its session.
+
+#### Upload files by path from a shared folder
+
+- The NixOS module creates `STATE_DIR/uploads`, writable by every local user
+  and cleared of files older than a day. Agents save a file there and pass its
+  `path` to `upload_file`, so its bytes never pass through the model.
+- `upload_file`'s description names that folder when the server has one, and
+  steers agents to `path` over base64 `content`.
+- AVIF, HEIC, HEIF, BMP and TIFF images get their own MIME type.
+
 ## 0.1.20 (2026-11-12)
 
 ### Features
