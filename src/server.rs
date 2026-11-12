@@ -867,17 +867,24 @@ impl BrowserSessionServer {
             .to_string();
         let accept = v.get("accept").and_then(Value::as_str).unwrap_or_default();
         let after = after_action(&page, before, None, (&sessions, &session_id)).await;
-        let page_shows_name = iso_eval_function(
-            &page,
-            &format!(
-                "function() {{ return String(document.body && document.body.innerText || '').indexOf({}) >= 0; }}",
-                js_str(&name)
-            ),
-        )
-        .await
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        // Pages often upload the file before listing it, and may show the
+        // name in capitals, so look for a while and ignore case.
+        let shows = format!(
+            "function() {{ return String(document.body && document.body.innerText || '').toLowerCase().indexOf({}) >= 0; }}",
+            js_str(&name.to_lowercase())
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(2_000);
+        let page_shows_name = loop {
+            let seen = iso_eval_function(&page, &shows)
+                .await
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if seen || tokio::time::Instant::now() >= deadline {
+                break seen;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        };
         let mut text = after.render(&format!(
             "{} {name} ({} bytes, {mime}) {} {into} (for {label})",
             if how == "drop" { "Dropped" } else { "Attached" },

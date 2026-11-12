@@ -66,6 +66,27 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     var a = Array.from(s);
     return a.length > n ? a.slice(0, Math.max(0, n - 1)).join('') + '...' : s;
   };
+  var FIELDS = 'input:not([type=hidden]), select, textarea, [role=combobox], [role=listbox], [contenteditable="true"]';
+  var near = function(el) {
+    var n = el;
+    for (var up = 0; up < 4 && n.parentElement; up++) {
+      n = n.parentElement;
+      var others = n.querySelectorAll(FIELDS);
+      for (var o = 0; o < others.length; o++) {
+        if (others[o] !== el && !el.contains(others[o]) && !others[o].contains(el)) return '';
+      }
+      var parts = [];
+      var tw = (n.ownerDocument || document).createTreeWalker(n, NodeFilter.SHOW_TEXT);
+      for (var t = tw.nextNode(); t; t = tw.nextNode()) {
+        var par = t.parentElement;
+        if (el.contains(t) || !par || par.closest('select, option, script, style, [role=listbox]')) continue;
+        if (t.textContent.trim()) parts.push(t.textContent.trim());
+      }
+      var text = parts.join(' ').trim();
+      if (text) return text;
+    }
+    return '';
+  };
   var describe = function(el) {
     var tag = el.tagName.toLowerCase();
     var p = [tag];
@@ -102,8 +123,8 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
       walk(el, 0);
       return parts.join(' ');
     };
-    var labelledBy = function() {
-      var ids = String(el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+    var labelledBy = function(attr) {
+      var ids = String(el.getAttribute(attr || 'aria-labelledby') || '').split(/\s+/).filter(Boolean);
       var root = el.getRootNode();
       return ids.map(function(id) {
         var n = root.getElementById ? root.getElementById(id) : document.getElementById(id);
@@ -135,6 +156,24 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
         (el.labels && el.labels[0] ? el.labels[0].innerText : '') ||
         shown().trim() || (toggle ? adjacent() : el.value || el.getAttribute('value')) || '';
       if (label) p.push('"' + clamp(label, 80) + '"');
+    }
+    // A field whose own label is missing or only a placeholder: the
+    // question it answers usually sits beside it in a wrapper that holds no
+    // other field (a heading div, or a <label> whose `for` names no id).
+    // The question a field answers, where the page names it as a
+    // description ("Resume" for a "Choose file" button).
+    var described = labelledBy('aria-describedby');
+    if (described) p.push('described as "' + clamp(described, 80) + '"');
+    if (fileFor.has(el)) {
+      var fq = near(el);
+      return p.join(' ') + ' (file upload' + (fq ? ' under "' + clamp(fq, 100) + '"' : '') + ')';
+    }
+    var own = el.getAttribute('aria-label') || labelledBy() ||
+      Array.prototype.some.call(el.labels || [], function(l) { return String(l.innerText || '').trim(); });
+    var field = typed || tag === 'select' || el.type === 'file' || role === 'combobox' || role === 'listbox';
+    if (field && !own) {
+      var q = near(el);
+      if (q) p.push('under "' + clamp(q, 100) + '"');
     }
     if (typed || el.type === 'password') {
       var content = el.isContentEditable ? el.innerText : el.value;
@@ -182,6 +221,7 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   var vw = document.documentElement.clientWidth || 0;
   var vh = document.documentElement.clientHeight || 0;
   var inDialog = [], inView = [], offView = [], seen = new Set();
+  var fileFor = new WeakMap();
   var consider = function(el, ox, oy) {
     if (seen.has(el) || el.disabled) return;
     seen.add(el);
@@ -204,6 +244,19 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     var R = roots[ri];
     var nodes = R.root.querySelectorAll(SEL);
     for (var i = 0; i < nodes.length; i++) consider(nodes[i], R.ox, R.oy);
+    // A file input is usually hidden behind a drop zone or button; the box
+    // a person sees around it stands in for it.
+    var files = R.root.querySelectorAll('input[type=file]');
+    for (var fi = 0; fi < files.length; fi++) {
+      var f = files[fi];
+      if (f.disabled || (f.getClientRects().length && styleOf(f).visibility !== 'hidden')) continue;
+      var box = f.parentElement;
+      for (var fu = 0; box && fu < 4 && !box.getClientRects().length; fu++) box = box.parentElement;
+      if (!box || box.querySelectorAll('input[type=file]').length > 1) continue;
+      fileFor.set(box, f);
+      seen.delete(box);
+      consider(box, R.ox, R.oy);
+    }
     // Table headers (often sortable) and sizeable images (hover targets).
     var extra = R.root.querySelectorAll('thead th, img');
     for (var x = 0; x < extra.length && x < 3000; x++) {
@@ -224,7 +277,13 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
       consider(c, R.ox, R.oy);
     }
   }
-  var chosen = inDialog.concat(inView, offView).slice(0, MAX);
+  // A label whose control is offered too would only split the vote: acting
+  // on it acts on the control.
+  var all = inDialog.concat(inView, offView);
+  var offered = new Set(all);
+  var chosen = all.filter(function(el) {
+    return !(el.tagName === 'LABEL' && el.control && offered.has(el.control));
+  }).slice(0, MAX);
   // Keep the offered elements in this isolated world, where page scripts
   // can't see them, under this extraction's token; actions look them up by
   // reference (see DEEP_FIND_JS). The last few extractions are kept, so a

@@ -5,7 +5,7 @@
   pkg-config,
   makeWrapper,
   stdenvNoCC,
-  nodejs_22,
+  nodejs_24,
   pnpm_10,
   pnpmConfigHook,
   fetchPnpmDeps,
@@ -51,7 +51,7 @@ let
     src = ./frontend;
     NODE_OPTIONS = pnpmQuiet;
     nativeBuildInputs = [
-      nodejs_22
+      nodejs_24
       pnpm_10
       pnpm10ConfigHook
     ];

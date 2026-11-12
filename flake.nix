@@ -307,7 +307,7 @@
                 pkgs.cmake
                 pkgs.pkg-config
                 # Frontend toolchain (matches the pinned pnpm).
-                pkgs.nodejs_22
+                pkgs.nodejs_24
                 pkgs.pnpm_10
                 # Release notes: knope document-change.
                 pkgs.knope
