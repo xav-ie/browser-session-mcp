@@ -497,7 +497,7 @@ async fn link_box(link: &Link) -> Result<Option<(f64, f64)>> {
         json!({
             "objectId": object,
             "functionDeclaration": "function() { var r = this.getBoundingClientRect(), s = getComputedStyle(this); \
-               if (!r.width || !r.height) return null; \
+               if (r.width < 2 || r.height < 2 || s.visibility === 'hidden') return null; \
                return [r.left + this.clientLeft + parseFloat(s.paddingLeft || 0), r.top + this.clientTop + parseFloat(s.paddingTop || 0)]; }",
             "returnByValue": true,
         }),
@@ -650,7 +650,22 @@ pub async fn frames(page: &Page) -> Vec<Frame> {
     listed
 }
 
-/// The frames page scripts can't reach, which only [`eval`] can.
+/// Most frames from another site searched in one call: past these, a page
+/// is mostly ads.
+const MAX_CLOSED: usize = 10;
+
+/// The frames page scripts can't reach, which only [`eval`] can. Frames
+/// with no size (tracking pixels, hidden ones) hold nothing to act on and
+/// are left out.
 pub async fn closed(page: &Page) -> Vec<Frame> {
-    frames(page).await.into_iter().filter(|f| f.cross).collect()
+    let mut out = Vec::new();
+    for f in frames(page).await.into_iter().filter(|f| f.cross) {
+        if out.len() >= MAX_CLOSED {
+            break;
+        }
+        if matches!(base_of(&f).await, Ok(Some(_))) {
+            out.push(f);
+        }
+    }
+    out
 }

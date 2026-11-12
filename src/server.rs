@@ -1595,12 +1595,18 @@ impl BrowserSessionServer {
             // Run like `evaluate` (main world, or isolated on stealth
             // sessions), until the value is truthy.
             let stealth = takeover::is_stealth(&session_id).await;
-            let wrapped = wrap_expression(&page, &expr, stealth).await?;
+            let frame = match optional_str(&args, "frame") {
+                Some(f) => Some(frame_by_url(&page, f).await?),
+                None => None,
+            };
+            let wrapped = wrap_expression(&page, &expr, stealth || frame.is_some()).await?;
             let last = std::sync::Mutex::new(Value::Null);
-            let (last, page, wrapped) = (&last, &page, &wrapped);
+            let (last, page, wrapped, frame) = (&last, &page, &wrapped, &frame);
             let found = wait_until(
                 || async move {
-                    let v = if stealth {
+                    let v = if let Some(frame) = frame {
+                        crate::frames::eval(frame, wrapped).await
+                    } else if stealth {
                         iso_eval_function(page, wrapped).await
                     } else {
                         main_world_eval(page, wrapped).await
@@ -1630,10 +1636,24 @@ impl BrowserSessionServer {
             "function() {{ return document.body && document.body.innerText && document.body.innerText.includes({}); }}",
             serde_json::to_string(&needle).unwrap()
         );
+        let page = &page;
+        let body = &body;
         wait_until(
-            || async {
-                let v = iso_eval_function(&page, &body).await?;
-                Ok(v.as_bool().unwrap_or(false))
+            || async move {
+                if iso_eval_top(page, body).await?.as_bool().unwrap_or(false) {
+                    return Ok(true);
+                }
+                for frame in crate::frames::closed(page).await {
+                    if crate::frames::eval(&frame, body)
+                        .await
+                        .ok()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             },
             timeout,
         )
@@ -1660,8 +1680,14 @@ impl BrowserSessionServer {
         // globals. The session already exposes Runtime via the listener when not
         // in stealth, so main-world execution costs no extra detectability there.
         let stealth = takeover::is_stealth(&session_id).await;
-        let wrapped = wrap_expression(&page, &expression, stealth).await?;
-        let value = if stealth {
+        let frame = match optional_str(&args, "frame") {
+            Some(f) => Some(frame_by_url(&page, f).await?),
+            None => None,
+        };
+        let wrapped = wrap_expression(&page, &expression, stealth || frame.is_some()).await?;
+        let value = if let Some(frame) = &frame {
+            crate::frames::eval(frame, &wrapped).await
+        } else if stealth {
             iso_eval_function(&page, &wrapped).await
         } else {
             main_world_eval(&page, &wrapped).await
@@ -4394,8 +4420,67 @@ const FOCUSED_JS: &str = "var el = document.activeElement; \
      break; } \
    var focused = el && el !== document.body && el !== document.documentElement ? __bsDesc(el) : 'nothing';";
 
+/// When focus sits in a frame from another site, which page scripts can't
+/// look into, work in that frame for the rest of the call, so the focused
+/// field (not the `<iframe>`) is what gets described and pressed into.
+async fn follow_focus(page: &Page) {
+    if crate::frames::current().is_some() {
+        return;
+    }
+    let into_frame = iso_eval_top(
+        page,
+        "function() { var el = document.activeElement; \
+         while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement; \
+         if (!el || el.tagName !== 'IFRAME') return false; \
+         try { return !el.contentDocument; } catch (e) { return true; } }",
+    )
+    .await
+    .ok()
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false);
+    if !into_frame {
+        return;
+    }
+    // Frames are listed outer first and an outer frame has focus while one
+    // inside it does, so the last that has it is where the focus is.
+    let mut focused = None;
+    for frame in crate::frames::closed(page).await {
+        let has = crate::frames::eval(&frame, "function() { return document.hasFocus(); }")
+            .await
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if has {
+            focused = Some(frame);
+        }
+    }
+    if focused.is_some() {
+        crate::frames::set_current(focused);
+    }
+}
+
+/// The frame whose URL contains `needle`, for evaluate's `frame`.
+async fn frame_by_url(page: &Page, needle: &str) -> Result<crate::frames::Frame> {
+    let frames = crate::frames::frames(page).await;
+    if let Some(f) = frames.iter().find(|f| f.url.contains(needle)) {
+        return Ok(f.clone());
+    }
+    let urls: Vec<String> = frames
+        .iter()
+        .map(|f| f.url.chars().take(80).collect())
+        .collect();
+    if urls.is_empty() {
+        bail!("no frame's URL contains `{needle}`: the page has no frames");
+    }
+    bail!(
+        "no frame's URL contains `{needle}`; the page's frames: {}",
+        urls.join(", ")
+    )
+}
+
 /// The focused element right now.
 async fn focused_now(page: &Page) -> String {
+    follow_focus(page).await;
     let decl = format!("function() {{ {DESCRIBE_JS} {FOCUSED_JS} return focused; }}");
     iso_eval_function(page, &decl)
         .await
@@ -4414,6 +4499,7 @@ async fn after_action(
     (sessions, session_id): (&crate::sessions::SessionManager, &str),
 ) -> AfterAction {
     tokio::time::sleep(Duration::from_millis(AFTER_ACTION_SETTLE_MS)).await;
+    follow_focus(page).await;
     let answered = sessions.take_dialogs(session_id);
     let decl = format!(
         "function() {{ {desc} {focused} \
@@ -5652,7 +5738,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "wait_for",
-            "Wait until a CSS selector matches an element, a text string appears in the page's visible text, or a JavaScript `expression` is truthy, in the session's active tab, polling every 100ms; or, with only `ms`, just pause. Use it after navigate, click or scroll when content loads asynchronously. Pass one of `selector`, `text` or `expression`; `selector` wins if several are given. `ms` alone is a plain pause for hosts with no timer of their own. `text` is a case-sensitive substring of document.body.innerText, so text hidden with CSS doesn't count. It reads the page without changing it. Returns which selector or text matched. Fails with a timeout error if nothing matches within `timeout`, or if neither argument is given.",
+            "Wait until a CSS selector matches an element, a text string appears in the page's visible text, or a JavaScript `expression` is truthy, in the session's active tab, polling every 100ms; or, with only `ms`, just pause. Use it after navigate, click or scroll when content loads asynchronously. Pass one of `selector`, `text` or `expression`; `selector` wins if several are given. `ms` alone is a plain pause for hosts with no timer of their own. `text` is a case-sensitive substring of document.body.innerText, so text hidden with CSS doesn't count; it is looked for in frames from other sites too. It reads the page without changing it. Returns which selector or text matched. Fails with a timeout error if nothing matches within `timeout`, or if neither argument is given.",
             object_schema(
                 &[
                     session_id,
@@ -5666,6 +5752,11 @@ fn tool_defs() -> Vec<Tool> {
                         "expression",
                         &str_t,
                         "JavaScript to poll until its value is truthy, run like evaluate (e.g. `window.dataLayer.length > 3`).",
+                    ),
+                    (
+                        "frame",
+                        &str_t,
+                        "With `expression`: run it in the frame whose URL contains this (as evaluate's `frame`).",
                     ),
                     (
                         "ms",
@@ -5684,7 +5775,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "evaluate",
-            "Run JavaScript in a tab and return its value as JSON in { result }. A bare expression returns its value; for several statements use `return ...`; promises are awaited. Values that aren't JSON come back reduced: undefined as null and DOM nodes as {}. It runs in the page's main world (can read page globals like window.dataLayer); on stealth sessions (see set_stealth) it runs in an isolated world instead, which sees the DOM but not page-defined globals. `tabIndex` runs it in another tab without switching to it. The code can change the page like any script, so prefer take_snapshot or wait_for when they suffice, and click or type for interaction. Fails with the JS exception's message if the code throws.",
+            "Run JavaScript in a tab and return its value as JSON in { result }. A bare expression returns its value; for several statements use `return ...`; promises are awaited. Values that aren't JSON come back reduced: undefined as null and DOM nodes as {}. It runs in the page's main world (can read page globals like window.dataLayer); on stealth sessions (see set_stealth) it runs in an isolated world instead, which sees the DOM but not page-defined globals. `tabIndex` runs it in another tab without switching to it, and `frame` in an embedded frame. The code can change the page like any script, so prefer take_snapshot or wait_for when they suffice, and click or type for interaction. Fails with the JS exception's message if the code throws.",
             object_schema(
                 &[
                     session_id,
@@ -5697,6 +5788,11 @@ fn tool_defs() -> Vec<Tool> {
                         "tabIndex",
                         &nonneg_int_t,
                         "Tab to run in, by its 0-based list_pages index. Default: the active tab.",
+                    ),
+                    (
+                        "frame",
+                        &str_t,
+                        "Run in the frame whose URL contains this (an embedded form from another site, e.g. `greenhouse.io`), in an isolated world that sees its DOM but not its page globals. Default: the top document.",
                     ),
                 ],
                 &["sessionId", "expression"],

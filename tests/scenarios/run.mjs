@@ -516,11 +516,12 @@ const SCENARIOS = [
   },
   {
     id: "cross-site-frame",
-    about: "An application form embedded from another site: snapshot, type, click, select_option and upload_file reach into the frame",
+    about: "An application form embedded from another site: snapshot, type, click, select_option, upload_file, press_key, wait_for and evaluate reach into the frame",
     async run({ call, raw, session }) {
       if (!LAN_SITE) throw new Skipped("no non-loopback address to serve the frame from");
       const sessionId = await session();
-      await call("navigate", { sessionId, url: `${SITE}/embed.html?src=${encodeURIComponent(`${LAN_SITE}/apply.html`)}` });
+      // Beside it, a tracking pixel from the same site, which holds nothing to act on.
+      await call("navigate", { sessionId, url: `${SITE}/embed.html?src=${encodeURIComponent(`${LAN_SITE}/apply.html`)}&pixel=${encodeURIComponent(`${LAN_SITE}/home.html`)}` });
       await call("wait_for", { sessionId, expression: "Object.keys(window.embedValues).length > 0", timeout: 5000 });
       await call("wait_for", { sessionId, ms: 500 });
       const values = () => js(call, sessionId, "JSON.stringify(window.embedValues)").then(JSON.parse);
@@ -544,6 +545,17 @@ const SCENARIOS = [
       expect(v.first_name === "Test", `typed into the frame: ${JSON.stringify(v)}`);
       expect(v.state === "Massachusetts" && v.pronouns === "She/her", `picked in the frame: ${JSON.stringify(v)}`);
       expect(v.resume?.name === "resume.pdf" && v.resume?.head === "%PDF-", `attached in the frame: ${JSON.stringify(v.resume)}`);
+      // Focus inside the frame is the field there, not the <iframe>.
+      await call("click", { sessionId, selector: "#first_name" });
+      const tab = await call("press_key", { sessionId, key: "Tab" });
+      expect(!tab.focused.startsWith("iframe") && tab.focused.includes("input"), `press_key sees the frame's focus: ${tab.focused}`);
+      // Text only the frame shows, and a script run in the frame.
+      await call("wait_for", { sessionId, text: "Software Engineer application", timeout: 3000 });
+      const host = new URL(LAN_SITE).host;
+      const read = await call("evaluate", { sessionId, frame: host, expression: "document.querySelector('#first_name').value" });
+      expect(read.result === "Test", `evaluate in the frame: ${JSON.stringify(read)}`);
+      const none = await raw("evaluate", { sessionId, frame: "no-such-host", expression: "1" });
+      expect(none.isError && text(none).includes(host), `a missing frame lists the frames: ${text(none).slice(0, 200)}`);
       // Plain language reaches the frame's fields too.
       if (process.env.TYPESAFE_API_KEY) {
         const sponsor = await call("select_option", { sessionId, selector: "Will you now or in the future require sponsorship?", option: "No" });
