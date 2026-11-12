@@ -1,4 +1,80 @@
 # Changelog
+## 0.1.20 (2026-11-12)
+
+### Features
+
+#### Actions say what happened
+
+- `click`, `tap`, `swipe` and `press_key` return the URL, title, focus, any
+  open dialog and whether the page navigated.
+- A click on a covered or off-screen target fails, naming what's in the way.
+- `press_key` takes `repeat`.
+- `wait_for` takes `ms` and `expression`.
+- `navigate` takes `waitUntil: "networkidle"` and `text`.
+- Page dialogs are accepted and passkey prompts declined on every tab.
+- One call drives a session at a time.
+- `take_screenshot` takes `save`, `selector` and `scale`.
+- `open_browser_session` takes `name`, `device`, `userAgent` and
+  `viewport.deviceScaleFactor`.
+- `await_human_takeover` defaults to 25 s and reports `expired`, `url` and
+  `title`.
+- `list_network_requests` takes `details` and `urlContains`.
+- New `measure_page` tool for load speed.
+- `type` appends at the end of the field.
+- Plain-language selectors read text in a web component's `<slot>`.
+- `evaluate` errors include the thrown message.
+- The takeover fill panel fills one-time codes and presses Tab after each fill.
+- `tests/scenarios` reproduces these on local pages in CI.
+
+#### Pick from any dropdown and attach files
+
+- New `select_option` tool lists a dropdown's options, or picks one by text
+  and confirms the field shows it. Works on native selects, script-drawn
+  dropdowns with or without ARIA roles, and dropdowns in frames.
+- `click`, `tap` and `press_key` list the options of a dropdown they leave
+  open.
+- New `upload_file` tool attaches a file from base64 or a server path, or
+  drops it on a drop zone.
+- A click that reaches only the page background no longer counts as landing
+  on its target.
+- `tests/scenarios` covers both tools on local forms and dropdowns.
+
+#### Watch the agent after a takeover, and take control again
+
+- A takeover link now opens with the person in control, and every call on
+  the session except reading logs fails with "a person has control" until
+  they hand back, so nothing the agent does lands under them and nothing
+  reads what they type.
+- Done is now Hand back: the agent resumes and the link stays open in watch
+  mode, a live view where clicks and keys are refused by the relay. Take
+  control pauses the agent again. End closes the link, as does leaving the
+  page closed for a minute.
+- `await_human_takeover` returns on the handback with a new `watching` field,
+  and fails on a token whose link ended and was already reported.
+- While watching, a click, tap, key, scroll, touch drag or paste shows a
+  hint to take control first.
+- The takeover page reconnects by itself after a dropped connection, such as
+  a phone pausing it.
+
+### Fixes
+
+#### Find form fields by their question
+
+- Plain-language selectors find a field by the question beside it when the
+  page links no label to it, and read `aria-describedby`.
+- A hidden file input is offered as the drop zone or box around it.
+- A label is no longer offered beside its own control.
+- `upload_file` waits up to 2 s for the page to show the file name, in any
+  case.
+- `tests/scenarios` covers fields laid out as job boards draw them.
+
+#### Takeover wording leads with the link
+
+- `request_human_takeover` opens with "Get a human takeover link (URL)", so
+  hosts that show only a description's first line rank it for "takeover link".
+- Agents with no background task are told to show the link, end their turn,
+  and await once the user says they're done.
+
 ## 0.1.19 (2026-11-06)
 
 ### Fixes

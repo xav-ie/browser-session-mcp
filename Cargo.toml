@@ -1,6 +1,6 @@
 [package]
 name = "browser-session-mcp"
-version = "0.1.19"
+version = "0.1.20"
 edition = "2021"
 description = "MCP server giving each caller an isolated browser session against a shared persistent Chrome."
 license = "MIT"
