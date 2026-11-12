@@ -1,7 +1,211 @@
 {
- "inputs": "058081431d5d4327c084202420190e785ff1bc73bcd8eead5e5940862bd5360e",
+ "inputs": "222a25163e2834cdb781c06a85d3b93644de483e0bf68dbe53521ac22983ddfe",
  "answers": {
-  "0f77dc3e90d45914d71e": {
+  "0595f537bf5a8fc67180": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "bot_check": {
+     "type": "noul",
+     "noul": 0.04
+    },
+    "element": {
+     "type": "choice",
+     "choice": "e2",
+     "confidence": 0.92,
+     "probabilities": {
+      "back": 0,
+      "e1": 0.01,
+      "e2": 0.93,
+      "e3": 0,
+      "press_key": 0,
+      "scroll_down": 0.05,
+      "scroll_up": 0,
+      "wait": 0.01
+     }
+    },
+    "error": {
+     "type": "noul",
+     "noul": 0.05
+    },
+    "goal_met": {
+     "type": "noul",
+     "noul": 0.09
+    },
+    "irreversible": {
+     "type": "noul",
+     "noul": 0.76
+    },
+    "key": {
+     "type": "choice",
+     "choice": "Enter",
+     "confidence": 0.98,
+     "probabilities": {
+      "ArrowDown": 0,
+      "ArrowLeft": 0,
+      "ArrowRight": 0,
+      "ArrowUp": 0,
+      "Backspace": 0,
+      "Delete": 0,
+      "End": 0,
+      "Enter": 0.98,
+      "Escape": 0,
+      "Home": 0,
+      "PageDown": 0,
+      "PageUp": 0,
+      "Shift+Tab": 0,
+      "Space": 0,
+      "Tab": 0.02
+     }
+    },
+    "login": {
+     "type": "noul",
+     "noul": 0.03
+    },
+    "operation": {
+     "type": "choice",
+     "choice": "click",
+     "confidence": 1,
+     "probabilities": {
+      "click": 1,
+      "drag": 0,
+      "hover": 0,
+      "right_click": 0
+     }
+    },
+    "stuck": {
+     "type": "noul",
+     "noul": 0.04
+    }
+   },
+   "usage": {
+    "input_tokens": 1382,
+    "output_tokens": 363
+   }
+  },
+  "24b4aabeeefb9c253646": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e2",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e2": 1,
+      "e3": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 463,
+    "output_tokens": 52
+   }
+  },
+  "2b2bcd5dc180ebba569f": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e4",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e10": 0,
+      "e11": 0,
+      "e12": 0,
+      "e13": 0,
+      "e14": 0,
+      "e15": 0,
+      "e16": 0,
+      "e17": 0,
+      "e18": 0,
+      "e19": 0,
+      "e2": 0,
+      "e20": 0,
+      "e21": 0,
+      "e3": 0,
+      "e4": 1,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0,
+      "e9": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1818,
+    "output_tokens": 208
+   }
+  },
+  "446b714d092ea5840a42": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e21",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e10": 0,
+      "e11": 0,
+      "e12": 0,
+      "e13": 0,
+      "e14": 0,
+      "e15": 0,
+      "e16": 0,
+      "e17": 0,
+      "e18": 0,
+      "e19": 0,
+      "e2": 0,
+      "e20": 0,
+      "e21": 1,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0,
+      "e9": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1807,
+    "output_tokens": 209
+   }
+  },
+  "4e68b544af24243b061a": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e3",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e10": 0,
+      "e2": 0,
+      "e3": 1,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0,
+      "e9": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1347,
+    "output_tokens": 109
+   }
+  },
+  "559f1e11be3cba9989f0": {
    "model": "jev-1.14.0",
    "answers": {
     "bot_check": {
@@ -10,8 +214,468 @@
     },
     "element": {
      "type": "choice",
+     "choice": "e2",
+     "confidence": 0.99,
+     "probabilities": {
+      "back": 0,
+      "e1": 0,
+      "e2": 0.99,
+      "e3": 0.01,
+      "e4": 0,
+      "press_key": 0,
+      "scroll_down": 0,
+      "scroll_up": 0,
+      "wait": 0
+     }
+    },
+    "error": {
+     "type": "noul",
+     "noul": 0.04
+    },
+    "goal_met": {
+     "type": "noul",
+     "noul": 0.01
+    },
+    "irreversible": {
+     "type": "noul",
+     "noul": 0.25
+    },
+    "key": {
+     "type": "choice",
+     "choice": "Enter",
+     "confidence": 0.79,
+     "probabilities": {
+      "ArrowDown": 0,
+      "ArrowLeft": 0,
+      "ArrowRight": 0,
+      "ArrowUp": 0,
+      "Backspace": 0,
+      "Delete": 0,
+      "End": 0,
+      "Enter": 0.8,
+      "Escape": 0,
+      "Home": 0,
+      "PageDown": 0,
+      "PageUp": 0,
+      "Shift+Tab": 0.01,
+      "Space": 0,
+      "Tab": 0.19
+     }
+    },
+    "login": {
+     "type": "noul",
+     "noul": 0.03
+    },
+    "operation": {
+     "type": "choice",
+     "choice": "click",
+     "confidence": 0.99,
+     "probabilities": {
+      "click": 0.99,
+      "drag": 0,
+      "hover": 0.01,
+      "right_click": 0
+     }
+    },
+    "stuck": {
+     "type": "noul",
+     "noul": 0.02
+    },
+    "value_e2": {
+     "type": "choice",
+     "choice": "email",
+     "confidence": 0.24,
+     "probabilities": {
+      "__none__": 0.38,
+      "email": 0.62
+     }
+    },
+    "value_key": {
+     "type": "choice",
+     "choice": "email",
+     "confidence": 0.66,
+     "probabilities": {
+      "__none__": 0.17,
+      "email": 0.83
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1546,
+    "output_tokens": 435
+   }
+  },
+  "589eb8fe6e29fbc69641": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
      "choice": "e5",
-     "confidence": 0.98,
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e10": 0,
+      "e11": 0,
+      "e12": 0,
+      "e13": 0,
+      "e14": 0,
+      "e15": 0,
+      "e16": 0,
+      "e17": 0,
+      "e18": 0,
+      "e19": 0,
+      "e2": 0,
+      "e20": 0,
+      "e21": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 1,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0,
+      "e9": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1817,
+    "output_tokens": 208
+   }
+  },
+  "641606c52a57c90afb16": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "bot_check": {
+     "type": "noul",
+     "noul": 0.03
+    },
+    "element": {
+     "type": "choice",
+     "choice": "e2",
+     "confidence": 0.88,
+     "probabilities": {
+      "back": 0,
+      "e1": 0.02,
+      "e2": 0.89,
+      "e3": 0.05,
+      "e4": 0,
+      "press_key": 0,
+      "scroll_down": 0.04,
+      "scroll_up": 0,
+      "wait": 0
+     }
+    },
+    "error": {
+     "type": "noul",
+     "noul": 0.02
+    },
+    "goal_met": {
+     "type": "noul",
+     "noul": 0.01
+    },
+    "irreversible": {
+     "type": "noul",
+     "noul": 0.17
+    },
+    "key": {
+     "type": "choice",
+     "choice": "Enter",
+     "confidence": 0.51,
+     "probabilities": {
+      "ArrowDown": 0,
+      "ArrowLeft": 0,
+      "ArrowRight": 0,
+      "ArrowUp": 0,
+      "Backspace": 0,
+      "Delete": 0,
+      "End": 0,
+      "Enter": 0.54,
+      "Escape": 0,
+      "Home": 0,
+      "PageDown": 0,
+      "PageUp": 0,
+      "Shift+Tab": 0.01,
+      "Space": 0,
+      "Tab": 0.45
+     }
+    },
+    "login": {
+     "type": "noul",
+     "noul": 0.03
+    },
+    "operation": {
+     "type": "choice",
+     "choice": "click",
+     "confidence": 0.99,
+     "probabilities": {
+      "click": 0.99,
+      "drag": 0,
+      "hover": 0.01,
+      "right_click": 0
+     }
+    },
+    "stuck": {
+     "type": "noul",
+     "noul": 0.03
+    },
+    "value_e2": {
+     "type": "choice",
+     "choice": "last",
+     "confidence": 0.85,
+     "probabilities": {
+      "__none__": 0.1,
+      "email": 0,
+      "last": 0.9
+     }
+    },
+    "value_key": {
+     "type": "choice",
+     "choice": "last",
+     "confidence": 0.91,
+     "probabilities": {
+      "__none__": 0.05,
+      "email": 0.01,
+      "last": 0.94
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1529,
+    "output_tokens": 449
+   }
+  },
+  "6eb2528764cb7401fffc": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e10",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e10": 1,
+      "e11": 0,
+      "e12": 0,
+      "e13": 0,
+      "e14": 0,
+      "e15": 0,
+      "e16": 0,
+      "e17": 0,
+      "e18": 0,
+      "e19": 0,
+      "e2": 0,
+      "e20": 0,
+      "e21": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0,
+      "e9": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1803,
+    "output_tokens": 209
+   }
+  },
+  "8a4dd1171ac1a6602ef0": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e1",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 1,
+      "e2": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 579,
+    "output_tokens": 92
+   }
+  },
+  "9039a087de46a3745501": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "bot_check": {
+     "type": "noul",
+     "noul": 0.05
+    },
+    "element": {
+     "type": "choice",
+     "choice": "e2",
+     "confidence": 0.46,
+     "probabilities": {
+      "back": 0,
+      "e1": 0.05,
+      "e2": 0.53,
+      "e3": 0.01,
+      "press_key": 0.02,
+      "scroll_down": 0.38,
+      "scroll_up": 0,
+      "wait": 0.01
+     }
+    },
+    "error": {
+     "type": "noul",
+     "noul": 0.06
+    },
+    "goal_met": {
+     "type": "noul",
+     "noul": 0.05
+    },
+    "irreversible": {
+     "type": "noul",
+     "noul": 0.49
+    },
+    "key": {
+     "type": "choice",
+     "choice": "Enter",
+     "confidence": 0.8,
+     "probabilities": {
+      "ArrowDown": 0,
+      "ArrowLeft": 0,
+      "ArrowRight": 0,
+      "ArrowUp": 0,
+      "Backspace": 0,
+      "Delete": 0,
+      "End": 0,
+      "Enter": 0.81,
+      "Escape": 0,
+      "Home": 0,
+      "PageDown": 0,
+      "PageUp": 0,
+      "Shift+Tab": 0,
+      "Space": 0,
+      "Tab": 0.19
+     }
+    },
+    "login": {
+     "type": "noul",
+     "noul": 0.04
+    },
+    "operation": {
+     "type": "choice",
+     "choice": "click",
+     "confidence": 1,
+     "probabilities": {
+      "click": 1,
+      "drag": 0,
+      "hover": 0,
+      "right_click": 0
+     }
+    },
+    "stuck": {
+     "type": "noul",
+     "noul": 0.11
+    }
+   },
+   "usage": {
+    "input_tokens": 1361,
+    "output_tokens": 363
+   }
+  },
+  "9147681b08c27f5c8b09": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e3",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e10": 0,
+      "e11": 0,
+      "e12": 0,
+      "e13": 0,
+      "e14": 0,
+      "e15": 0,
+      "e16": 0,
+      "e17": 0,
+      "e18": 0,
+      "e19": 0,
+      "e2": 0,
+      "e20": 0,
+      "e21": 0,
+      "e3": 1,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0,
+      "e9": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1821,
+    "output_tokens": 208
+   }
+  },
+  "943ba67bf172ce638961": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e6",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e10": 0,
+      "e11": 0,
+      "e12": 0,
+      "e13": 0,
+      "e14": 0,
+      "e15": 0,
+      "e16": 0,
+      "e17": 0,
+      "e18": 0,
+      "e19": 0,
+      "e2": 0,
+      "e20": 0,
+      "e21": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "e6": 1,
+      "e7": 0,
+      "e8": 0,
+      "e9": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1819,
+    "output_tokens": 208
+   }
+  },
+  "9b9d9bfb30b2f16a1c68": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "bot_check": {
+     "type": "noul",
+     "noul": 0.02
+    },
+    "element": {
+     "type": "choice",
+     "choice": "e5",
+     "confidence": 1,
      "probabilities": {
       "back": 0,
       "e1": 0,
@@ -19,13 +683,13 @@
       "e2": 0,
       "e3": 0,
       "e4": 0,
-      "e5": 0.98,
+      "e5": 1,
       "e6": 0,
-      "e7": 0.01,
+      "e7": 0,
       "e8": 0,
       "e9": 0,
       "press_key": 0,
-      "scroll_down": 0.01,
+      "scroll_down": 0,
       "scroll_up": 0,
       "wait": 0
      }
@@ -40,12 +704,12 @@
     },
     "irreversible": {
      "type": "noul",
-     "noul": 0.12
+     "noul": 0.16
     },
     "key": {
      "type": "choice",
      "choice": "Enter",
-     "confidence": 0.87,
+     "confidence": 0.79,
      "probabilities": {
       "ArrowDown": 0,
       "ArrowLeft": 0,
@@ -54,14 +718,14 @@
       "Backspace": 0,
       "Delete": 0,
       "End": 0,
-      "Enter": 0.88,
+      "Enter": 0.8,
       "Escape": 0,
       "Home": 0,
       "PageDown": 0,
       "PageUp": 0,
       "Shift+Tab": 0.01,
       "Space": 0,
-      "Tab": 0.11
+      "Tab": 0.19
      }
     },
     "login": {
@@ -104,28 +768,28 @@
     "value_e3": {
      "type": "choice",
      "choice": "__none__",
-     "confidence": 0.98,
+     "confidence": 0.94,
      "probabilities": {
-      "__none__": 0.99,
-      "code": 0.01
+      "__none__": 0.97,
+      "code": 0.03
      }
     },
     "value_e4": {
      "type": "choice",
      "choice": "__none__",
-     "confidence": 0.92,
+     "confidence": 0.94,
      "probabilities": {
-      "__none__": 0.96,
-      "code": 0.04
+      "__none__": 0.97,
+      "code": 0.03
      }
     },
     "value_e5": {
      "type": "choice",
      "choice": "code",
-     "confidence": 0.18,
+     "confidence": 0.28,
      "probabilities": {
-      "__none__": 0.41,
-      "code": 0.59
+      "__none__": 0.36,
+      "code": 0.64
      }
     },
     "value_e6": {
@@ -140,505 +804,109 @@
     "value_e8": {
      "type": "choice",
      "choice": "__none__",
-     "confidence": 0.94,
+     "confidence": 0.9,
      "probabilities": {
-      "__none__": 0.97,
-      "code": 0.03
+      "__none__": 0.95,
+      "code": 0.05
      }
     },
     "value_key": {
      "type": "choice",
      "choice": "code",
-     "confidence": 0.32,
+     "confidence": 0.46,
      "probabilities": {
-      "__none__": 0.34,
-      "code": 0.66
+      "__none__": 0.27,
+      "code": 0.73
      }
     }
    },
    "usage": {
-    "input_tokens": 2126,
+    "input_tokens": 2137,
     "output_tokens": 694
    }
   },
-  "211992ea9758043e7127": {
+  "a642ff31df3d7fc86cb5": {
    "model": "jev-1.14.0",
    "answers": {
-    "element": {
-     "type": "choice",
-     "choice": "e3",
-     "confidence": 1,
-     "probabilities": {
-      "__none__": 0,
-      "e1": 0,
-      "e10": 0,
-      "e11": 0,
-      "e12": 0,
-      "e13": 0,
-      "e14": 0,
-      "e15": 0,
-      "e16": 0,
-      "e17": 0,
-      "e18": 0,
-      "e19": 0,
-      "e2": 0,
-      "e20": 0,
-      "e21": 0,
-      "e3": 1,
-      "e4": 0,
-      "e5": 0,
-      "e6": 0,
-      "e7": 0,
-      "e8": 0,
-      "e9": 0
-     }
-    }
-   },
-   "usage": {
-    "input_tokens": 1809,
-    "output_tokens": 208
-   }
-  },
-  "2bf8faef131351c335c5": {
-   "model": "jev-1.14.0",
-   "answers": {
-    "element": {
-     "type": "choice",
-     "choice": "e1",
-     "confidence": 1,
-     "probabilities": {
-      "__none__": 0,
-      "e1": 1,
-      "e2": 0,
-      "e3": 0,
-      "e4": 0,
-      "e5": 0,
-      "e6": 0,
-      "e7": 0,
-      "e8": 0
-     }
-    }
-   },
-   "usage": {
-    "input_tokens": 567,
-    "output_tokens": 92
-   }
-  },
-  "3371715e2d23480702f4": {
-   "model": "jev-1.14.0",
-   "answers": {
-    "element": {
-     "type": "choice",
-     "choice": "e10",
-     "confidence": 1,
-     "probabilities": {
-      "__none__": 0,
-      "e1": 0,
-      "e10": 1,
-      "e11": 0,
-      "e12": 0,
-      "e13": 0,
-      "e14": 0,
-      "e15": 0,
-      "e16": 0,
-      "e17": 0,
-      "e18": 0,
-      "e19": 0,
-      "e2": 0,
-      "e20": 0,
-      "e21": 0,
-      "e3": 0,
-      "e4": 0,
-      "e5": 0,
-      "e6": 0,
-      "e7": 0,
-      "e8": 0,
-      "e9": 0
-     }
-    }
-   },
-   "usage": {
-    "input_tokens": 1791,
-    "output_tokens": 209
-   }
-  },
-  "42529d1376fbb524a481": {
-   "model": "jev-1.14.0",
-   "answers": {
-    "element": {
-     "type": "choice",
-     "choice": "e17",
-     "confidence": 1,
-     "probabilities": {
-      "__none__": 0,
-      "e1": 0,
-      "e10": 0,
-      "e11": 0,
-      "e12": 0,
-      "e13": 0,
-      "e14": 0,
-      "e15": 0,
-      "e16": 0,
-      "e17": 1,
-      "e18": 0,
-      "e19": 0,
-      "e2": 0,
-      "e20": 0,
-      "e21": 0,
-      "e3": 0,
-      "e4": 0,
-      "e5": 0,
-      "e6": 0,
-      "e7": 0,
-      "e8": 0,
-      "e9": 0
-     }
-    }
-   },
-   "usage": {
-    "input_tokens": 1797,
-    "output_tokens": 209
-   }
-  },
-  "4451a20f3029e70e2543": {
-   "model": "jev-1.14.0",
-   "answers": {
-    "element": {
-     "type": "choice",
-     "choice": "e8",
-     "confidence": 0.87,
-     "probabilities": {
-      "__none__": 0.06,
-      "e1": 0,
-      "e10": 0,
-      "e11": 0,
-      "e12": 0,
-      "e13": 0,
-      "e14": 0,
-      "e15": 0,
-      "e16": 0,
-      "e17": 0,
-      "e18": 0,
-      "e19": 0,
-      "e2": 0,
-      "e20": 0,
-      "e21": 0,
-      "e3": 0.01,
-      "e4": 0,
-      "e5": 0,
-      "e6": 0,
-      "e7": 0,
-      "e8": 0.88,
-      "e9": 0.05
-     }
-    }
-   },
-   "usage": {
-    "input_tokens": 1808,
-    "output_tokens": 208
-   }
-  },
-  "4cf1db985a3bf451806a": {
-   "model": "jev-1.14.0",
-   "answers": {
+    "bot_check": {
+     "type": "noul",
+     "noul": 0.05
+    },
     "element": {
      "type": "choice",
      "choice": "e2",
-     "confidence": 1,
+     "confidence": 0.49,
      "probabilities": {
-      "__none__": 0,
-      "e1": 0,
-      "e2": 1,
-      "e3": 0
+      "back": 0,
+      "e1": 0.05,
+      "e2": 0.55,
+      "e3": 0.01,
+      "press_key": 0.04,
+      "scroll_down": 0.35,
+      "scroll_up": 0,
+      "wait": 0
      }
-    }
-   },
-   "usage": {
-    "input_tokens": 451,
-    "output_tokens": 52
-   }
-  },
-  "5b5673ee46fa1a5b2926": {
-   "model": "jev-1.14.0",
-   "answers": {
-    "element": {
+    },
+    "error": {
+     "type": "noul",
+     "noul": 0.04
+    },
+    "goal_met": {
+     "type": "noul",
+     "noul": 0.02
+    },
+    "irreversible": {
+     "type": "noul",
+     "noul": 0.28
+    },
+    "key": {
      "type": "choice",
-     "choice": "e20",
-     "confidence": 1,
+     "choice": "Enter",
+     "confidence": 0.6,
      "probabilities": {
-      "__none__": 0,
-      "e1": 0,
-      "e10": 0,
-      "e11": 0,
-      "e12": 0,
-      "e13": 0,
-      "e14": 0,
-      "e15": 0,
-      "e16": 0,
-      "e17": 0,
-      "e18": 0,
-      "e19": 0,
-      "e2": 0,
-      "e20": 1,
-      "e21": 0,
-      "e3": 0,
-      "e4": 0,
-      "e5": 0,
-      "e6": 0,
-      "e7": 0,
-      "e8": 0,
-      "e9": 0
+      "ArrowDown": 0,
+      "ArrowLeft": 0,
+      "ArrowRight": 0,
+      "ArrowUp": 0,
+      "Backspace": 0,
+      "Delete": 0,
+      "End": 0,
+      "Enter": 0.63,
+      "Escape": 0,
+      "Home": 0,
+      "PageDown": 0,
+      "PageUp": 0,
+      "Shift+Tab": 0.01,
+      "Space": 0,
+      "Tab": 0.36
      }
-    }
-   },
-   "usage": {
-    "input_tokens": 1791,
-    "output_tokens": 209
-   }
-  },
-  "69d2a39fbebe53b2f77c": {
-   "model": "jev-1.14.0",
-   "answers": {
-    "element": {
+    },
+    "login": {
+     "type": "noul",
+     "noul": 0.04
+    },
+    "operation": {
      "type": "choice",
-     "choice": "e3",
-     "confidence": 1,
+     "choice": "click",
+     "confidence": 0.99,
      "probabilities": {
-      "__none__": 0,
-      "e1": 0,
-      "e10": 0,
-      "e2": 0,
-      "e3": 1,
-      "e4": 0,
-      "e5": 0,
-      "e6": 0,
-      "e7": 0,
-      "e8": 0,
-      "e9": 0
+      "click": 0.99,
+      "drag": 0,
+      "hover": 0.01,
+      "right_click": 0
      }
+    },
+    "stuck": {
+     "type": "noul",
+     "noul": 0.07
     }
    },
    "usage": {
-    "input_tokens": 1335,
-    "output_tokens": 109
+    "input_tokens": 1337,
+    "output_tokens": 363
    }
   },
-  "795021b6aec83810ef01": {
-   "model": "jev-1.14.0",
-   "answers": {
-    "element": {
-     "type": "choice",
-     "choice": "e21",
-     "confidence": 1,
-     "probabilities": {
-      "__none__": 0,
-      "e1": 0,
-      "e10": 0,
-      "e11": 0,
-      "e12": 0,
-      "e13": 0,
-      "e14": 0,
-      "e15": 0,
-      "e16": 0,
-      "e17": 0,
-      "e18": 0,
-      "e19": 0,
-      "e2": 0,
-      "e20": 0,
-      "e21": 1,
-      "e3": 0,
-      "e4": 0,
-      "e5": 0,
-      "e6": 0,
-      "e7": 0,
-      "e8": 0,
-      "e9": 0
-     }
-    }
-   },
-   "usage": {
-    "input_tokens": 1795,
-    "output_tokens": 209
-   }
-  },
-  "87cbb26a17e3223234b3": {
-   "model": "jev-1.14.0",
-   "answers": {
-    "element": {
-     "type": "choice",
-     "choice": "e6",
-     "confidence": 1,
-     "probabilities": {
-      "__none__": 0,
-      "e1": 0,
-      "e10": 0,
-      "e11": 0,
-      "e12": 0,
-      "e13": 0,
-      "e14": 0,
-      "e15": 0,
-      "e16": 0,
-      "e17": 0,
-      "e18": 0,
-      "e19": 0,
-      "e2": 0,
-      "e20": 0,
-      "e21": 0,
-      "e3": 0,
-      "e4": 0,
-      "e5": 0,
-      "e6": 1,
-      "e7": 0,
-      "e8": 0,
-      "e9": 0
-     }
-    }
-   },
-   "usage": {
-    "input_tokens": 1807,
-    "output_tokens": 208
-   }
-  },
-  "8931ba3e4e5409c26238": {
-   "model": "jev-1.14.0",
-   "answers": {
-    "element": {
-     "type": "choice",
-     "choice": "e4",
-     "confidence": 1,
-     "probabilities": {
-      "__none__": 0,
-      "e1": 0,
-      "e10": 0,
-      "e11": 0,
-      "e12": 0,
-      "e13": 0,
-      "e14": 0,
-      "e15": 0,
-      "e16": 0,
-      "e17": 0,
-      "e18": 0,
-      "e19": 0,
-      "e2": 0,
-      "e20": 0,
-      "e21": 0,
-      "e3": 0,
-      "e4": 1,
-      "e5": 0,
-      "e6": 0,
-      "e7": 0,
-      "e8": 0,
-      "e9": 0
-     }
-    }
-   },
-   "usage": {
-    "input_tokens": 1806,
-    "output_tokens": 208
-   }
-  },
-  "955f292692d4bffca987": {
-   "model": "jev-1.14.0",
-   "answers": {
-    "element": {
-     "type": "choice",
-     "choice": "e12",
-     "confidence": 0.91,
-     "probabilities": {
-      "__none__": 0.04,
-      "e1": 0,
-      "e10": 0,
-      "e11": 0,
-      "e12": 0.91,
-      "e13": 0.04,
-      "e14": 0.01,
-      "e15": 0,
-      "e16": 0,
-      "e17": 0,
-      "e18": 0,
-      "e19": 0,
-      "e2": 0,
-      "e20": 0,
-      "e21": 0,
-      "e3": 0,
-      "e4": 0,
-      "e5": 0,
-      "e6": 0,
-      "e7": 0,
-      "e8": 0,
-      "e9": 0
-     }
-    }
-   },
-   "usage": {
-    "input_tokens": 1800,
-    "output_tokens": 209
-   }
-  },
-  "bea67d66921ce235af2f": {
-   "model": "jev-1.14.0",
-   "answers": {
-    "element": {
-     "type": "choice",
-     "choice": "e5",
-     "confidence": 1,
-     "probabilities": {
-      "__none__": 0,
-      "e1": 0,
-      "e10": 0,
-      "e11": 0,
-      "e12": 0,
-      "e13": 0,
-      "e14": 0,
-      "e15": 0,
-      "e16": 0,
-      "e17": 0,
-      "e18": 0,
-      "e19": 0,
-      "e2": 0,
-      "e20": 0,
-      "e21": 0,
-      "e3": 0,
-      "e4": 0,
-      "e5": 1,
-      "e6": 0,
-      "e7": 0,
-      "e8": 0,
-      "e9": 0
-     }
-    }
-   },
-   "usage": {
-    "input_tokens": 1805,
-    "output_tokens": 208
-   }
-  },
-  "bfff7e6964f8fecabfbe": {
-   "model": "jev-1.14.0",
-   "answers": {
-    "element": {
-     "type": "choice",
-     "choice": "e4",
-     "confidence": 1,
-     "probabilities": {
-      "__none__": 0,
-      "e1": 0,
-      "e2": 0,
-      "e3": 0,
-      "e4": 1,
-      "e5": 0,
-      "e6": 0,
-      "e7": 0,
-      "e8": 0
-     }
-    }
-   },
-   "usage": {
-    "input_tokens": 567,
-    "output_tokens": 92
-   }
-  },
-  "ce92f7dfed9a2d64e014": {
+  "a8e70c97c4d876793f66": {
    "model": "jev-1.14.0",
    "answers": {
     "element": {
@@ -672,31 +940,31 @@
     }
    },
    "usage": {
-    "input_tokens": 1796,
+    "input_tokens": 1808,
     "output_tokens": 209
    }
   },
-  "fa20f2d199bf44fb74f9": {
+  "aecbaa6620c0d49fdddf": {
    "model": "jev-1.14.0",
    "answers": {
     "element": {
      "type": "choice",
-     "choice": "e2",
-     "confidence": 1,
+     "choice": "e12",
+     "confidence": 0.93,
      "probabilities": {
-      "__none__": 0,
+      "__none__": 0.04,
       "e1": 0,
       "e10": 0,
       "e11": 0,
-      "e12": 0,
-      "e13": 0,
-      "e14": 0,
+      "e12": 0.93,
+      "e13": 0.02,
+      "e14": 0.01,
       "e15": 0,
       "e16": 0,
       "e17": 0,
       "e18": 0,
       "e19": 0,
-      "e2": 1,
+      "e2": 0,
       "e20": 0,
       "e21": 0,
       "e3": 0,
@@ -710,11 +978,127 @@
     }
    },
    "usage": {
-    "input_tokens": 1804,
-    "output_tokens": 208
+    "input_tokens": 1812,
+    "output_tokens": 209
    }
   },
-  "fa79b42c23bdf818dc84": {
+  "baa985c5794bc9215475": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "bot_check": {
+     "type": "noul",
+     "noul": 0.03
+    },
+    "element": {
+     "type": "choice",
+     "choice": "e2",
+     "confidence": 0.93,
+     "probabilities": {
+      "back": 0,
+      "e1": 0.02,
+      "e2": 0.94,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "press_key": 0,
+      "scroll_down": 0.04,
+      "scroll_up": 0,
+      "wait": 0
+     }
+    },
+    "error": {
+     "type": "noul",
+     "noul": 0.02
+    },
+    "goal_met": {
+     "type": "noul",
+     "noul": 0.01
+    },
+    "irreversible": {
+     "type": "noul",
+     "noul": 0.16
+    },
+    "key": {
+     "type": "choice",
+     "choice": "Enter",
+     "confidence": 0.67,
+     "probabilities": {
+      "ArrowDown": 0,
+      "ArrowLeft": 0,
+      "ArrowRight": 0,
+      "ArrowUp": 0,
+      "Backspace": 0,
+      "Delete": 0,
+      "End": 0,
+      "Enter": 0.69,
+      "Escape": 0,
+      "Home": 0,
+      "PageDown": 0,
+      "PageUp": 0,
+      "Shift+Tab": 0,
+      "Space": 0,
+      "Tab": 0.31
+     }
+    },
+    "login": {
+     "type": "noul",
+     "noul": 0.03
+    },
+    "operation": {
+     "type": "choice",
+     "choice": "click",
+     "confidence": 0.99,
+     "probabilities": {
+      "click": 0.99,
+      "drag": 0,
+      "hover": 0.01,
+      "right_click": 0
+     }
+    },
+    "stuck": {
+     "type": "noul",
+     "noul": 0.03
+    },
+    "value_e2": {
+     "type": "choice",
+     "choice": "first",
+     "confidence": 0.67,
+     "probabilities": {
+      "__none__": 0.25,
+      "email": 0,
+      "first": 0.75,
+      "last": 0
+     }
+    },
+    "value_e3": {
+     "type": "choice",
+     "choice": "last",
+     "confidence": 0.69,
+     "probabilities": {
+      "__none__": 0.22,
+      "email": 0,
+      "first": 0.01,
+      "last": 0.77
+     }
+    },
+    "value_key": {
+     "type": "choice",
+     "choice": "first",
+     "confidence": 0.89,
+     "probabilities": {
+      "__none__": 0.08,
+      "email": 0,
+      "first": 0.92,
+      "last": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1668,
+    "output_tokens": 518
+   }
+  },
+  "c786aca9208599fc3578": {
    "model": "jev-1.14.0",
    "answers": {
     "element": {
@@ -748,7 +1132,204 @@
     }
    },
    "usage": {
-    "input_tokens": 1801,
+    "input_tokens": 1813,
+    "output_tokens": 208
+   }
+  },
+  "cf6a409089db930a78ef": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e17",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e10": 0,
+      "e11": 0,
+      "e12": 0,
+      "e13": 0,
+      "e14": 0,
+      "e15": 0,
+      "e16": 0,
+      "e17": 1,
+      "e18": 0,
+      "e19": 0,
+      "e2": 0,
+      "e20": 0,
+      "e21": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0,
+      "e9": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1809,
+    "output_tokens": 209
+   }
+  },
+  "d3623d0fedafad092bca": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e3",
+     "confidence": 0.76,
+     "probabilities": {
+      "__none__": 0.17,
+      "e1": 0,
+      "e2": 0.01,
+      "e3": 0.82
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 482,
+    "output_tokens": 52
+   }
+  },
+  "d83cb35392a358cae2ad": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e8",
+     "confidence": 0.85,
+     "probabilities": {
+      "__none__": 0.06,
+      "e1": 0,
+      "e10": 0,
+      "e11": 0,
+      "e12": 0,
+      "e13": 0,
+      "e14": 0,
+      "e15": 0,
+      "e16": 0,
+      "e17": 0,
+      "e18": 0,
+      "e19": 0,
+      "e2": 0,
+      "e20": 0,
+      "e21": 0,
+      "e3": 0.01,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0.86,
+      "e9": 0.07
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1820,
+    "output_tokens": 208
+   }
+  },
+  "edc7058a74cb45d8ec72": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e4",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e2": 0,
+      "e3": 0,
+      "e4": 1,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 579,
+    "output_tokens": 92
+   }
+  },
+  "f8487994ec177c4a4510": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e20",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e10": 0,
+      "e11": 0,
+      "e12": 0,
+      "e13": 0,
+      "e14": 0,
+      "e15": 0,
+      "e16": 0,
+      "e17": 0,
+      "e18": 0,
+      "e19": 0,
+      "e2": 0,
+      "e20": 1,
+      "e21": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0,
+      "e9": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1803,
+    "output_tokens": 209
+   }
+  },
+  "ffb0edae607f18b8dddc": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e2",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e10": 0,
+      "e11": 0,
+      "e12": 0,
+      "e13": 0,
+      "e14": 0,
+      "e15": 0,
+      "e16": 0,
+      "e17": 0,
+      "e18": 0,
+      "e19": 0,
+      "e2": 1,
+      "e20": 0,
+      "e21": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0,
+      "e9": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 1816,
     "output_tokens": 208
    }
   }

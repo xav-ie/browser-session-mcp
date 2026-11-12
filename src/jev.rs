@@ -963,10 +963,7 @@ async fn narrow(
                 for e in &page.elements[range.clone()] {
                     criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
                 }
-                criteria.insert(
-                    "__none__".to_string(),
-                    Value::String("None of these elements fits.".to_string()),
-                );
+                criteria.insert("__none__".to_string(), Value::String(NONE_FITS.to_string()));
                 questions.insert(
                     format!("g{g}"),
                     json!({ "type": "choice", "instructions": instructions, "criteria": criteria }),
@@ -1034,10 +1031,7 @@ async fn resolve_with_floor(
         for e in &info.elements {
             criteria.insert(e.id.clone(), Value::String(e.desc.clone()));
         }
-        criteria.insert(
-            "__none__".to_string(),
-            Value::String("None of these elements is what the agent wants.".to_string()),
-        );
+        criteria.insert("__none__".to_string(), Value::String(NONE_FITS.to_string()));
         let cfg = &cfg;
         let groups: std::collections::HashMap<String, String> = info
             .elements
@@ -1656,7 +1650,7 @@ async fn step_on(
         "irreversible".to_string(),
         json!({
             "type": "noul",
-            "instructions": "The best next step toward the goal would place an order, make a payment, send a message, publish, or delete something, which cannot be undone."
+            "instructions": "The best next step toward the goal would submit a form, application or registration, sign up, place an order, make a payment, send a message, publish, or delete something, which cannot be undone."
         }),
     );
     // Which value goes in which field is asked per field, so the answer
@@ -2214,6 +2208,29 @@ pub async fn read(page: &Page, question: &str, max_chars: usize) -> Result<ReadR
 
 /// Whether an extracted element description names a field the agent can type
 /// into (a text-ish input, a textarea, contenteditable) rather than click.
+/// The "none of these" option offered beside a page's elements. An element
+/// that merely shares a word with the goal ("cookies" in a footer link for
+/// "accept cookies") doesn't do it, and acting on it does something else.
+const NONE_FITS: &str = "None of these elements does what the agent wants (one that only shares a word with it doesn't count).";
+
+/// Whether an element's visible label says clicking it can't be undone:
+/// it submits, sends, pays, orders, publishes, deletes (a trash icon too)
+/// or signs up. Read
+/// from the label as it shows now, so a "Next" button that turned into
+/// "Submit" on the last step counts. `act` holds such a click with
+/// `confirmIrreversible`, whatever Jev's own judgment.
+pub fn looks_irreversible(desc: &str) -> bool {
+    static WORDS: Lazy<regex::Regex> = Lazy::new(|| {
+        regex::Regex::new(
+            r"(?i)\b(submit|send|pay|purchase|buy|checkout|check out|place (my |your )?order|order now|confirm|publish|post|delete|trash|remove|cancel (my |your )?(order|subscription|account)|unsubscribe|sign up|register|create (an |my )?account|apply|book|reserve|donate|transfer|withdraw)\b",
+        )
+        .expect("irreversible words")
+    });
+    desc.split('"')
+        .nth(1)
+        .is_some_and(|label| WORDS.is_match(label))
+}
+
 pub fn is_text_field(desc: &str) -> bool {
     let tag = desc.split_whitespace().next().unwrap_or_default();
     match tag {
@@ -2404,6 +2421,28 @@ fn parse_extraction(v: &Value, stamp: &str) -> Result<PageInfo> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn irreversible_labels() {
+        for desc in [
+            r#"button #nextBtn "Submit""#,
+            r#"button "Place order""#,
+            r#"input type=submit "Send message""#,
+            r#"button "Delete account""#,
+            r#"a "Sign up""#,
+            r#"button (icon "trash")"#,
+        ] {
+            assert!(looks_irreversible(desc), "{desc}");
+        }
+        for desc in [
+            r#"button #submit-search "Next""#,
+            r#"button "Previous""#,
+            r#"a "Submission guidelines""#,
+            r#"button (icon "pen")"#,
+        ] {
+            assert!(!looks_irreversible(desc), "{desc}");
+        }
+    }
+
     use super::*;
     use serde_json::json;
 
