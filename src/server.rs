@@ -70,7 +70,7 @@ impl ServerHandler for BrowserSessionServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("browser-session-mcp", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "Per-call isolated browser sessions against a shared persistent Chrome. Call open_browser_session to obtain a sessionId; pass it into every subsequent tool call. For human-takeover (request_human_takeover/await_human_takeover): show the URL, then run await_human_takeover in a BACKGROUND task that polls with a short timeout — don't block your main loop waiting on the human.".into(),
+            "Per-call isolated browser sessions against a shared persistent Chrome. Call open_browser_session to obtain a sessionId; pass it into every subsequent tool call. For human takeover: show the request_human_takeover URL to the user right away, then call await_human_takeover again and again in a background task until it completes; with no background task, end your turn and call it once the user says they're done.".into(),
         );
         info
     }
@@ -1809,10 +1809,10 @@ impl BrowserSessionServer {
         let url = format!("{base}/takeover/{token}");
         Ok(ok_text_struct(
             format!(
-                "Human takeover ready. Show this URL to the user so they can log in themselves. \
-                 Then run await_human_takeover(token=\"{token}\") in a BACKGROUND task that polls \
-                 with a short timeout until completed — do NOT block your main loop; the human may \
-                 take several minutes:\n{url}"
+                "Human takeover ready. Show this URL to the user now so they can log in themselves. \
+                 Then call await_human_takeover(token=\"{token}\") again and again until completed, \
+                 in a background task; with no background task, end your turn and call it once the \
+                 user says they're done. The human may take several minutes:\n{url}"
             ),
             TakeoverOut {
                 url,
@@ -5832,7 +5832,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "request_human_takeover",
-            "Hand the session's active page to a human to log in themselves (passwords/passkeys the agent must not see). Use it only when a login needs a person; for a site you've logged into before, try load_browser_state first. Show the returned url to the user and keep the token for await_human_takeover. Does NOT block. The person starts in control, and every call on the session except reading logs fails until they hand control back; after that the link stays open for them to watch you work, and they can take control again, which pauses your calls the same way. STRONGLY ADVISED: after showing the URL, run await_human_takeover in a BACKGROUND task (subagent/job) — not your main loop — because the human may take many minutes and you should stay responsive. The URL is a bearer credential that gives live control of the tab until `ttlMinutes` passes, so share it only with the intended person. Fails if TAKEOVER_BASE_URL isn't configured on the server.",
+            "Get a human takeover link (URL) for the session's active page, so a person can log in themselves (passwords/passkeys the agent must not see).\nUse it only when a login needs a person; for a site you've logged into before, try load_browser_state first. Show the returned url to the user and keep the token for await_human_takeover. Does NOT block. The person starts in control, and every call on the session except reading logs fails until they hand control back; after that the link stays open for them to watch you work, and they can take control again, which pauses your calls the same way. After showing the URL, run await_human_takeover in a background task (subagent or job), since the human may take many minutes; with no background task, end your turn and call it once the user says they're done. The URL is a bearer credential that gives live control of the tab until `ttlMinutes` passes, so share it only with the intended person. Fails if TAKEOVER_BASE_URL isn't configured on the server.",
             object_schema(
                 &[
                     session_id,
