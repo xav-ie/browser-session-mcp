@@ -56,8 +56,17 @@
   </li>
   <li class="question">
     <span class="question-text" id="letter-heading">Cover letter</span>
-    <div class="drop"><input type="file" id="letter-input" class="tiny">
-      <label for="letter-input" role="button" tabindex="0" aria-describedby="letter-heading">Choose file</label> or drag and drop here</div>
+    <input type="file" id="letter-input" class="tiny">
+    <div class="drop"><label for="letter-input" role="button" tabindex="0" aria-describedby="letter-heading">Choose file</label> or drag and drop here</div>
+  </li>
+  <li class="question">
+    <span class="question-text">Portfolio</span>
+    <div class="drop" id="portfolio"><div>Drop files here, <button type="button" id="browse">browse files</button> or import a folder</div>
+      <input type="file" hidden multiple id="pf-files"><input type="file" hidden webkitdirectory id="pf-folder"></div>
+  </li>
+  <li class="question">
+    <span class="question-text">Writing sample</span>
+    <div class="drop" id="sample-drop">Drop your writing sample here</div>
   </li>
 </ul>
 <script>
@@ -92,6 +101,13 @@ input.addEventListener("input", show);
 input.addEventListener("blur", () => { list.hidden = true; });
 
 document.getElementById("letter-input").addEventListener("change", (e) => { values.letter = e.target.files[0]?.name; });
+
+document.getElementById("pf-files").addEventListener("change", (e) => { values.portfolio = e.target.files[0]?.name; });
+document.getElementById("pf-folder").addEventListener("change", () => { values.folder = true; });
+// Only a script listening for the drop: no file input at all.
+const sample = document.getElementById("sample-drop");
+sample.addEventListener("dragover", (e) => e.preventDefault());
+sample.addEventListener("drop", (e) => { e.preventDefault(); values.sample = e.dataTransfer.files[0]?.name; });
 
 // The file name shows up once the upload finishes, in capitals.
 document.getElementById("cv-input").addEventListener("change", (e) => {
