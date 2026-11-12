@@ -5,8 +5,12 @@ History gets read by people scanning for what changed; rationale beyond a
 sentence or two belongs in the PR or the docs. Adapted from xav-ie/Tetherbug.
 
     check-commit-messages.py <base>..<head>
+
+A pull request's title becomes its squash commit's summary, so PR_TITLE (when
+set) is held to the same limit.
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -15,6 +19,7 @@ SUMMARY_MAX_CHARS = 72  # first line
 BODY_MAX_LINES = 6  # non-empty lines after the first
 BODY_MAX_CHARS = 500  # total, after the first line
 TRAILER = re.compile(r"^[A-Za-z-]+:\s")  # Co-authored-by: and such are metadata
+PR_SUFFIX = re.compile(r" \(#\d+\)$")  # GitHub appends this to squash commits
 
 
 def git(*args):
@@ -26,11 +31,15 @@ def git(*args):
 def main(rev_range):
     shas = git("rev-list", "--no-merges", rev_range).split()
     problems = []
+    title = os.environ.get("PR_TITLE", "")
+    if len(title) > SUMMARY_MAX_CHARS:
+        problems.append(f"PR title {title!r}: {len(title)} chars (max {SUMMARY_MAX_CHARS})")
     for sha in shas:
         author, message = git("log", "-1", "--format=%an%x00%B", sha).split("\0", 1)
         if author.endswith("[bot]"):  # Dependabot and friends write their own
             continue
         summary, *rest = message.strip().split("\n")
+        summary = PR_SUFFIX.sub("", summary)
         body = [l for l in rest if l.strip() and not TRAILER.match(l.strip())]
         label = f"{sha[:7]} {summary}"
         if len(summary) > SUMMARY_MAX_CHARS:
