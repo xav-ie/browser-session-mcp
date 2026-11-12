@@ -765,7 +765,14 @@ impl BrowserSessionServer {
         let want = optional_str(&args, "option").map(str::to_string);
         let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
         let page = sessions.active_page(&session_id).await?;
-        let (css, note) = resolve_and_wait(&page, &selector, timeout).await?;
+        let (css, note) = resolve_and_wait_for(
+            &page,
+            &selector,
+            timeout,
+            Some("a dropdown or a set of options to choose one from"),
+            true,
+        )
+        .await?;
         let label = note.unwrap_or(css.clone());
         let before = page_url(&page).await;
         let choice = choose_option(&page, &css, &label, want.as_deref()).await?;
@@ -857,6 +864,7 @@ impl BrowserSessionServer {
             &selector,
             timeout,
             Some("a file upload field or drop zone"),
+            false,
         )
         .await?;
         let label = note.unwrap_or(css.clone());
@@ -3140,17 +3148,19 @@ async fn resolve_and_wait(
     selector: &str,
     timeout_ms: u64,
 ) -> Result<(String, Option<String>)> {
-    resolve_and_wait_for(page, selector, timeout_ms, None).await
+    resolve_and_wait_for(page, selector, timeout_ms, None, false).await
 }
 
 /// [`resolve_and_wait`] for a tool that can only use one kind of element:
 /// `purpose` ("to attach a file to") goes to Jev with the words, so "Resume"
-/// means the resume upload, not an "Import resume" button beside it.
+/// means the resume upload, not an "Import resume" button beside it. With
+/// `by_group`, any button of a radio group stands for the group.
 async fn resolve_and_wait_for(
     page: &Page,
     selector: &str,
     timeout_ms: u64,
     purpose: Option<&str>,
+    by_group: bool,
 ) -> Result<(String, Option<String>)> {
     let with_purpose = |goal: &str| match purpose {
         Some(p) => format!("{goal} ({p})"),
@@ -3161,7 +3171,7 @@ async fn resolve_and_wait_for(
         if goal.is_empty() {
             bail!("`jev:` needs a goal after the colon, e.g. `jev: the login button`");
         }
-        let res = jev::resolve(page, &with_purpose(goal)).await?;
+        let res = jev::resolve(page, &with_purpose(goal), by_group).await?;
         // Extraction only offers currently-present elements, so this is an
         // instant match; the wait just covers a re-render in between.
         wait_for_selector(page, &res.css, timeout_ms).await?;
@@ -3182,7 +3192,7 @@ async fn resolve_and_wait_for(
         if !jev::available() {
             return Err(css_err);
         }
-        let res = match jev::resolve_fallback(page, &with_purpose(selector)).await {
+        let res = match jev::resolve_fallback(page, &with_purpose(selector), by_group).await {
             Ok(res) => res,
             // Keep the CSS timeout visible: it explains why Jev was tried.
             Err(jev_err) => bail!("{css_err}; jev fallback: {jev_err}"),
@@ -3517,6 +3527,45 @@ const NATIVE_SELECT_JS: &str = r#"var __bsSelect = function(el) {
 /// `jev-ref:` lookups (see DEEP_FIND_JS).
 const OPTION_PICKS: &str = "5e1";
 
+/// Under these keys select_option keeps a radio group's options: where to
+/// click each (its label when the button itself is hidden), and the buttons.
+const RADIO_TARGETS: &str = "5e3";
+const RADIO_INPUTS: &str = "5e4";
+
+/// `__bsRadios(el)`: the options of the radio group `el` is in or is (a
+/// radio, its label, a fieldset or a `role=radiogroup`), as
+/// `{ input, target, label }`, or null when it isn't one.
+const RADIOS_JS: &str = r#"var __bsRadios = function(el) {
+  if (!el) return null;
+  var isOpt = function(n) { return (n.tagName === 'INPUT' && n.type === 'radio') || (n.getAttribute && n.getAttribute('role') === 'radio'); };
+  if (el.tagName === 'LABEL' && el.control && el.control.type === 'radio') el = el.control;
+  var list = null;
+  if (isOpt(el)) {
+    var g = el.getAttribute('role') === 'radio' ? el.closest('[role=radiogroup]') : null;
+    if (g) list = g.querySelectorAll('[role=radio]');
+    else if (el.name) {
+      var root = el.form || el.getRootNode();
+      list = Array.prototype.filter.call(root.querySelectorAll('input[type=radio]'), function(r) { return r.name === el.name; });
+    } else list = [el];
+  } else if (el.matches && el.matches('fieldset, [role=radiogroup], [role=group]')) {
+    list = el.querySelectorAll('input[type=radio], [role=radio]');
+  }
+  if (!list || !list.length) return null;
+  return Array.prototype.map.call(list, function(r) {
+    var lab = r.labels && r.labels[0];
+    var text = (lab && lab.innerText) || r.getAttribute('aria-label') || '';
+    if (!text && r.getAttribute('role') === 'radio') text = r.innerText;
+    if (!text) {
+      var nx = r.nextSibling;
+      while (nx && nx.nodeType === 3 && !nx.textContent.trim()) nx = nx.nextSibling;
+      text = nx ? (nx.nodeType === 3 ? nx.textContent : nx.innerText || '') : '';
+    }
+    var rr = r.getBoundingClientRect(), st = getComputedStyle(r);
+    var hidden = rr.width < 4 || rr.height < 4 || st.opacity === '0' || st.visibility === 'hidden';
+    return { input: r, target: hidden && lab ? lab : r, label: String(text || r.value || '').replace(/\s+/g, ' ').trim() };
+  });
+};"#;
+
 /// Where `opening_point` keeps the box it clicks, likewise.
 const OPENER_PICK: &str = "5e2";
 
@@ -3586,9 +3635,15 @@ const OPTIONS_JS: &str = r#"function() { @@DEEP@@
 /// the text nearest the field (its own value, then its ancestors' text up
 /// to four levels, leaving out any open option list), and whether `want`
 /// is in it.
-const SHOWN_JS: &str = r#"function() { @@DEEP@@ @@NATIVE@@
+const SHOWN_JS: &str = r#"function() { @@DEEP@@ @@NATIVE@@ @@RADIOS@@
   var h = __bsDeep(@@SEL@@), el = h && h.el; if (!el) return null;
   var want = @@WANT@@.toLowerCase();
+  var rs = __bsRadios(el);
+  if (rs) {
+    var on = rs.filter(function(r) { return r.input.checked === true || r.input.getAttribute('aria-checked') === 'true'; })[0];
+    var picked = on ? on.label : '';
+    return { shown: picked, has: picked.toLowerCase() === want };
+  }
   var sel = __bsSelect(el);
   if (sel) { var o = sel.selectedOptions[0]; var t = o ? o.text.trim() : ''; return { shown: t, has: t.toLowerCase() === want }; }
   var text = function(n) {
@@ -3705,6 +3760,7 @@ async fn shown_value(page: &Page, css: &str, want: &str) -> (String, bool) {
     let decl = SHOWN_JS
         .replace("@@DEEP@@", jev::DEEP_FIND_JS)
         .replace("@@NATIVE@@", NATIVE_SELECT_JS)
+        .replace("@@RADIOS@@", RADIOS_JS)
         .replace("@@SEL@@", &js_str(css))
         .replace("@@WANT@@", &js_str(want));
     let v = iso_eval_function(page, &decl).await.unwrap_or(Value::Null);
@@ -3755,7 +3811,73 @@ struct Choice {
 /// may be partial (empty, still loading, or long), its text is typed to
 /// filter, and cleared again if nothing matches; then the option is
 /// clicked. Listing closes the dropdown again without typing.
+/// A radio group's option labels, keeping where to click each and its
+/// button for [`pick_radio`]; `None` when `css` isn't a radio group.
+async fn radio_options(page: &Page, css: &str) -> Result<Option<Vec<String>>> {
+    let decl = format!(
+        "function() {{ {deep} {radios} var h = __bsDeep({sel}); var rs = h && __bsRadios(h.el); if (!rs) return null; \
+         var p = globalThis.__bsPicks || (globalThis.__bsPicks = {{ order: [] }}); \
+         p[{targets}] = rs.map(function(r) {{ return r.target; }}); p[{inputs}] = rs.map(function(r) {{ return r.input; }}); \
+         return rs.map(function(r) {{ return r.label; }}); }}",
+        deep = jev::DEEP_FIND_JS,
+        radios = RADIOS_JS,
+        sel = js_str(css),
+        targets = js_str(RADIO_TARGETS),
+        inputs = js_str(RADIO_INPUTS),
+    );
+    let v = iso_eval_function(page, &decl).await?;
+    Ok(v.as_array().map(|a| {
+        a.iter()
+            .map(|o| o.as_str().unwrap_or_default().to_string())
+            .collect()
+    }))
+}
+
+/// Click the `i`th option [`radio_options`] found, as a person would, and
+/// check that it is now the selected one.
+async fn pick_radio(page: &Page, i: usize, label: &str, option: &str) -> Result<()> {
+    let target = format!("jev-ref:{RADIO_TARGETS}:{i}");
+    let at = element_center(page, &target).await?;
+    check_point(page, at, Some(&target), label).await?;
+    page.click(Point::new(at.0, at.1))
+        .await
+        .with_context(|| format!("choosing {option:?} in {label}"))?;
+    let checked = format!(
+        "function() {{ var p = globalThis.__bsPicks; var r = p && p[{inputs}] && p[{inputs}][{i}]; \
+         return !!r && (r.checked === true || r.getAttribute('aria-checked') === 'true'); }}",
+        inputs = js_str(RADIO_INPUTS),
+    );
+    let ok = iso_eval_function(page, &checked)
+        .await
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !ok {
+        bail!("clicked {option:?} in {label}, but it isn't selected afterwards");
+    }
+    Ok(())
+}
+
 async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) -> Result<Choice> {
+    if let Some(opts) = radio_options(page, css).await? {
+        let Some(want) = want else {
+            return Ok(Choice {
+                chosen: None,
+                options: opts,
+            });
+        };
+        let i = pick_option(&opts, want).ok_or_else(|| {
+            anyhow!(
+                "{label} has no option {want:?}; it offers {}",
+                option_list(&opts)
+            )
+        })?;
+        pick_radio(page, i, label, &opts[i]).await?;
+        return Ok(Choice {
+            chosen: Some(opts[i].clone()),
+            options: opts,
+        });
+    }
     if let Some(opts) = native_options(page, css).await? {
         let Some(want) = want else {
             return Ok(Choice {
@@ -4982,11 +5104,14 @@ async fn wait_for_selector(page: &Page, selector: &str, timeout_ms: u64) -> Resu
             crate::frames::set_current(None);
             return Ok(());
         }
-        for frame in crate::frames::closed(page).await {
-            if found(crate::frames::eval(&frame, &decl).await) {
-                crate::frames::set_current(Some(frame));
-                return Ok(());
-            }
+        // All the frames at once: one at a time, a page of ad frames made
+        // each look, and so the whole wait, run long.
+        let frames = crate::frames::closed(page).await;
+        let hits =
+            futures::future::join_all(frames.iter().map(|f| crate::frames::eval(f, &decl))).await;
+        if let Some(i) = hits.into_iter().position(found) {
+            crate::frames::set_current(frames.into_iter().nth(i));
+            return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
             bail!("timed out waiting for selector {sel}");
@@ -5612,7 +5737,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "select_option",
-            "Choose an option in a dropdown by its text, in the session's active tab. Works on a native `<select>` (set directly, firing input and change) and on custom dropdowns drawn by scripts (a combobox, a React or other component select, a searchable list): it opens the dropdown with a real click, types `option` to filter when the option isn't in the list showing (long lists drawn in part, and lists searched as you type), clicks the option, and reads the field back. `option` matches exactly ignoring case, else the shortest option starting with it, else the shortest containing it. `selector` is the dropdown: the select, the combobox input or the box you'd click to open it (CSS, or plain words as for click). Without `option`, opens the dropdown, returns its `options` and closes it, choosing and typing nothing: look before you pick. It types only when the list may be partial (empty, loading, or 20 options or more), and clears what it typed when nothing matches. Returns what was chosen, the options offered, what the field shows after and whether that is the option (`confirmed`; a field can show a short form, such as \"+1\" for a country), with where the page is as for click. Fails listing the options offered when none matches, or when no list opens.",
+            "Choose an option in a dropdown or a radio group by its text, in the session's active tab. Works on a native `<select>` (set directly, firing input and change), on a radio group (pass a radio, its fieldset or a `role=radiogroup`; the option is clicked as a person would and checked to be selected) and on custom dropdowns drawn by scripts (a combobox, a React or other component select, a searchable list): it opens the dropdown with a real click, types `option` to filter when the option isn't in the list showing (long lists drawn in part, and lists searched as you type), clicks the option, and reads the field back. `option` matches exactly ignoring case, else the shortest option starting with it, else the shortest containing it. `selector` is the dropdown: the select, the combobox input or the box you'd click to open it (CSS, or plain words as for click). Without `option`, opens the dropdown, returns its `options` and closes it, choosing and typing nothing: look before you pick. It types only when the list may be partial (empty, loading, or 20 options or more), and clears what it typed when nothing matches. Returns what was chosen, the options offered, what the field shows after and whether that is the option (`confirmed`; a field can show a short form, such as \"+1\" for a country), with where the page is as for click. Fails listing the options offered when none matches, or when no list opens.",
             object_schema(
                 &[
                     session_id,

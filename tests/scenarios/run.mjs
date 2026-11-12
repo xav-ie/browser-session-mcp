@@ -626,8 +626,47 @@ const SCENARIOS = [
       const b64 = Buffer.from("sample").toString("base64");
       const pf = await call("upload_file", { sessionId, selector: "Drop files here for the portfolio", content: b64, name: "work.pdf" });
       expect(pf.into.startsWith("input#pf-files") && (await values()).portfolio === "work.pdf" && !(await values()).folder, `portfolio: ${JSON.stringify(pf)}`);
+      // Widgets over a see-through input, told apart only by their headings.
+      const refs = await call("upload_file", { sessionId, selector: "References", content: b64, name: "refs.pdf" });
+      expect(refs.into.startsWith("input#refs-input") && (await values())["refs-input"] === "refs.pdf", `references: ${JSON.stringify(refs)}`);
       const sample = await call("upload_file", { sessionId, selector: "the writing sample drop zone", content: b64, name: "essay.txt" });
       expect(sample.how === "drop" && (await values()).sample === "essay.txt", `writing sample: ${JSON.stringify(sample)}`);
+    },
+  },
+  {
+    id: "radio-groups",
+    about: "select_option lists and picks in radio groups: by a radio, a fieldset, and through a label when the radio is hidden",
+    async run({ call, raw, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/questions.html` });
+      const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
+      const listed = await call("select_option", { sessionId, selector: "#contact-group" });
+      expect(JSON.stringify(listed.options) === JSON.stringify(["Email", "Phone", "Text message"]) && !listed.chosen, `fieldset options: ${JSON.stringify(listed)}`);
+      const phone = await call("select_option", { sessionId, selector: "#contact-group", option: "phone" });
+      expect(phone.chosen === "Phone" && phone.confirmed, `fieldset pick: ${JSON.stringify(phone)}`);
+      const no = await call("select_option", { sessionId, selector: "#auth-yes", option: "No" });
+      expect(no.chosen === "No" && no.confirmed, `a radio stands for its group: ${JSON.stringify(no)}`);
+      const night = await call("select_option", { sessionId, selector: "#shift-day", option: "Night" });
+      expect(night.chosen === "Night" && night.confirmed, `hidden radio, clicked through its label: ${JSON.stringify(night)}`);
+      const v = await values();
+      expect(v["q-contact"] === "phone" && v["q-auth"] === "no" && v["q-shift"] === "night", `the page got them: ${JSON.stringify(v)}`);
+      const miss = await raw("select_option", { sessionId, selector: "#contact-group", option: "Fax" });
+      expect(miss.isError && text(miss).includes("Text message"), `a missing option lists the rest: ${text(miss).slice(0, 200)}`);
+    },
+  },
+  {
+    id: "radio-questions",
+    needs: "TYPESAFE_API_KEY",
+    about: "Plain language finds radio questions that only their question text tells apart",
+    async run({ call, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/questions.html` });
+      const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
+      await call("select_option", { sessionId, selector: "Are you authorized to work in the country where this job is located?", option: "No" });
+      await call("click", { sessionId, selector: "Yes under: Do you have experience with Rust?" });
+      await call("select_option", { sessionId, selector: "How should we contact you?", option: "Text message" });
+      const v = await values();
+      expect(v["q-auth"] === "no" && v["q-rust"] === "yes" && v["q-contact"] === "text", `answers: ${JSON.stringify(v)}`);
     },
   },
   {

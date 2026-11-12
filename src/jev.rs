@@ -87,6 +87,45 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     }
     return '';
   };
+  // The question a radio or checkbox answers: its fieldset's legend, its
+  // group's name, or the text around the group that isn't an option's own.
+  var groupQuestion = function(el) {
+    var named = function(g) {
+      if (!g) return '';
+      var lb = String(g.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+        .map(function(id) { var n = g.ownerDocument.getElementById(id); return n ? n.textContent : ''; }).join(' ');
+      return String(g.getAttribute('aria-label') || lb || '').replace(/\s+/g, ' ').trim();
+    };
+    var fs = el.closest('fieldset');
+    var legend = fs && fs.querySelector('legend');
+    if (legend && String(legend.innerText || '').trim()) return String(legend.innerText).replace(/\s+/g, ' ').trim();
+    var rg = named(el.closest('[role=radiogroup], [role=group]')) || named(fs);
+    if (rg) return rg;
+    var mine = function(n) {
+      return n.type === el.type && (el.name ? n.name === el.name : true) ||
+        (n.getAttribute && /^(radio|checkbox)$/.test(n.getAttribute('role') || ''));
+    };
+    var n = el;
+    for (var up = 0; up < 5 && n.parentElement; up++) {
+      n = n.parentElement;
+      var fields = n.querySelectorAll(FIELDS + ', [role=radio], [role=checkbox]');
+      for (var o = 0; o < fields.length; o++) if (!mine(fields[o])) return '';
+      var parts = [];
+      var tw = (n.ownerDocument || document).createTreeWalker(n, NodeFilter.SHOW_TEXT);
+      for (var t = tw.nextNode(); t; t = tw.nextNode()) {
+        var par = t.parentElement;
+        if (!par || par.closest('label, script, style, [role=radio], [role=checkbox]')) continue;
+        // Bare text right after an option is that option's label.
+        var prev = t.previousSibling;
+        while (prev && prev.nodeType === 3 && !prev.textContent.trim()) prev = prev.previousSibling;
+        if (prev && prev.nodeType === 1 && prev.matches && prev.matches('input[type=radio], input[type=checkbox]')) continue;
+        if (t.textContent.trim()) parts.push(t.textContent.trim());
+      }
+      var text = parts.join(' ').trim();
+      if (text) return text;
+    }
+    return '';
+  };
   var describe = function(el) {
     var tag = el.tagName.toLowerCase();
     var p = [tag];
@@ -187,6 +226,10 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     // Current state, so a goal like "check the box" can read as met and a
     // toggle isn't clicked again (and undone) on the next step.
     if (toggle) p.push(el.checked ? '(checked)' : '(unchecked)');
+    if (toggle || role === 'radio' || role === 'checkbox') {
+      var gq = groupQuestion(el);
+      if (gq) p.push('under "' + clamp(gq, 100) + '"');
+    }
     var aria = { 'aria-checked': 'checked', 'aria-pressed': 'pressed',
       'aria-expanded': 'expanded', 'aria-selected': 'selected' };
     for (var attr in aria) {
@@ -226,7 +269,7 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   var vw = document.documentElement.clientWidth || 0;
   var vh = document.documentElement.clientHeight || 0;
   var inDialog = [], inView = [], offView = [], seen = new Set();
-  var fileFor = new WeakMap(), dropZone = new WeakSet();
+  var fileFor = new WeakMap(), dropZone = new WeakSet(), replaced = new WeakSet();
   var consider = function(el, ox, oy) {
     if (seen.has(el) || el.disabled) return;
     seen.add(el);
@@ -255,12 +298,18 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     var files = R.root.querySelectorAll('input[type=file]:not([webkitdirectory])');
     for (var fi = 0; fi < files.length; fi++) {
       var f = files[fi];
-      if (f.disabled || (f.getClientRects().length && styleOf(f).visibility !== 'hidden')) continue;
+      if (f.disabled) continue;
+      // Shown means a person can see it: a see-through or sliver-thin input
+      // laid over a widget (FilePond's) is hidden as far as they can tell.
+      var fr = f.getBoundingClientRect(), fs = styleOf(f);
+      var faint = parseFloat(fs.opacity) < 0.1 || fr.width < 10 || fr.height < 10;
+      if (f.getClientRects().length && fs.visibility !== 'hidden' && !faint) continue;
       var box = f.parentElement;
       for (var fu = 0; box && fu < 4 && !box.getClientRects().length; fu++) box = box.parentElement;
       // An input parked in the body (as some libraries do) has no box of its own.
       if (!box || /^(BODY|HTML)$/.test(box.tagName) || box.querySelectorAll('input[type=file]:not([webkitdirectory])').length > 1) continue;
       fileFor.set(box, f);
+      replaced.add(f);
       seen.delete(box);
       consider(box, R.ox, R.oy);
     }
@@ -323,7 +372,7 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   var all = inDialog.concat(inView, offView);
   var offered = new Set(all);
   var chosen = all.filter(function(el) {
-    return !(el.tagName === 'LABEL' && el.control && offered.has(el.control));
+    return !replaced.has(el) && !(el.tagName === 'LABEL' && el.control && offered.has(el.control));
   }).slice(0, MAX);
   // Keep the offered elements in this isolated world, where page scripts
   // can't see them, under this extraction's token; actions look them up by
@@ -339,6 +388,14 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     var desc = describe(chosen[j]);
     if (chosen[j].closest(DIALOG)) desc += ' (in dialog)';
     var rec = { id: id, desc: desc };
+    var rg = chosen[j];
+    if (rg.tagName === 'INPUT' && rg.type === 'radio' && rg.name) {
+      rec.group = 'n:' + rg.name + ':' + (rg.form ? Array.prototype.indexOf.call(document.forms, rg.form) : -1);
+    } else if (rg.getAttribute && rg.getAttribute('role') === 'radio' && rg.closest('[role=radiogroup]')) {
+      var rgs = rg.closest('[role=radiogroup]');
+      rgs.__bsGroup = rgs.__bsGroup || ('g:' + Math.random().toString(36).slice(2));
+      rec.group = rgs.__bsGroup;
+    }
     if (chosen[j].tagName === 'SELECT' && chosen[j].options) {
       var opts = [];
       for (var q = 0; q < chosen[j].options.length && q < 25; q++) {
@@ -573,6 +630,9 @@ pub struct Element {
     /// from the id: an element of a frame scripts can't reach, kept in that
     /// frame's world under a stamp of its own.
     pub css: Option<String>,
+    /// The radio group it belongs to: any of a group's buttons stands for
+    /// the group when picking from it.
+    pub group: Option<String>,
 }
 
 /// A page extraction: what a Jev decision was offered.
@@ -764,18 +824,18 @@ static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
 /// Resolve a `jev:` goal to one element on the page. The caller explicitly
 /// asked for a Jev decision, so the standard `JEV_MIN_CONFIDENCE` floor
 /// (best-guess semantics) applies.
-pub async fn resolve(page: &Page, goal: &str) -> Result<Resolution> {
+pub async fn resolve(page: &Page, goal: &str, by_group: bool) -> Result<Resolution> {
     let floor = config()?.min_confidence;
-    resolve_with_floor(page, goal, floor).await
+    resolve_with_floor(page, goal, floor, by_group).await
 }
 
 /// Resolve a goal on the automatic fallback path (a selector that matched
 /// nothing as CSS). Applies the stricter `JEV_FALLBACK_MIN_CONFIDENCE` floor:
 /// the caller asked for CSS, so a Jev guess should only act when it is
 /// clearly right.
-pub async fn resolve_fallback(page: &Page, goal: &str) -> Result<Resolution> {
+pub async fn resolve_fallback(page: &Page, goal: &str, by_group: bool) -> Result<Resolution> {
     let floor = config()?.fallback_min_confidence;
-    resolve_with_floor(page, goal, floor).await
+    resolve_with_floor(page, goal, floor, by_group).await
 }
 
 /// Run the DOM extraction with a few retries. Right after an executed
@@ -831,6 +891,7 @@ async fn add_frames(page: &Page, info: &mut PageInfo, skip_typed: bool) {
                 desc: format!("{} (in the frame from {host})", e.desc),
                 options: e.options.clone(),
                 css: Some(css),
+                group: e.group.as_ref().map(|g| format!("{stamp}:{g}")),
             });
         }
         info.omitted += inner.omitted;
@@ -941,7 +1002,15 @@ async fn narrow(
     Ok((keep, first))
 }
 
-async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resolution> {
+/// With `by_group`, a radio button's confidence is its whole group's: the
+/// caller picks within the group, so Jev splitting its vote among the
+/// group's buttons is still one answer.
+async fn resolve_with_floor(
+    page: &Page,
+    goal: &str,
+    floor: f64,
+    by_group: bool,
+) -> Result<Resolution> {
     let cfg = config()?;
     let page_info = extract_with_retry(page, false).await?;
     if page_info.elements.is_empty() {
@@ -960,7 +1029,25 @@ async fn resolve_with_floor(page: &Page, goal: &str, floor: f64) -> Result<Resol
             Value::String("None of these elements is what the agent wants.".to_string()),
         );
         let cfg = &cfg;
-        async move { decide(cfg, &state, &criteria).await }
+        let groups: std::collections::HashMap<String, String> = info
+            .elements
+            .iter()
+            .filter_map(|e| Some((e.id.clone(), e.group.clone()?)))
+            .collect();
+        async move {
+            let (id, mut confidence, tokens, model, ranked) =
+                decide(cfg, &state, &criteria).await?;
+            if by_group {
+                if let Some(g) = groups.get(&id) {
+                    confidence += ranked
+                        .iter()
+                        .filter(|(other, _)| other != &id && groups.get(other) == Some(g))
+                        .map(|(_, p)| p)
+                        .sum::<f64>();
+                }
+            }
+            Ok::<_, anyhow::Error>((id, confidence.min(1.0), tokens, model))
+        }
     };
     // What a person sees first (dialog and viewport first). Only a big page
     // whose first look found nothing good enough is narrowed in groups.
@@ -2164,7 +2251,7 @@ async fn decide(
     cfg: &Config,
     state: &str,
     criteria: &Map<String, Value>,
-) -> Result<(String, f64, u64, String)> {
+) -> Result<(String, f64, u64, String, Vec<(String, f64)>)> {
     let body = json!({
         "model": cfg.model,
         "state": state,
@@ -2180,7 +2267,13 @@ async fn decide(
     let ids: Vec<&str> = criteria.keys().map(|k| k.as_str()).collect();
     let answer = parse_choice(&json, "element", &ids)?;
     let (model, input_tokens) = usage_of(&json, cfg);
-    Ok((answer.chosen, answer.confidence, input_tokens, model))
+    Ok((
+        answer.chosen,
+        answer.confidence,
+        input_tokens,
+        model,
+        answer.ranked,
+    ))
 }
 
 /// POST a fully-built `/v1/systemone` request and return the parsed response,
@@ -2274,6 +2367,7 @@ fn parse_extraction(v: &Value, stamp: &str) -> Result<PageInfo> {
                         desc,
                         options,
                         css: None,
+                        group: e.get("group").and_then(|g| g.as_str()).map(str::to_string),
                     })
                 })
                 .collect::<Vec<_>>()
@@ -2315,12 +2409,14 @@ mod tests {
                     desc: "input type=text \"Email\"".to_string(),
                     options: vec![],
                     css: None,
+                    group: None,
                 },
                 Element {
                     id: "e2".to_string(),
                     desc: "button \"Log in\"".to_string(),
                     options: vec![],
                     css: None,
+                    group: None,
                 },
             ],
             omitted: 3,
@@ -2347,6 +2443,7 @@ mod tests {
                 desc: "input type=search \"Search\"".to_string(),
                 options: vec![],
                 css: None,
+                group: None,
             }],
             omitted: 0,
             stamp: "ab12".to_string(),
@@ -2394,6 +2491,7 @@ mod tests {
                     desc: format!("button {i}"),
                     options: vec![],
                     css: None,
+                    group: None,
                 })
                 .collect(),
             omitted: 0,
