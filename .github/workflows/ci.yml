@@ -113,6 +113,20 @@ jobs:
             targets+=(".#checks.x86_64-linux.build" ".#packages.x86_64-linux.release")
           fi
           nix build -L "${targets[@]}"
+      # Hand nixos-test the package it boots (71 MiB with its runtime closure),
+      # so it doesn't compile it again. Pull requests never push to the binary
+      # cache, so this is the only way it reaches that job there.
+      - name: Export the package for nixos-test
+        run: |
+          nix path-info .#packages.x86_64-linux.browser-session-mcp-ci > paths.txt
+          nix copy --to "file://$RUNNER_TEMP/ci-package?compression=zstd" --stdin <paths.txt
+          mv paths.txt "$RUNNER_TEMP/ci-package/"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-package
+          path: ${{ runner.temp }}/ci-package
+          retention-days: 1
+          if-no-files-found: error
 
   # NixOS VM integration test (checks.smoke): boots a VM running the real
   # nixos-module.nix stack and drives the full MCP surface. VM tests need
@@ -137,6 +151,13 @@ jobs:
       - uses: ./.github/actions/nix-cache
         with:
           push-token: ${{ secrets.ATTIC_TOKEN }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-package
+          path: ${{ runner.temp }}/ci-package
+      # As root, since only a trusted user may import unsigned paths.
+      - name: Import the package from build-linux
+        run: xargs sudo "$(command -v nix)" copy --no-check-sigs --from "file://$RUNNER_TEMP/ci-package" <"$RUNNER_TEMP/ci-package/paths.txt"
       - run: nix build -L ".#checks.x86_64-linux.smoke"
 
   # Builds the aarch64-darwin package via Nix on an arm64 macOS runner, so the
