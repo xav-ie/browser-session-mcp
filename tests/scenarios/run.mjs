@@ -757,6 +757,28 @@ const SCENARIOS = [
     },
   },
   {
+    id: "act-safety",
+    needs: "TYPESAFE_API_KEY",
+    about: "act holds a Next button that became Submit when told to confirm irreversible clicks, and a click by a word the page only shares fails",
+    async run({ call, raw, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/steps.html` });
+      const state = () => js(call, sessionId, "JSON.stringify(window.state)").then(JSON.parse);
+      const r = await call("act", {
+        sessionId,
+        goal: "Fill in the sign up form and submit it",
+        values: { first: "Alex", last: "Tester", email: "alex.tester@example.com" },
+        confirmIrreversible: true,
+        maxSteps: 8,
+      });
+      const s = await state();
+      expect(r.status === "needs_confirmation" && /Submit/.test(r.pending ?? ""), `held for confirmation: ${JSON.stringify({ status: r.status, pending: r.pending, steps: r.steps?.map((x) => `${x.action} ${x.target}`) })}`);
+      expect(!s.sent && !s.reset, `nothing sent, nothing reset: ${JSON.stringify(s)}`);
+      const cookies = await raw("click", { sessionId, selector: "accept cookies" });
+      expect(cookies.isError && !(await state()).prefs, `no consent banner, so nothing to accept: ${text(cookies).slice(0, 200)}`);
+    },
+  },
+  {
     id: "radio-questions",
     needs: "TYPESAFE_API_KEY",
     about: "Plain language finds radio questions that only their question text tells apart",

@@ -1243,7 +1243,11 @@ impl BrowserSessionServer {
             let mut switched = false;
             if last_element.as_deref() == Some(d.chosen.as_str()) && !last_had_effect {
                 if let Some((alt, _)) = &d.next_best {
-                    if alt != &d.chosen {
+                    // Only to an element beside the one that did nothing (the
+                    // same document and form): the runner-up can be a page
+                    // control far from the work, like an editor's "Run"
+                    // button around a demo form, which reloads it.
+                    if alt != &d.chosen && same_place(&page, &d.page, &d.chosen, alt).await {
                         chosen = alt.clone();
                         switched = true;
                     }
@@ -1256,7 +1260,8 @@ impl BrowserSessionServer {
             };
             if let Some(el) = el {
                 if confirm_irreversible
-                    && d.irreversible >= ACT_IRREVERSIBLE_GATE
+                    && (d.irreversible >= ACT_IRREVERSIBLE_GATE
+                        || jev::looks_irreversible(&el.desc))
                     && !jev::is_text_field(&el.desc)
                 {
                     return Ok(act_done(
@@ -3423,6 +3428,32 @@ const ACT_GATE: f64 = 0.85;
 /// Achieved goals measured 0.52 to 0.83 in the benchmark, under
 /// [`ACT_GATE`], and the loop then acted past them and undid them.
 const ACT_LIKELY_GATE: f64 = 0.5;
+
+/// Whether two offered elements sit in the same document and the same form
+/// (or neither is in a form), for `act`'s no-effect recovery. An element of
+/// a cross-site frame and one outside it never do. False when either can't
+/// be found.
+async fn same_place(page: &Page, info: &jev::PageInfo, a: &str, b: &str) -> bool {
+    let (ca, cb) = (info.css(a), info.css(b));
+    let framed = |id: &str| info.elements.iter().any(|e| e.id == id && e.css.is_some());
+    if framed(a) || framed(b) {
+        return framed(a) && framed(b);
+    }
+    let decl = format!(
+        "function() {{ {deep} var a = __bsDeep({ca}), b = __bsDeep({cb}); if (!a || !b) return false; \
+         a = a.el; b = b.el; if (a.ownerDocument !== b.ownerDocument) return false; \
+         var fa = a.closest && a.closest('form'), fb = b.closest && b.closest('form'); \
+         return fa === fb; }}",
+        deep = jev::DEEP_FIND_JS,
+        ca = js_str(&ca),
+        cb = js_str(&cb),
+    );
+    iso_eval_function(page, &decl)
+        .await
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
 
 /// With `confirmIrreversible`, `act` stops before a click Jev judges at
 /// least this likely to be impossible to undo.
