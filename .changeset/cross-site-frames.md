@@ -11,6 +11,7 @@ default: minor
 - A click inside a frame fails when the page around it covers the point.
 - Focus in a frame is reported as the field there, not the `<iframe>`.
 - `wait_for` finds `text` in frames; `evaluate` and `wait_for` take `frame`.
-- Frames with no size, such as tracking pixels, are skipped, and at most 10
-  frames from other sites are searched.
+- Frames with no size, such as tracking pixels, are skipped, at most 10
+  frames from other sites are searched, and a snapshot reads frames at once,
+  waiting at most 2 s for each.
 - `tests/scenarios` covers an application form embedded from another site.

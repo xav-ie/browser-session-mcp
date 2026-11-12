@@ -445,17 +445,22 @@ pub async fn list(page: &Page) -> Result<Vec<Frame>> {
             hosts.push((child.clone(), chain, depth + 1));
         }
     }
-    for f in &mut out {
-        if let Some(last) = f.links.last() {
-            f.owner = on_target(
-                &last.target,
-                "DOM.getFrameOwner",
-                json!({ "frameId": last.inner }),
-            )
-            .await
-            .ok()
-            .and_then(|o| o["backendNodeId"].as_i64());
-        }
+    // Each frame's <iframe> node, asked for all at once: a page of ads has
+    // dozens of frames.
+    let owners = futures::future::join_all(out.iter().map(|f| async move {
+        let last = f.links.last()?;
+        on_target(
+            &last.target,
+            "DOM.getFrameOwner",
+            json!({ "frameId": last.inner }),
+        )
+        .await
+        .ok()
+        .and_then(|o| o["backendNodeId"].as_i64())
+    }))
+    .await;
+    for (f, owner) in out.iter_mut().zip(owners) {
+        f.owner = owner;
     }
     Ok(out)
 }
@@ -658,14 +663,38 @@ const MAX_CLOSED: usize = 10;
 /// with no size (tracking pixels, hidden ones) hold nothing to act on and
 /// are left out.
 pub async fn closed(page: &Page) -> Vec<Frame> {
-    let mut out = Vec::new();
-    for f in frames(page).await.into_iter().filter(|f| f.cross) {
-        if out.len() >= MAX_CLOSED {
-            break;
-        }
-        if matches!(base_of(&f).await, Ok(Some(_))) {
-            out.push(f);
-        }
-    }
-    out
+    let cross: Vec<Frame> = frames(page).await.into_iter().filter(|f| f.cross).collect();
+    let sized = futures::future::join_all(cross.iter().map(has_size)).await;
+    cross
+        .into_iter()
+        .zip(sized)
+        .filter_map(|(f, ok)| ok.then_some(f))
+        .take(MAX_CLOSED)
+        .collect()
+}
+
+/// Whether a frame's `<iframe>` is at least 2 px each way: one call, where
+/// [`base_of`] needs a script world in every frame around it.
+pub async fn has_size(frame: &Frame) -> bool {
+    let (Some(last), Some(owner)) = (frame.links.last(), frame.owner) else {
+        return false;
+    };
+    let Ok(m) = on_target(
+        &last.target,
+        "DOM.getBoxModel",
+        json!({ "backendNodeId": owner }),
+    )
+    .await
+    else {
+        return false;
+    };
+    let w = m
+        .pointer("/model/width")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let h = m
+        .pointer("/model/height")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    w >= 2.0 && h >= 2.0
 }

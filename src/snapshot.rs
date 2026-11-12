@@ -8,6 +8,9 @@ use chromiumoxide::cdp::browser_protocol::accessibility::{
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Longest a snapshot waits for one frame's tree.
+const FRAME_TREE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub async fn snapshot(page: &Page) -> Result<String> {
     let result = page
         .execute(GetFullAxTreeParams::default())
@@ -19,15 +22,23 @@ pub async fn snapshot(page: &Page) -> Result<String> {
     }
     // The tree above holds the top document only; each frame's own tree
     // goes under its Iframe node, from another site or not.
+    // Frames with no size (tracking pixels) are left out, and the rest are
+    // read at once, each given at most FRAME_TREE_WAIT, so a page of ads
+    // can't stall the snapshot.
     let frames = crate::frames::frames(page).await;
-    let mut trees: HashMap<String, Vec<AxNode>> = HashMap::new();
-    for f in &frames {
-        if let Ok(v) = crate::frames::ax_nodes(f).await {
-            if let Ok(n) = serde_json::from_value::<Vec<AxNode>>(v["nodes"].clone()) {
-                trees.insert(f.key(), n);
-            }
+    let read = futures::future::join_all(frames.iter().map(|f| async move {
+        if !crate::frames::has_size(f).await {
+            return None;
         }
-    }
+        let v = tokio::time::timeout(FRAME_TREE_WAIT, crate::frames::ax_nodes(f))
+            .await
+            .ok()?
+            .ok()?;
+        let n = serde_json::from_value::<Vec<AxNode>>(v["nodes"].clone()).ok()?;
+        Some((f.key(), n))
+    }))
+    .await;
+    let trees: HashMap<String, Vec<AxNode>> = read.into_iter().flatten().collect();
     let top = page
         .mainframe()
         .await
