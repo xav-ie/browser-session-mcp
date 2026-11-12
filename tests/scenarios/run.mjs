@@ -679,6 +679,44 @@ const SCENARIOS = [
     },
   },
   {
+    id: "field-truth",
+    about: "type sets date, time and range inputs, says when a field kept or reformatted the text, actions report fields the page rejected, and a multi-select closes after a pick",
+    async run({ call, raw, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/fields.html` });
+      const value = (id) => js(call, sessionId, `document.getElementById(${JSON.stringify(id)}).value`);
+      const typed = async (selector, input) => {
+        const r = await raw("type", { sessionId, selector, text: input });
+        return { error: !!r.isError, text: text(r) };
+      };
+      const date = await typed("#start", "03/14/2026");
+      expect(!date.error && (await value("start")) === "2026-03-14", `date: ${JSON.stringify(date)}`);
+      const bad = await typed("#start", "someday");
+      expect(bad.error && bad.text.includes("2026-03-14"), `a date it can't read names the format: ${JSON.stringify(bad)}`);
+      await typed("#at", "2:30 PM");
+      expect((await value("at")) === "14:30", `time: ${await value("at")}`);
+      await typed("#level", "75");
+      expect((await value("level")) === "75", `range: ${await value("level")}`);
+      const phone = await typed("#phone", "5551234567");
+      expect(!phone.error && phone.text.includes("(555) 123-4567"), `a mask is reported, not an error: ${JSON.stringify(phone)}`);
+      const code = await typed("#code", "abc");
+      expect(code.error && code.text.includes("empty"), `typing the page dropped: ${JSON.stringify(code)}`);
+      const send = text(await raw("click", { sessionId, selector: "#send" }));
+      expect(send.includes("rejected 1 field") && send.includes("input#email"), `the browser's own check: ${send}`);
+      expect(!(await js(call, sessionId, "!!window.formValues.sent")), "the form wasn't sent");
+      const save = text(await raw("click", { sessionId, selector: "#save" }));
+      expect(save.includes("Name is required"), `the page's own error text: ${save}`);
+      const plain = text(await raw("click", { sessionId, selector: "#name" }));
+      expect(!plain.includes("rejected"), `a click that rejects nothing says nothing: ${plain}`);
+      for (const skill of ["Go", "Rust"]) {
+        await call("select_option", { sessionId, selector: "#tags", option: skill });
+        expect(await js(call, sessionId, "document.getElementById('tag-list').hidden"), `the list closed after picking ${skill}`);
+      }
+      const skills = await js(call, sessionId, "window.formValues.skills.join()");
+      expect(skills === "Go,Rust", `both picked: ${skills}`);
+    },
+  },
+  {
     id: "radio-questions",
     needs: "TYPESAFE_API_KEY",
     about: "Plain language finds radio questions that only their question text tells apart",

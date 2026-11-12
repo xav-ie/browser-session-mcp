@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Fields</title>
+  <style>
+    #tag-list { list-style: none; margin: 0; padding: 4px; border: 1px solid #999; width: 200px; }
+    #tag-list li { padding: 4px; cursor: pointer; }
+    #tag-list li[aria-selected=true] { font-weight: bold; }
+    #tags { border: 1px solid #999; width: 200px; padding: 4px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <form id="details">
+    <label>Start date <input type="date" id="start"></label>
+    <label>Start time <input type="time" id="at"></label>
+    <label>Experience <input type="range" id="level" min="0" max="100"></label>
+    <label>Phone <input type="tel" id="phone"></label>
+    <label>Code <input id="code"></label>
+    <label>Email <input type="email" id="email" required></label>
+    <button id="send">Send</button>
+  </form>
+  <form id="profile" novalidate>
+    <label for="name">Name</label> <input id="name" aria-describedby="name-error">
+    <span id="name-error"></span>
+    <button id="save">Save</button>
+  </form>
+  <p>Skills</p>
+  <div id="tags" role="combobox" aria-expanded="false" aria-controls="tag-list" tabindex="0">Pick skills</div>
+  <ul id="tag-list" role="listbox" aria-multiselectable="true" hidden>
+    <li role="option" aria-selected="false">Go</li>
+    <li role="option" aria-selected="false">Rust</li>
+    <li role="option" aria-selected="false">TypeScript</li>
+  </ul>
+  <p id="below">Below the skills</p>
+  <script>
+    window.formValues = { skills: [] };
+    // Formats a phone number as typed.
+    document.getElementById('phone').addEventListener('input', function (e) {
+      var d = e.target.value.replace(/\D/g, '');
+      e.target.value = d.length > 6 ? '(' + d.slice(0, 3) + ') ' + d.slice(3, 6) + '-' + d.slice(6) : d;
+    });
+    // Takes only digits, and drops anything else.
+    document.getElementById('code').addEventListener('input', function (e) { e.target.value = e.target.value.replace(/\D/g, ''); });
+    document.getElementById('details').addEventListener('submit', function (e) { e.preventDefault(); window.formValues.sent = true; });
+    document.getElementById('profile').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var name = document.getElementById('name');
+      if (!name.value) { name.setAttribute('aria-invalid', 'true'); document.getElementById('name-error').textContent = 'Name is required'; }
+    });
+    // A multi-select that stays open after each pick, as many do, and closes on Escape.
+    var tags = document.getElementById('tags'), list = document.getElementById('tag-list');
+    var show = function (open) { list.hidden = !open; tags.setAttribute('aria-expanded', String(open)); };
+    tags.addEventListener('click', function () { show(list.hidden); });
+    list.addEventListener('click', function (e) {
+      var li = e.target.closest('li'); if (!li) return;
+      var on = li.getAttribute('aria-selected') !== 'true';
+      li.setAttribute('aria-selected', String(on));
+      var s = window.formValues.skills, t = li.textContent;
+      if (on) s.push(t); else s.splice(s.indexOf(t), 1);
+      tags.textContent = s.length ? s.join(', ') : 'Pick skills';
+    });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') show(false); });
+  </script>
+</body>
+</html>
