@@ -11,8 +11,9 @@
 //     [TYPESAFE_API_KEY=...] [TAKEOVER_BASE_URL=...] node tests/scenarios/run.mjs [--only id,id]
 //
 // With CHROME_BIN instead of BROWSER_URL it starts its own headless Chrome.
-// Scenarios that need Jev or takeover are skipped without them. MCP_BIN and
-// STATE_DIR: see tests/mcp.mjs.
+// Scenarios that need takeover are skipped without it. Jev scenarios replay
+// recorded answers without a key (see jev-answers.mjs), ask Jev with one, and
+// record with JEV_RECORD=1 too. MCP_BIN and STATE_DIR: see tests/mcp.mjs.
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,6 +22,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { networkInterfaces } from "node:os";
 import { connect, mcpBin, stateDir } from "../mcp.mjs";
+import { startJevStandIn } from "./jev-answers.mjs";
 
 const pages = path.join(path.dirname(fileURLToPath(import.meta.url)), "pages");
 const server = http.createServer((req, res) => {
@@ -649,6 +651,18 @@ const arg = (k, d) => {
   return i > 0 ? process.argv[i + 1] : d;
 };
 const only = arg("--only")?.split(",");
+// Jev: recorded answers unless a key is given, and recording with JEV_RECORD.
+const recording = !!(process.env.TYPESAFE_API_KEY && process.env.JEV_RECORD);
+const jev = recording || !process.env.TYPESAFE_API_KEY
+  ? await startJevStandIn({
+      record: recording,
+      normalize: (s) => [[SITE, "SITE"], [LAN_SITE, "LAN_SITE"]].reduce((t, [from, to]) => (from ? t.split(from).join(to) : t), s),
+    })
+  : null;
+if (jev) {
+  process.env.JEV_BASE_URL = jev.url;
+  process.env.TYPESAFE_API_KEY ||= "recorded-answers";
+}
 const { call, raw, close } = await connect();
 let failed = 0;
 for (const s of SCENARIOS.filter((s) => !only || only.includes(s.id))) {
@@ -686,6 +700,11 @@ for (const s of SCENARIOS.filter((s) => !only || only.includes(s.id))) {
   console.log(`${mark} ${s.id.padEnd(22)} ${((Date.now() - t0) / 1000).toFixed(1)}s  ${note}`);
 }
 close();
+if (recording) {
+  if (failed) console.log("Jev answers not saved: a scenario failed.");
+  else console.log(`Saved ${jev.save(!!only)} Jev answers to tests/scenarios/jev-answers.json.`);
+}
+jev?.close();
 server.close();
 chrome?.kill();
 process.exit(failed ? 1 : 0);

@@ -1,0 +1,193 @@
+{
+ "inputs": "1c6051eaa8adf207bb9d35c9171e6e26e059b1d7a6119ec7e362334690687cc5",
+ "answers": {
+  "0c4a4a7cd702e9819775": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e1",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 1,
+      "e2": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 916,
+    "output_tokens": 84
+   }
+  },
+  "2bfcefb756f5d3571c4e": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e2",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e2": 1,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 919,
+    "output_tokens": 84
+   }
+  },
+  "2e459c8cdcd852611795": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e4",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e2": 0,
+      "e3": 0,
+      "e4": 1,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 921,
+    "output_tokens": 84
+   }
+  },
+  "4cf1db985a3bf451806a": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e2",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e2": 1,
+      "e3": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 451,
+    "output_tokens": 52
+   }
+  },
+  "519481719f08f8233a00": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e3",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e2": 0,
+      "e3": 1,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 924,
+    "output_tokens": 84
+   }
+  },
+  "61889dbe9b495611441f": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e6",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e2": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "e6": 1,
+      "e7": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 926,
+    "output_tokens": 84
+   }
+  },
+  "67b6a096a0f7989ff09a": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e7",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e2": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 1
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 916,
+    "output_tokens": 84
+   }
+  },
+  "f3296638a67e14aca35a": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e5",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e2": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 1,
+      "e6": 0,
+      "e7": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 920,
+    "output_tokens": 84
+   }
+  }
+ }
+}
