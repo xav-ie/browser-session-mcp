@@ -99,6 +99,7 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     if (tag === 'input') {
       var t = el.getAttribute('type');
       if (t) p.push('type=' + clamp(t, 16));
+      if (el.type === 'file') p.push('(file upload)');
     }
     // A checkbox or radio's `value` is form data ("on" by default), not a
     // label; unlabeled ones often sit next to bare text instead
@@ -282,10 +283,14 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
         inner = DROP_NAME.test(String(c.id || '') + ' ' + String(typeof c.className === 'string' ? c.className : '')) ||
           (says && DROP_TEXT.test(String(c.innerText || '').slice(0, 300)));
       }
-      // A box with a file input in or near it is offered through that input.
+      // A box with a file input in or near it, or a label for one, is
+      // offered through that input.
       var around = d;
       if (around.parentElement) around = around.parentElement;
-      if (inner || seen.has(d) || around.querySelector('input[type=file]')) continue;
+      var labelsFile = Array.prototype.some.call(d.querySelectorAll('label'), function(l) {
+        return l.control && l.control.type === 'file';
+      });
+      if (inner || seen.has(d) || labelsFile || around.querySelector('input[type=file]')) continue;
       // A box a file could be dropped on, not a menu entry named after one.
       var db = d.getBoundingClientRect();
       if (db.width < 60 || db.height < 32 || d.closest('nav, header, footer, [role=navigation], [role=menu]')) continue;

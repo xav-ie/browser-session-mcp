@@ -853,7 +853,13 @@ impl BrowserSessionServer {
             .unwrap_or_else(|| mime_for(&name))
             .to_string();
         let page = sessions.active_page(&session_id).await?;
-        let (css, note) = resolve_and_wait(&page, &selector, timeout).await?;
+        let (css, note) = resolve_and_wait_for(
+            &page,
+            &selector,
+            timeout,
+            Some("a file upload field or drop zone"),
+        )
+        .await?;
         let label = note.unwrap_or(css.clone());
         let before = page_url(&page).await;
         let decl = UPLOAD_JS
@@ -3095,12 +3101,28 @@ async fn resolve_and_wait(
     selector: &str,
     timeout_ms: u64,
 ) -> Result<(String, Option<String>)> {
+    resolve_and_wait_for(page, selector, timeout_ms, None).await
+}
+
+/// [`resolve_and_wait`] for a tool that can only use one kind of element:
+/// `purpose` ("to attach a file to") goes to Jev with the words, so "Resume"
+/// means the resume upload, not an "Import resume" button beside it.
+async fn resolve_and_wait_for(
+    page: &Page,
+    selector: &str,
+    timeout_ms: u64,
+    purpose: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    let with_purpose = |goal: &str| match purpose {
+        Some(p) => format!("{goal} ({p})"),
+        None => goal.to_string(),
+    };
     if let Some(goal) = selector.strip_prefix("jev:") {
         let goal = goal.trim();
         if goal.is_empty() {
             bail!("`jev:` needs a goal after the colon, e.g. `jev: the login button`");
         }
-        let res = jev::resolve(page, goal).await?;
+        let res = jev::resolve(page, &with_purpose(goal)).await?;
         // Extraction only offers currently-present elements, so this is an
         // instant match; the wait just covers a re-render in between.
         wait_for_selector(page, &res.css, timeout_ms).await?;
@@ -3121,7 +3143,7 @@ async fn resolve_and_wait(
         if !jev::available() {
             return Err(css_err);
         }
-        let res = match jev::resolve_fallback(page, selector).await {
+        let res = match jev::resolve_fallback(page, &with_purpose(selector)).await {
             Ok(res) => res,
             // Keep the CSS timeout visible: it explains why Jev was tried.
             Err(jev_err) => bail!("{css_err}; jev fallback: {jev_err}"),
