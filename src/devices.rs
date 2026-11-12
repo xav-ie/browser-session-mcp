@@ -102,7 +102,13 @@ mod tests {
     #[test]
     fn names_are_unique_and_found() {
         for d in DEVICES {
-            assert!(std::ptr::eq(find(d.name).unwrap(), d), "{}", d.name);
+            assert_eq!(find(d.name).map(|f| f.name), Some(d.name));
+            assert_eq!(
+                DEVICES.iter().filter(|o| o.name == d.name).count(),
+                1,
+                "{}",
+                d.name
+            );
         }
         assert!(find("nokia-3310").is_none());
     }
