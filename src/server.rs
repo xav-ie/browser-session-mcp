@@ -748,29 +748,50 @@ impl BrowserSessionServer {
         let sessions = self.ctx.sessions().await?;
         let session_id = required_str(&args, "sessionId")?.to_string();
         let selector = required_str(&args, "selector")?.to_string();
-        let want = required_str(&args, "option")?.to_string();
+        let want = optional_str(&args, "option").map(str::to_string);
         let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
         let page = sessions.active_page(&session_id).await?;
         let (css, note) = resolve_and_wait(&page, &selector, timeout).await?;
         let label = note.unwrap_or(css.clone());
         let before = page_url(&page).await;
-        let chosen = choose_option(&page, &css, &label, &want).await?;
-        let after = after_action(&page, before, None, (&sessions, &session_id)).await;
+        let choice = choose_option(&page, &css, &label, want.as_deref()).await?;
+        let mut after = after_action(&page, before, None, (&sessions, &session_id)).await;
+        // The options are this result's own field; the report's would repeat them.
+        after.options = None;
+        let Some(chosen) = choice.chosen else {
+            let text = format!(
+                "{label} offers {} option{}: {}. Nothing was chosen.",
+                choice.options.len(),
+                plural(choice.options.len()),
+                option_list(&choice.options)
+            );
+            return Ok(ok_text_struct(
+                text,
+                SelectOut {
+                    chosen: None,
+                    shown: None,
+                    confirmed: None,
+                    options: choice.options,
+                    after,
+                },
+            ));
+        };
         let (shown, confirmed) = shown_value(&page, &css, &chosen).await;
         let mut text = after.render(&format!("Chose {chosen:?} in {label}"));
         if confirmed {
             text.push_str(&format!(" The field shows {shown:?}."));
         } else {
             text.push_str(&format!(
-                " The field doesn't show it (it shows {shown:?}); check with take_screenshot or read before moving on."
+                " The field doesn't show it in full (it shows {shown:?}); a field can show a short form, so check with take_screenshot or read if it matters."
             ));
         }
         Ok(ok_text_struct(
             text,
             SelectOut {
-                chosen,
-                shown,
-                confirmed,
+                chosen: Some(chosen),
+                shown: Some(shown),
+                confirmed: Some(confirmed),
+                options: choice.options,
                 after,
             },
         ))
@@ -2519,13 +2540,18 @@ struct ReadOut {
 
 #[derive(Serialize, JsonSchema)]
 struct SelectOut {
-    /// The option picked, as the list shows it.
-    chosen: String,
+    /// The option picked, as the list shows it; absent when only listing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chosen: Option<String>,
     /// What the field shows after: a native select's option, or the text
     /// by a custom dropdown.
-    shown: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shown: Option<String>,
     /// Whether the field shows the chosen option.
-    confirmed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmed: Option<bool>,
+    /// The options the dropdown offered.
+    options: Vec<String>,
     #[serde(flatten)]
     after: AfterAction,
 }
@@ -3390,19 +3416,39 @@ const NATIVE_SELECT_JS: &str = r#"var __bsSelect = function(el) {
 /// `jev-ref:` lookups (see DEEP_FIND_JS).
 const OPTION_PICKS: &str = "5e1";
 
+/// Where `opening_point` keeps the box it clicks, likewise.
+const OPENER_PICK: &str = "5e2";
+
+/// Remembers the elements showing in a dropdown's document before it is
+/// opened, so `OPTIONS_JS` can tell which ones the opening click revealed.
+const MARK_SHOWING_JS: &str = r#"function() { @@DEEP@@
+  var h = __bsDeep(@@SEL@@), doc = h ? h.el.ownerDocument : document;
+  var win = doc.defaultView || window, seen = new WeakSet(), all = doc.querySelectorAll('*');
+  for (var i = 0; i < all.length && i < 20000; i++) { var r = all[i].getBoundingClientRect();
+    if (r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < win.innerWidth && r.top < win.innerHeight) seen.add(all[i]); }
+  globalThis.__bsShowing = seen;
+  return true;
+}"#;
+
 /// The options a custom dropdown shows now, as text, kept under
-/// `OPTION_PICKS` in order. The list is the one the field's
-/// `aria-controls`/`aria-owns` names (on it, inside it or on the focused
-/// element), else every visible `role=option` on the page and in open
-/// shadow roots: menus are often drawn in a portal at the end of the body.
+/// `OPTION_PICKS` in order. They are the `role=option` elements of the list
+/// the field's `aria-controls`/`aria-owns` names (on it, inside it or on
+/// the focused element), else every visible one in the field's document
+/// and its open shadow roots (menus are often drawn in a portal at the end
+/// of the body). A dropdown without those roles (older libraries, hand
+/// made ones) gets the entries of the box that gained the most visible
+/// entries with text since `MARK_SHOWING_JS` ran.
 const OPTIONS_JS: &str = r#"function() { @@DEEP@@
-  var h = __bsDeep(@@SEL@@), el = h && h.el;
-  var vis = function(o) { var r = o.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(o).visibility !== 'hidden'; };
+  var h = __bsDeep(@@SEL@@), el = h && h.el, doc = el ? el.ownerDocument : document;
+  var win = doc.defaultView || window;
+  var vis = function(o) { var r = o.getBoundingClientRect(); return r.width > 0 && r.height > 0 && win.getComputedStyle(o).visibility !== 'hidden'; };
+  var label = function(o) { return String(o.innerText || o.textContent || o.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim(); };
   var lists = [];
-  [el, el && el.querySelector && el.querySelector('[role=combobox], input'), document.activeElement].forEach(function(n) {
+  [el, el && el.querySelector && el.querySelector('[role=combobox], input'), doc.activeElement].forEach(function(n) {
     if (!n || !n.getAttribute) return;
     ((n.getAttribute('aria-controls') || '') + ' ' + (n.getAttribute('aria-owns') || '')).split(/\s+/).forEach(function(id) {
-      var l = id && (n.getRootNode().getElementById ? n.getRootNode().getElementById(id) : document.getElementById(id));
+      var root = n.getRootNode();
+      var l = id && (root.getElementById ? root.getElementById(id) : doc.getElementById(id));
       if (l && lists.indexOf(l) < 0) lists.push(l);
     });
   });
@@ -3412,11 +3458,27 @@ const OPTIONS_JS: &str = r#"function() { @@DEEP@@
   if (!opts.length) {
     var walk = function(root, depth) { take(root); if (depth > 3) return;
       root.querySelectorAll('*').forEach(function(n) { if (n.shadowRoot) walk(n.shadowRoot, depth + 1); }); };
-    walk(document, 0);
+    walk(doc, 0);
+  }
+  var seen = globalThis.__bsShowing;
+  if (!opts.length && seen) {
+    // Shown on the screen now: a closed menu is often only moved off it.
+    var onScreen = function(n) { var r = n.getBoundingClientRect();
+      return vis(n) && r.right > 0 && r.bottom > 0 && r.left < win.innerWidth && r.top < win.innerHeight; };
+    var entry = function(n) { var t = label(n); return t && t.length <= 200; };
+    var fresh = function(n) { return !seen.has(n) && onScreen(n) && entry(n); };
+    var best = null, most = 0;
+    var all = doc.querySelectorAll('*');
+    for (var i = 0; i < all.length && i < 20000; i++) {
+      var n = Array.prototype.filter.call(all[i].children, fresh).length;
+      if (n >= 2 && n > most) { best = all[i]; most = n; }
+    }
+    // Every entry of that box, including ones scrolled out of its view.
+    if (best) opts = Array.prototype.filter.call(best.children, function(n) { return vis(n) && entry(n); });
   }
   var store = globalThis.__bsPicks || (globalThis.__bsPicks = { order: [] });
   store[@@KEY@@] = opts;
-  return opts.map(function(o) { return String(o.innerText || o.textContent || o.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim(); });
+  return opts.map(label);
 }"#;
 
 /// What a dropdown shows as its value: a native select's chosen option, or
@@ -3512,8 +3574,9 @@ async fn native_options(page: &Page, css: &str) -> Result<Option<Vec<String>>> {
 }
 
 /// The options a custom dropdown shows, polled for up to `wait_ms` until
-/// one matches `want` (or, with no match by then, whatever is showing).
-async fn shown_options(page: &Page, css: &str, want: &str, wait_ms: u64) -> Vec<String> {
+/// one matches `want` (or, with no `want`, until any show), else whatever
+/// is showing by then.
+async fn shown_options(page: &Page, css: &str, want: Option<&str>, wait_ms: u64) -> Vec<String> {
     let decl = OPTIONS_JS
         .replace("@@DEEP@@", jev::DEEP_FIND_JS)
         .replace("@@KEY@@", &js_str(OPTION_PICKS))
@@ -3525,7 +3588,11 @@ async fn shown_options(page: &Page, css: &str, want: &str, wait_ms: u64) -> Vec<
             .ok()
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default();
-        if pick_option(&opts, want).is_some() || tokio::time::Instant::now() >= deadline {
+        let done = match want {
+            Some(w) => pick_option(&opts, w).is_some(),
+            None => !opts.is_empty(),
+        };
+        if done || tokio::time::Instant::now() >= deadline {
             return opts;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3569,12 +3636,32 @@ async fn focused_is_combobox(page: &Page) -> bool {
     .unwrap_or(false)
 }
 
-/// Pick `want` in the dropdown at `css`. A native select is set directly.
-/// A custom one is opened with a real click; when the option isn't showing
-/// (a long list drawn in part, or one searched as you type) its text is
-/// typed to filter; then the option is clicked. Returns the option chosen.
-async fn choose_option(page: &Page, css: &str, label: &str, want: &str) -> Result<String> {
+/// Lists drawn with fewer options than this show all they have, so typing
+/// to search them can't find anything new; longer ones may be drawn in part.
+const PARTIAL_LIST_MIN: usize = 20;
+
+/// What `choose_option` saw and did.
+struct Choice {
+    /// The option picked; `None` when only listing.
+    chosen: Option<String>,
+    /// The options the dropdown showed.
+    options: Vec<String>,
+}
+
+/// Pick `want` in the dropdown at `css`, or with `want` `None` only list its
+/// options. A native select is read and set directly. A custom one is
+/// opened with a real click; when the option isn't showing and the list
+/// may be partial (empty, still loading, or long), its text is typed to
+/// filter, and cleared again if nothing matches; then the option is
+/// clicked. Listing closes the dropdown again without typing.
+async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) -> Result<Choice> {
     if let Some(opts) = native_options(page, css).await? {
+        let Some(want) = want else {
+            return Ok(Choice {
+                chosen: None,
+                options: opts,
+            });
+        };
         let i = pick_option(&opts, want).ok_or_else(|| {
             anyhow!(
                 "{label} has no option {want:?}; it offers {}",
@@ -3582,24 +3669,61 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: &str) -> Resul
             )
         })?;
         set_select_option(page, css, i as u64, &opts[i]).await?;
-        return Ok(opts[i].clone());
+        return Ok(Choice {
+            chosen: Some(opts[i].clone()),
+            options: opts,
+        });
     }
-    let (x, y) = element_center(page, css).await?;
-    check_point(page, (x, y), Some(css), label).await?;
+    let ((x, y), opener) = opening_point(page, css).await?;
+    check_point(page, (x, y), Some(&opener), label).await?;
+    let mark = MARK_SHOWING_JS
+        .replace("@@DEEP@@", jev::DEEP_FIND_JS)
+        .replace("@@SEL@@", &js_str(css));
+    iso_eval_function(page, &mark).await.ok();
     page.click(Point::new(x, y))
         .await
         .with_context(|| format!("opening {label}"))?;
     let mut opts = shown_options(page, css, want, 1_000).await;
+    if opts.is_empty() {
+        // A page still starting up can ignore the first click; look once
+        // more in case the list was only slow, then click again.
+        opts = shown_options(page, css, want, 300).await;
+        if opts.is_empty() {
+            iso_eval_function(page, &mark).await.ok();
+            page.click(Point::new(x, y))
+                .await
+                .with_context(|| format!("opening {label}"))?;
+            opts = shown_options(page, css, want, 1_000).await;
+        }
+    }
+    let Some(want) = want else {
+        close_list(page, (x, y)).await;
+        if opts.is_empty() {
+            bail!(
+                "no list of options opened from {label}; if it is searched as you type, pass `option` with the text to search"
+            );
+        }
+        return Ok(Choice {
+            chosen: None,
+            options: opts,
+        });
+    };
     // What showed before typing, for the error when typing filters it all out.
     let offered = opts.clone();
     let mut typed = false;
-    if pick_option(&opts, want).is_none() && focused_is_combobox(page).await {
+    if pick_option(&opts, want).is_none()
+        && (opts.is_empty() || opts.len() >= PARTIAL_LIST_MIN)
+        && focused_is_combobox(page).await
+    {
         type_chars(page, want, 0).await?;
         typed = true;
-        opts = shown_options(page, css, want, 3_000).await;
+        opts = shown_options(page, css, Some(want), 3_000).await;
     }
     let Some(i) = pick_option(&opts, want) else {
         dispatch_key(page, "Escape").await.ok();
+        if typed {
+            clear_focused(page).await;
+        }
         if opts.is_empty() {
             opts = offered;
         }
@@ -3607,7 +3731,7 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: &str) -> Resul
             bail!(
                 "no list of options opened from {label}{}; if it isn't a dropdown, use click or type",
                 if typed {
-                    format!(" (typed {want:?} too)")
+                    format!(" (searched for {want:?} too)")
                 } else {
                     String::new()
                 }
@@ -3615,18 +3739,113 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: &str) -> Resul
         }
         bail!(
             "{label} has no option {want:?}{}; it offers {}",
-            if typed { " (after typing it)" } else { "" },
+            if typed { " (searched for it too)" } else { "" },
             option_list(&opts)
         );
     };
     let opt = format!("jev-ref:{OPTION_PICKS}:{i}");
-    let at = element_center(page, &opt).await?;
+    let at = settled_center(page, &opt).await?;
     let what = format!("the option {:?}", opts[i]);
     check_point(page, at, Some(&opt), &what).await?;
     page.click(Point::new(at.0, at.1))
         .await
         .with_context(|| format!("clicking {what}"))?;
-    Ok(opts[i].clone())
+    Ok(Choice {
+        chosen: Some(opts[i].clone()),
+        options: opts,
+    })
+}
+
+/// Close a dropdown opened only to list it: Escape, and when the same
+/// options still show (some lists don't listen for it), the opening click
+/// again, which toggles them shut.
+async fn close_list(page: &Page, at: (f64, f64)) {
+    dispatch_key(page, "Escape").await.ok();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let still = iso_eval_function(
+        page,
+        &format!(
+            "function() {{ var o = (globalThis.__bsPicks || {{}})[{key}] || []; \
+             return o.some(function(e) {{ if (!e.isConnected) return false; var r = e.getBoundingClientRect(); \
+               var w = e.ownerDocument.defaultView || window; \
+               return r.width > 0 && r.height > 0 && r.right > 0 && r.left < w.innerWidth && r.bottom > 0 && r.top < w.innerHeight; }}); }}",
+            key = js_str(OPTION_PICKS)
+        ),
+    )
+    .await
+    .ok()
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false);
+    if still {
+        page.click(Point::new(at.0, at.1)).await.ok();
+    }
+}
+
+/// Empty the focused field if it still holds text, as a person would with
+/// select all and delete: a dropdown searched for an option it doesn't
+/// have shouldn't keep the search.
+async fn clear_focused(page: &Page) {
+    let holds = iso_eval_function(
+        page,
+        "function() { var el = document.activeElement; \
+         while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement; \
+         return !!el && 'value' in el && String(el.value) !== ''; }",
+    )
+    .await
+    .ok()
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false);
+    if holds {
+        dispatch_key(page, "Control+a").await.ok();
+        dispatch_key(page, "Backspace").await.ok();
+        dispatch_key(page, "Escape").await.ok();
+    }
+}
+
+/// Where to click to open a dropdown: the element's center, or when the
+/// element is off the screen or a sliver (a search input parked off screen
+/// or a few pixels wide until the dropdown has focus), the center of the
+/// nearest box around it that is on the screen. Returns the point and a
+/// reference to the box, for the covered check.
+async fn opening_point(page: &Page, css: &str) -> Result<((f64, f64), String)> {
+    let decl = format!(
+        "function() {{ {deep} var h = __bsDeep({sel}); if (!h) return null; \
+         h.el.scrollIntoView({{block:'center',inline:'nearest',behavior:'instant'}}); h = __bsDeep({sel}); \
+         var ok = function(r) {{ return r.width >= 4 && r.height >= 4 && r.right > 0 && r.bottom > 0 \
+           && r.left < innerWidth && r.top < innerHeight; }}; \
+         for (var n = h.el, i = 0; n && n.getBoundingClientRect && i < 4; n = n.parentElement, i++) {{ \
+           var r = n.getBoundingClientRect(); \
+           if (ok(r)) {{ var store = globalThis.__bsPicks || (globalThis.__bsPicks = {{ order: [] }}); \
+             store[{key}] = [n]; \
+             return [h.ox + r.left + r.width / 2, h.oy + r.top + r.height / 2]; }} }} \
+         return null; }}",
+        deep = jev::DEEP_FIND_JS,
+        sel = js_str(css),
+        key = js_str(OPENER_PICK),
+    );
+    let v = iso_eval_function(page, &decl).await?;
+    match v.as_array().map(|a| (a[0].as_f64(), a[1].as_f64())) {
+        Some((Some(x), Some(y))) => Ok(((x, y), format!("jev-ref:{OPENER_PICK}:0"))),
+        _ => Ok((element_center(page, css).await?, css.to_string())),
+    }
+}
+
+/// An element's center once it stops moving: a menu that grows or slides
+/// in moves its options for a few hundred milliseconds, and some (such as
+/// Material UI's) ignore a click until it has finished. Waits up to a
+/// second.
+async fn settled_center(page: &Page, css: &str) -> Result<(f64, f64)> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1_000);
+    let mut last = element_center(page, css).await?;
+    loop {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let now = element_center(page, css).await?;
+        let still = (now.0 - last.0).abs() < 0.5 && (now.1 - last.1).abs() < 0.5;
+        if still || tokio::time::Instant::now() >= deadline {
+            return Ok(now);
+        }
+        last = now;
+    }
 }
 
 /// Most bytes upload_file attaches.
@@ -3982,7 +4201,8 @@ async fn hit_at(page: &Page, (x, y): (f64, f64), target: Option<&str>) -> Result
          var up = function(n) {{ return n.parentNode || n.host || (n.defaultView && n.defaultView.frameElement) || null; }}; \
          var within = function(a, b) {{ for (var n = a; n; n = up(n)) if (n === b) return true; return false; }}; \
          var h = sel ? __bsDeep(sel) : null, target = h && h.el; \
-         var ok = !target || !el || within(el, target) || within(target, el); \
+         var bare = el && (el.tagName === 'BODY' || el.tagName === 'HTML'); \
+         var ok = !target || !el || within(el, target) || (!bare && within(target, el)); \
          if (!ok) {{ for (var n = el; n; n = up(n)) if (n.tagName === 'LABEL') {{ \
            ok = n.control === target || within(target, n); break; }} }} \
          return {{ hit: __bsDesc(el), ok: ok }}; }}",
@@ -4060,6 +4280,11 @@ struct AfterAction {
     /// answered since the last action, each accepted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     answered: Vec<String>,
+    /// The options of a dropdown or list open after the action (the one the
+    /// focused field controls, else any showing), up to 50: pick one with
+    /// select_option or click.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    options: Option<Vec<String>>,
 }
 
 const AFTER_ACTION_SETTLE_MS: u64 = 250;
@@ -4107,8 +4332,16 @@ async fn after_action(
              return r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < de.clientWidth && r.top < de.clientHeight \
                && s.visibility !== 'hidden' && s.opacity !== '0'; }}); \
          var text = dlg ? String(dlg.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 160) : null; \
+         var seen = function(o) {{ var r = o.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(o).visibility !== 'hidden'; }}; \
+         var list = null; \
+         if (el && el.getAttribute && el.getAttribute('aria-expanded') === 'true') {{ \
+           var ids = ((el.getAttribute('aria-controls') || '') + ' ' + (el.getAttribute('aria-owns') || '')).trim().split(/\\s+/); \
+           for (var k = 0; k < ids.length && !list; k++) {{ var root = el.getRootNode(); \
+             list = ids[k] && (root.getElementById ? root.getElementById(ids[k]) : document.getElementById(ids[k])); }} }} \
+         var opts = Array.from((list || document).querySelectorAll('[role=option]')).filter(seen).slice(0, 50) \
+           .map(function(o) {{ return String(o.innerText || o.textContent || o.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim(); }}); \
          return {{ url: location.href, title: document.title, \
-           focused: focused, \
+           focused: focused, options: opts.length ? opts : null, \
            dialog: dlg ? (text || __bsDesc(dlg)) : null }}; }}",
         desc = DESCRIBE_JS,
         focused = FOCUSED_JS,
@@ -4132,6 +4365,9 @@ async fn after_action(
             .unwrap_or("nothing")
             .to_string(),
         dialog: v.get("dialog").and_then(Value::as_str).map(str::to_string),
+        options: v
+            .get("options")
+            .and_then(|o| serde_json::from_value(o.clone()).ok()),
         url,
         hit,
         focus_trail: None,
@@ -4163,6 +4399,14 @@ impl AfterAction {
         }
         for d in &self.answered {
             s.push_str(&format!(" The page asked ({d}) and it was accepted."));
+        }
+        if let Some(o) = &self.options {
+            s.push_str(&format!(
+                " A list is open with {} option{}: {}.",
+                o.len(),
+                plural(o.len()),
+                option_list(o)
+            ));
         }
         s
     }
@@ -5138,7 +5382,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool(
             "select_option",
-            "Choose an option in a dropdown by its text, in the session's active tab. Works on a native `<select>` (set directly, firing input and change) and on custom dropdowns drawn by scripts (a combobox, a React or other component select, a searchable list): it opens the dropdown with a real click, types `option` to filter when the option isn't in the list showing (long lists drawn in part, and lists searched as you type), clicks the option, and reads the field back. `option` matches exactly ignoring case, else the shortest option starting with it, else the shortest containing it. `selector` is the dropdown: the select, the combobox input or the box you'd click to open it (CSS, or plain words as for click). Returns what was chosen, what the field shows after and whether that is the option (`confirmed`), with where the page is as for click. Fails listing the options offered when none matches, or when no list opens.",
+            "Choose an option in a dropdown by its text, in the session's active tab. Works on a native `<select>` (set directly, firing input and change) and on custom dropdowns drawn by scripts (a combobox, a React or other component select, a searchable list): it opens the dropdown with a real click, types `option` to filter when the option isn't in the list showing (long lists drawn in part, and lists searched as you type), clicks the option, and reads the field back. `option` matches exactly ignoring case, else the shortest option starting with it, else the shortest containing it. `selector` is the dropdown: the select, the combobox input or the box you'd click to open it (CSS, or plain words as for click). Without `option`, opens the dropdown, returns its `options` and closes it, choosing and typing nothing: look before you pick. It types only when the list may be partial (empty, loading, or 20 options or more), and clears what it typed when nothing matches. Returns what was chosen, the options offered, what the field shows after and whether that is the option (`confirmed`; a field can show a short form, such as \"+1\" for a country), with where the page is as for click. Fails listing the options offered when none matches, or when no list opens.",
             object_schema(
                 &[
                     session_id,
@@ -5150,7 +5394,7 @@ fn tool_defs() -> Vec<Tool> {
                     (
                         "option",
                         &str_t,
-                        "The option's text, or the start of it (\"United States\" picks \"United States +1\").",
+                        "The option's text, or the start of it (\"United States\" picks \"United States +1\"). Leave it out to list the options without choosing.",
                     ),
                     (
                         "timeout",
@@ -5158,7 +5402,7 @@ fn tool_defs() -> Vec<Tool> {
                         "Milliseconds to wait for `selector` to appear. Default 5000.",
                     ),
                 ],
-                &["sessionId", "selector", "option"],
+                &["sessionId", "selector"],
             ),
             writes(false, true),
         ),

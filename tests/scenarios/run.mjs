@@ -428,12 +428,60 @@ const SCENARIOS = [
       const v = await values();
       expect(v.state === "Massachusetts" && v.sponsor === "No" && v.country === "United States +1" && v.school === "Boston University" && v.pronouns === "They/them",
         `the form took every choice: ${JSON.stringify(v)}`);
+      // Typing is recorded, to tell whether a miss searched.
+      await js(call, sessionId, "(window.__typed = [], document.addEventListener('input', (e) => window.__typed.push(e.target.id + ':' + e.target.value), true), 1)");
       const missing = await raw("select_option", { sessionId, selector: "#sponsor", option: "Maybe" });
       expect(missing.isError && text(missing).includes('"Yes", "No"'), `a missing option fails listing the offered ones: ${text(missing).slice(0, 200)}`);
+      expect((await js(call, sessionId, "window.__typed.length")) === 0, "a short list shown in full isn't searched");
+      const far = await raw("select_option", { sessionId, selector: "#country", option: "Atlantis" });
+      expect(far.isError && text(far).includes("searched for it too"), `a long list is searched: ${text(far).slice(0, 200)}`);
+      expect((await js(call, sessionId, "document.getElementById('country').value")) === "", "the search is cleared after a miss");
+      // Listing chooses and types nothing.
+      const before = await js(call, sessionId, "window.__typed.length");
+      const listed = await call("select_option", { sessionId, selector: "#sponsor" });
+      expect(listed.options?.join() === "Yes,No" && !listed.chosen, `listing returns the options: ${JSON.stringify(listed)}`);
+      expect((await js(call, sessionId, "window.__typed.length")) === before && !(await js(call, sessionId, "!!document.querySelector('[role=listbox]')")),
+        "listing typed nothing and closed the list");
+      // An action that opens a list reports its options.
+      const opened = await call("click", { sessionId, selector: "#state" });
+      expect(opened.options?.[0] === "Alabama" && opened.options.length === 50, `the click reports the open list: ${JSON.stringify(opened.options?.slice(0, 3))}`);
+      await call("press_key", { sessionId, key: "Escape" });
       expect((await values()).sponsor === "No", "the failed choice changed nothing");
       const notList = await raw("select_option", { sessionId, selector: "#first_name", option: "Alex" });
       expect(notList.isError && text(notList).includes("no list of options opened"), `a plain field fails: ${text(notList).slice(0, 200)}`);
       expect((await js(call, sessionId, "document.getElementById('first_name').value")) === "", "nothing was typed into the plain field");
+    },
+  },
+  {
+    id: "dropdown-widgets",
+    about: "select_option on dropdowns that start late, grow in, park their input off screen, have no roles, ignore Escape, or sit in a frame",
+    async run({ call, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/widgets.html` });
+      const pick = async (selector, list, option) => {
+        const l = await call("select_option", { sessionId, selector });
+        expect(l.options?.join() === list, `${selector} lists ${list}: ${JSON.stringify(l.options)}`);
+        const r = await call("select_option", { sessionId, selector, option });
+        expect(r.chosen === option && r.confirmed, `${selector} picks ${option}: ${JSON.stringify(r)}`);
+      };
+      // Its handlers arrive a second after load: the first click does nothing.
+      await pick("#late", "Free,Pro,Team", "Team");
+      // Grows in and ignores clicks until it has.
+      await pick("#size", "Small,Medium,Large", "Large");
+      // The input is off the screen until the box around it has focus.
+      await pick("#theme-search", "Light,Dark,Auto", "Dark");
+      // No roles; closed it is only moved off the screen.
+      const country = await call("select_option", { sessionId, selector: "#country-trigger" });
+      expect(country.options?.length === 30 && country.options[0] === "United States", `the country list without roles: ${JSON.stringify(country.options?.slice(0, 3))}`);
+      const c = await call("select_option", { sessionId, selector: "#country-trigger", option: "Canada" });
+      expect(c.chosen === "Canada" && c.confirmed, `country picks Canada: ${JSON.stringify(c)}`);
+      // No roles, and Escape doesn't close it.
+      await pick("#gender", "Male,Female,Other", "Female");
+      // In a frame below the fold.
+      await pick("#speed", "Slower,Slow,Medium,Fast,Faster", "Fast");
+      const v = JSON.parse(await js(call, sessionId, "JSON.stringify(window.formValues)"));
+      expect(v.plan === "Team" && v.size === "Large" && v.theme === "Dark" && v.country === "Canada" && v.gender === "Female" && v.speed === "Fast",
+        `the page took every pick: ${JSON.stringify(v)}`);
     },
   },
   {
