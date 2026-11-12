@@ -219,7 +219,7 @@ turns passkey prompts down, so sites fall back to a password or a code.
 
 **Seeing the page**
 - `take_screenshot({ sessionId, fullPage?, selector?, scale?, save? })`: a PNG of the screen, the whole page or one element; `save` writes it under `$STATE_DIR/screenshots/<sessionId>/`, kept after the session closes, and returns `{ path, bytes }` instead, for callers that can't take an image
-- `take_snapshot({ sessionId })`: the accessibility tree as indented text
+- `take_snapshot({ sessionId })`: the accessibility tree as indented text; an unnamed control shows what its icon is, as `button (icon "trash")`
 - `ask({ sessionId, question, options? })` → `{ answer, probability, probabilities? }`: asks Jev about the page as it is now, yes/no or which of your `options` fits, in one cheap call
 - `read({ sessionId, question, maxChars? })` → `{ text, pageChars, passages, kept, filtered }`: only the passages of the page that help answer `question`, under their headings; a page under 8,000 characters comes back whole
 

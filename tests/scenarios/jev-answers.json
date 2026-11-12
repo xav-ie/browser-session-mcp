@@ -1,6 +1,166 @@
 {
- "inputs": "41287543b029d09443cb043592be3157d2bedb345ab53590be65b421f4184678",
+ "inputs": "058081431d5d4327c084202420190e785ff1bc73bcd8eead5e5940862bd5360e",
  "answers": {
+  "0f77dc3e90d45914d71e": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "bot_check": {
+     "type": "noul",
+     "noul": 0.03
+    },
+    "element": {
+     "type": "choice",
+     "choice": "e5",
+     "confidence": 0.98,
+     "probabilities": {
+      "back": 0,
+      "e1": 0,
+      "e10": 0,
+      "e2": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0.98,
+      "e6": 0,
+      "e7": 0.01,
+      "e8": 0,
+      "e9": 0,
+      "press_key": 0,
+      "scroll_down": 0.01,
+      "scroll_up": 0,
+      "wait": 0
+     }
+    },
+    "error": {
+     "type": "noul",
+     "noul": 0.01
+    },
+    "goal_met": {
+     "type": "noul",
+     "noul": 0.06
+    },
+    "irreversible": {
+     "type": "noul",
+     "noul": 0.12
+    },
+    "key": {
+     "type": "choice",
+     "choice": "Enter",
+     "confidence": 0.87,
+     "probabilities": {
+      "ArrowDown": 0,
+      "ArrowLeft": 0,
+      "ArrowRight": 0,
+      "ArrowUp": 0,
+      "Backspace": 0,
+      "Delete": 0,
+      "End": 0,
+      "Enter": 0.88,
+      "Escape": 0,
+      "Home": 0,
+      "PageDown": 0,
+      "PageUp": 0,
+      "Shift+Tab": 0.01,
+      "Space": 0,
+      "Tab": 0.11
+     }
+    },
+    "login": {
+     "type": "noul",
+     "noul": 0.02
+    },
+    "operation": {
+     "type": "choice",
+     "choice": "click",
+     "confidence": 0.99,
+     "probabilities": {
+      "click": 0.99,
+      "drag": 0,
+      "hover": 0.01,
+      "right_click": 0
+     }
+    },
+    "stuck": {
+     "type": "noul",
+     "noul": 0.04
+    },
+    "value_e1": {
+     "type": "choice",
+     "choice": "__none__",
+     "confidence": 0.96,
+     "probabilities": {
+      "__none__": 0.98,
+      "code": 0.02
+     }
+    },
+    "value_e2": {
+     "type": "choice",
+     "choice": "__none__",
+     "confidence": 0.96,
+     "probabilities": {
+      "__none__": 0.98,
+      "code": 0.02
+     }
+    },
+    "value_e3": {
+     "type": "choice",
+     "choice": "__none__",
+     "confidence": 0.98,
+     "probabilities": {
+      "__none__": 0.99,
+      "code": 0.01
+     }
+    },
+    "value_e4": {
+     "type": "choice",
+     "choice": "__none__",
+     "confidence": 0.92,
+     "probabilities": {
+      "__none__": 0.96,
+      "code": 0.04
+     }
+    },
+    "value_e5": {
+     "type": "choice",
+     "choice": "code",
+     "confidence": 0.18,
+     "probabilities": {
+      "__none__": 0.41,
+      "code": 0.59
+     }
+    },
+    "value_e6": {
+     "type": "choice",
+     "choice": "__none__",
+     "confidence": 0.96,
+     "probabilities": {
+      "__none__": 0.98,
+      "code": 0.02
+     }
+    },
+    "value_e8": {
+     "type": "choice",
+     "choice": "__none__",
+     "confidence": 0.94,
+     "probabilities": {
+      "__none__": 0.97,
+      "code": 0.03
+     }
+    },
+    "value_key": {
+     "type": "choice",
+     "choice": "code",
+     "confidence": 0.32,
+     "probabilities": {
+      "__none__": 0.34,
+      "code": 0.66
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 2126,
+    "output_tokens": 694
+   }
+  },
   "211992ea9758043e7127": {
    "model": "jev-1.14.0",
    "answers": {
@@ -37,6 +197,31 @@
    "usage": {
     "input_tokens": 1809,
     "output_tokens": 208
+   }
+  },
+  "2bf8faef131351c335c5": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e1",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 1,
+      "e2": 0,
+      "e3": 0,
+      "e4": 0,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 567,
+    "output_tokens": 92
    }
   },
   "3371715e2d23480702f4": {
@@ -121,7 +306,7 @@
     "element": {
      "type": "choice",
      "choice": "e8",
-     "confidence": 0.86,
+     "confidence": 0.87,
      "probabilities": {
       "__none__": 0.06,
       "e1": 0,
@@ -143,8 +328,8 @@
       "e5": 0,
       "e6": 0,
       "e7": 0,
-      "e8": 0.87,
-      "e9": 0.06
+      "e8": 0.88,
+      "e9": 0.05
      }
     }
    },
@@ -358,14 +543,14 @@
     "element": {
      "type": "choice",
      "choice": "e12",
-     "confidence": 0.92,
+     "confidence": 0.91,
      "probabilities": {
       "__none__": 0.04,
       "e1": 0,
       "e10": 0,
       "e11": 0,
-      "e12": 0.92,
-      "e13": 0.03,
+      "e12": 0.91,
+      "e13": 0.04,
       "e14": 0.01,
       "e15": 0,
       "e16": 0,
@@ -426,6 +611,31 @@
    "usage": {
     "input_tokens": 1805,
     "output_tokens": 208
+   }
+  },
+  "bfff7e6964f8fecabfbe": {
+   "model": "jev-1.14.0",
+   "answers": {
+    "element": {
+     "type": "choice",
+     "choice": "e4",
+     "confidence": 1,
+     "probabilities": {
+      "__none__": 0,
+      "e1": 0,
+      "e2": 0,
+      "e3": 0,
+      "e4": 1,
+      "e5": 0,
+      "e6": 0,
+      "e7": 0,
+      "e8": 0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 567,
+    "output_tokens": 92
    }
   },
   "ce92f7dfed9a2d64e014": {

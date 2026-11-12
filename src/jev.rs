@@ -57,6 +57,7 @@ const GROUPS_PER_REQUEST: usize = 4;
 /// below so the Rust and JS caps can't drift apart; the token is injected
 /// per call (see [`extract_fn`]).
 const EXTRACT_FN_TEMPLATE: &str = r#"function() {
+  __ICON_HINT__
   var MAX = __MAX_ELEMENTS__;
   var STAMP = '__STAMP__';
   var SKIP_TYPED = __SKIP_TYPED__;
@@ -196,6 +197,12 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
         (el.labels && el.labels[0] ? el.labels[0].innerText : '') ||
         shown().trim() || (toggle ? adjacent() : el.value || el.getAttribute('value')) || '';
       if (label) p.push('"' + clamp(label, 80) + '"');
+      // An icon with no name, or only an icon font's glyph for one: what
+      // its markup says it shows.
+      if (!/[\p{L}\p{N}]/u.test(label)) {
+        var icon = __bsIcon(el);
+        if (icon) p.push('(icon "' + clamp(icon, 40) + '")');
+      }
     }
     // A field whose own label is missing or only a placeholder: the
     // question it answers usually sits beside it in a wrapper that holds no
@@ -441,8 +448,11 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
 }"#;
 
 /// The extraction script, with [`MAX_ELEMENTS`] baked in.
-static EXTRACT_FN: Lazy<String> =
-    Lazy::new(|| EXTRACT_FN_TEMPLATE.replace("__MAX_ELEMENTS__", &MAX_ELEMENTS.to_string()));
+static EXTRACT_FN: Lazy<String> = Lazy::new(|| {
+    EXTRACT_FN_TEMPLATE
+        .replace("__MAX_ELEMENTS__", &MAX_ELEMENTS.to_string())
+        .replace("__ICON_HINT__", icon_hint_js!())
+});
 
 /// The extraction script for one call, stamping with `stamp` (hex only, so
 /// it is safe inside the JS string literal).
