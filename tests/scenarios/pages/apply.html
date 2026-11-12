@@ -96,13 +96,21 @@ for (const box of document.querySelectorAll(".select")) {
   const all = LISTS[box.dataset.options];
   const limit = +box.dataset.limit || Infinity;
   const isAsync = !!box.dataset.async;
-  box.innerHTML = `<div class="select__control"><div class="select__value placeholder">Select...</div>` +
-    `<input class="select__input" id="${name}" role="combobox" aria-expanded="false" aria-autocomplete="list" ` +
-    `aria-haspopup="listbox" aria-labelledby="${name}-label" autocomplete="off">` +
-    `<span class="select__arrow">&#9662;</span></div>`;
-  const control = box.querySelector(".select__control");
-  const input = box.querySelector("input");
-  const shown = box.querySelector(".select__value");
+  const control = document.createElement("div");
+  control.className = "select__control";
+  const shown = document.createElement("div");
+  shown.className = "select__value placeholder";
+  shown.textContent = "Select...";
+  const input = document.createElement("input");
+  input.className = "select__input";
+  input.id = name;
+  for (const [k, v] of Object.entries({ role: "combobox", "aria-expanded": "false", "aria-autocomplete": "list",
+    "aria-haspopup": "listbox", "aria-labelledby": `${name}-label`, autocomplete: "off" })) input.setAttribute(k, v);
+  const arrow = document.createElement("span");
+  arrow.className = "select__arrow";
+  arrow.textContent = "\u25BE";
+  control.append(shown, input, arrow);
+  box.replaceChildren(control);
   let menu = null, seq = 0;
 
   const close = () => {
@@ -126,9 +134,12 @@ for (const box of document.querySelectorAll(".select")) {
     }
     const r = control.getBoundingClientRect();
     Object.assign(menu.style, { left: `${r.left + scrollX}px`, top: `${r.bottom + scrollY + 2}px`, width: `${r.width}px` });
-    menu.innerHTML = "";
+    menu.replaceChildren();
     if (!items.length) {
-      menu.innerHTML = `<div class="select__empty">${note || "No options"}</div>`;
+      const empty = document.createElement("div");
+      empty.className = "select__empty";
+      empty.textContent = note || "No options";
+      menu.append(empty);
       return;
     }
     items.forEach((label, i) => {
