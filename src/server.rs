@@ -3926,12 +3926,14 @@ const UPLOAD_JS: &str = r#"function() { @@DEEP@@ @@DESC@@
   var isFile = function(n) { return n && n.tagName === 'INPUT' && n.type === 'file'; };
   var input = isFile(el) ? el : null;
   if (!input && el.tagName === 'LABEL' && isFile(el.control)) input = el.control;
-  if (!input && el.querySelector) input = el.querySelector('input[type=file]');
+  // Pickers often pair a file input with a folder one; files go to the first.
+  var FILES = 'input[type=file]:not([webkitdirectory])';
+  if (!input && el.querySelector) input = el.querySelector(FILES) || el.querySelector('input[type=file]');
   // A button or label stands for the file input beside it; a box with no
   // input inside is a drop zone, not a way to reach one further up.
   var control = /^(BUTTON|A|LABEL)$/.test(el.tagName) || el.getAttribute('role') === 'button';
   for (var n = el.parentElement, up = 0; control && !input && n && up < 2; n = n.parentElement, up++) {
-    var inside = n.querySelectorAll('input[type=file]');
+    var inside = n.querySelectorAll(FILES);
     if (inside.length === 1) input = inside[0];
   }
   if (input) {

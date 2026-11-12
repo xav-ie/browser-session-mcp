@@ -553,6 +553,21 @@ const SCENARIOS = [
     },
   },
   {
+    id: "drop-zones",
+    needs: "TYPESAFE_API_KEY",
+    about: "Plain language finds a drop zone with a file and a folder input, and one with no input at all",
+    async run({ call, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/questions.html` });
+      const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
+      const b64 = Buffer.from("sample").toString("base64");
+      const pf = await call("upload_file", { sessionId, selector: "Drop files here for the portfolio", content: b64, name: "work.pdf" });
+      expect(pf.into.startsWith("input#pf-files") && (await values()).portfolio === "work.pdf" && !(await values()).folder, `portfolio: ${JSON.stringify(pf)}`);
+      const sample = await call("upload_file", { sessionId, selector: "the writing sample drop zone", content: b64, name: "essay.txt" });
+      expect(sample.how === "drop" && (await values()).sample === "essay.txt", `writing sample: ${JSON.stringify(sample)}`);
+    },
+  },
+  {
     id: "takeover-wait",
     needs: "TAKEOVER_BASE_URL",
     about: "await_human_takeover returns at its timeout, not finished and not expired",

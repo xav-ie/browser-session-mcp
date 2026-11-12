@@ -164,6 +164,10 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     // description ("Resume" for a "Choose file" button).
     var described = labelledBy('aria-describedby');
     if (described) p.push('described as "' + clamp(described, 80) + '"');
+    if (dropZone.has(el) && !fileFor.has(el)) {
+      var dq = near(el);
+      return p.join(' ') + ' (drop zone' + (dq ? ' under "' + clamp(dq, 100) + '"' : '') + ')';
+    }
     if (fileFor.has(el)) {
       var fq = near(el);
       return p.join(' ') + ' (file upload' + (fq ? ' under "' + clamp(fq, 100) + '"' : '') + ')';
@@ -221,7 +225,7 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
   var vw = document.documentElement.clientWidth || 0;
   var vh = document.documentElement.clientHeight || 0;
   var inDialog = [], inView = [], offView = [], seen = new Set();
-  var fileFor = new WeakMap();
+  var fileFor = new WeakMap(), dropZone = new WeakSet();
   var consider = function(el, ox, oy) {
     if (seen.has(el) || el.disabled) return;
     seen.add(el);
@@ -246,16 +250,48 @@ const EXTRACT_FN_TEMPLATE: &str = r#"function() {
     for (var i = 0; i < nodes.length; i++) consider(nodes[i], R.ox, R.oy);
     // A file input is usually hidden behind a drop zone or button; the box
     // a person sees around it stands in for it.
-    var files = R.root.querySelectorAll('input[type=file]');
+    // A folder input beside a file one is the same picker: only the file one counts.
+    var files = R.root.querySelectorAll('input[type=file]:not([webkitdirectory])');
     for (var fi = 0; fi < files.length; fi++) {
       var f = files[fi];
       if (f.disabled || (f.getClientRects().length && styleOf(f).visibility !== 'hidden')) continue;
       var box = f.parentElement;
       for (var fu = 0; box && fu < 4 && !box.getClientRects().length; fu++) box = box.parentElement;
-      if (!box || box.querySelectorAll('input[type=file]').length > 1) continue;
+      // An input parked in the body (as some libraries do) has no box of its own.
+      if (!box || /^(BODY|HTML)$/.test(box.tagName) || box.querySelectorAll('input[type=file]:not([webkitdirectory])').length > 1) continue;
       fileFor.set(box, f);
       seen.delete(box);
       consider(box, R.ox, R.oy);
+    }
+    // Drop zones a script listens on, with no file input to find them by:
+    // the innermost box that says so in its class, id or own text.
+    // Words telling a person to drop something, not prose about dragging.
+    var DROP_TEXT = /drag (and|&|'?n'?) drop( (your |a |the )?([\w-]+ ){0,2})?(here|files?)\b|\bdrop (your |the |a |an )?([\w-]+ ){0,2}here\b|\bdrop files?\b/i;
+    var DROP_NAME = /drop[-_ ]?(zone|area|target)|file[-_ ]?drop|\bdropzone\b/i;
+    var boxes = R.root.querySelectorAll('div, section, form, label, span, p');
+    var drops = 0;
+    for (var di = 0; di < boxes.length && di < 5000 && drops < 10; di++) {
+      var d = boxes[di];
+      var named = DROP_NAME.test(String(d.id || '') + ' ' + String(typeof d.className === 'string' ? d.className : ''));
+      var says = !named && DROP_TEXT.test(String(d.innerText || '').slice(0, 300)) && String(d.innerText || '').length < 300;
+      if (!named && !says) continue;
+      // Only the innermost: a box whose child says the same is skipped.
+      var inner = false;
+      for (var dc = 0; dc < d.children.length && !inner; dc++) {
+        var c = d.children[dc];
+        inner = DROP_NAME.test(String(c.id || '') + ' ' + String(typeof c.className === 'string' ? c.className : '')) ||
+          (says && DROP_TEXT.test(String(c.innerText || '').slice(0, 300)));
+      }
+      // A box with a file input in or near it is offered through that input.
+      var around = d;
+      if (around.parentElement) around = around.parentElement;
+      if (inner || seen.has(d) || around.querySelector('input[type=file]')) continue;
+      // A box a file could be dropped on, not a menu entry named after one.
+      var db = d.getBoundingClientRect();
+      if (db.width < 60 || db.height < 32 || d.closest('nav, header, footer, [role=navigation], [role=menu]')) continue;
+      drops++;
+      dropZone.add(d);
+      consider(d, R.ox, R.oy);
     }
     // Table headers (often sortable) and sizeable images (hover targets).
     var extra = R.root.querySelectorAll('thead th, img');
