@@ -59,6 +59,17 @@ pub fn state_dir() -> &'static Path {
         .expect("init_state_dir must run before state_dir")
 }
 
+/// The folder agents save files into for `upload_file`'s `path`
+/// (`STATE_DIR/uploads`), when it exists. The NixOS module creates it
+/// writable by every local user and clears files older than a day, so a
+/// file reaches the page without its bytes passing through the model.
+pub fn uploads_dir() -> Option<PathBuf> {
+    STATE_DIR
+        .get()
+        .map(|d| d.join("uploads"))
+        .filter(|p| p.is_dir())
+}
+
 /// Install the tracing subscriber for a subcommand. Always logs to stderr:
 /// the `mcp` subcommand speaks the MCP protocol over stdout, and stderr is
 /// captured by journald for the daemons all the same.

@@ -1,5 +1,5 @@
 {
- "inputs": "54d3d441eaeaf9303ae91bdf45587b89de5b024b342aeb8349f4c7c219e12027",
+ "inputs": "41287543b029d09443cb043592be3157d2bedb345ab53590be65b421f4184678",
  "answers": {
   "211992ea9758043e7127": {
    "model": "jev-1.14.0",
@@ -121,9 +121,9 @@
     "element": {
      "type": "choice",
      "choice": "e8",
-     "confidence": 0.87,
+     "confidence": 0.86,
      "probabilities": {
-      "__none__": 0.04,
+      "__none__": 0.06,
       "e1": 0,
       "e10": 0,
       "e11": 0,
@@ -143,8 +143,8 @@
       "e5": 0,
       "e6": 0,
       "e7": 0,
-      "e8": 0.88,
-      "e9": 0.07
+      "e8": 0.87,
+      "e9": 0.06
      }
     }
    },
@@ -358,13 +358,13 @@
     "element": {
      "type": "choice",
      "choice": "e12",
-     "confidence": 0.91,
+     "confidence": 0.92,
      "probabilities": {
-      "__none__": 0.05,
+      "__none__": 0.04,
       "e1": 0,
       "e10": 0,
       "e11": 0,
-      "e12": 0.91,
+      "e12": 0.92,
       "e13": 0.03,
       "e14": 0.01,
       "e15": 0,
