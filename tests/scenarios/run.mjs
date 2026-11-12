@@ -101,6 +101,11 @@ const expect = (cond, what) => {
 const text = (r) => r.content?.[0]?.text ?? "";
 const js = async (call, sessionId, expression) => (await call("evaluate", { sessionId, expression })).result;
 
+// questions.html is long, and Jev is offered what's on screen first; how much
+// fits depends on the machine's fonts, so its scenarios see the whole page
+// and ask the same question everywhere.
+const WHOLE_PAGE = { width: 1280, height: 4000 };
+
 const SCENARIOS = [
   {
     id: "popup-covers-click",
@@ -581,7 +586,7 @@ const SCENARIOS = [
     id: "late-file-name",
     about: "upload_file sees a file name the page shows only once its upload finishes, in capitals",
     async run({ call, session }) {
-      const sessionId = await session();
+      const sessionId = await session({ viewport: WHOLE_PAGE });
       await call("navigate", { sessionId, url: `${SITE}/questions.html` });
       const r = await call("upload_file", { sessionId, selector: "#cv-drop", content: Buffer.from("%PDF-1.4\n").toString("base64"), name: "My CV.pdf" });
       expect(r.into.startsWith("input#cv-input") && r.pageShowsName, `it saw the name: ${JSON.stringify(r)}`);
@@ -592,7 +597,7 @@ const SCENARIOS = [
     needs: "TYPESAFE_API_KEY",
     about: "Plain language finds fields by the question beside them when the page links no label to them",
     async run({ call, session }) {
-      const sessionId = await session();
+      const sessionId = await session({ viewport: WHOLE_PAGE });
       await call("navigate", { sessionId, url: `${SITE}/questions.html` });
       const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
       const school = await call("select_option", { sessionId, selector: "Which school did you last attend?", option: "Boston University" });
@@ -620,14 +625,111 @@ const SCENARIOS = [
     needs: "TYPESAFE_API_KEY",
     about: "Plain language finds a drop zone with a file and a folder input, and one with no input at all",
     async run({ call, session }) {
-      const sessionId = await session();
+      const sessionId = await session({ viewport: WHOLE_PAGE });
       await call("navigate", { sessionId, url: `${SITE}/questions.html` });
       const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
       const b64 = Buffer.from("sample").toString("base64");
       const pf = await call("upload_file", { sessionId, selector: "Drop files here for the portfolio", content: b64, name: "work.pdf" });
       expect(pf.into.startsWith("input#pf-files") && (await values()).portfolio === "work.pdf" && !(await values()).folder, `portfolio: ${JSON.stringify(pf)}`);
+      // Widgets over a see-through input, told apart only by their headings.
+      const refs = await call("upload_file", { sessionId, selector: "References", content: b64, name: "refs.pdf" });
+      expect(refs.into.startsWith("input#refs-input") && (await values())["refs-input"] === "refs.pdf", `references: ${JSON.stringify(refs)}`);
       const sample = await call("upload_file", { sessionId, selector: "the writing sample drop zone", content: b64, name: "essay.txt" });
       expect(sample.how === "drop" && (await values()).sample === "essay.txt", `writing sample: ${JSON.stringify(sample)}`);
+    },
+  },
+  {
+    id: "radio-groups",
+    about: "select_option lists and picks in radio groups: by a radio, a fieldset, and through a label when the radio is hidden",
+    async run({ call, raw, session }) {
+      const sessionId = await session({ viewport: WHOLE_PAGE });
+      await call("navigate", { sessionId, url: `${SITE}/questions.html` });
+      const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
+      const listed = await call("select_option", { sessionId, selector: "#contact-group" });
+      expect(JSON.stringify(listed.options) === JSON.stringify(["Email", "Phone", "Text message"]) && !listed.chosen, `fieldset options: ${JSON.stringify(listed)}`);
+      const phone = await call("select_option", { sessionId, selector: "#contact-group", option: "phone" });
+      expect(phone.chosen === "Phone" && phone.confirmed, `fieldset pick: ${JSON.stringify(phone)}`);
+      const no = await call("select_option", { sessionId, selector: "#auth-yes", option: "No" });
+      expect(no.chosen === "No" && no.confirmed, `a radio stands for its group: ${JSON.stringify(no)}`);
+      const night = await call("select_option", { sessionId, selector: "#shift-day", option: "Night" });
+      expect(night.chosen === "Night" && night.confirmed, `hidden radio, clicked through its label: ${JSON.stringify(night)}`);
+      const v = await values();
+      expect(v["q-contact"] === "phone" && v["q-auth"] === "no" && v["q-shift"] === "night", `the page got them: ${JSON.stringify(v)}`);
+      const miss = await raw("select_option", { sessionId, selector: "#contact-group", option: "Fax" });
+      expect(miss.isError && text(miss).includes("Text message"), `a missing option lists the rest: ${text(miss).slice(0, 200)}`);
+    },
+  },
+  {
+    id: "disabled-targets",
+    about: "A click on what the page has disabled or greyed out says so instead of reporting a click that did nothing",
+    async run({ call, raw, session }) {
+      const sessionId = await session();
+      await call("navigate", { sessionId, url: `${SITE}/knockout.html` });
+      const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
+      await call("click", { sessionId, selector: "#styled-box" });
+      expect((await values()).alerts === true, "an input that ignores clicks still works through its clickable box");
+      const off = await raw("click", { sessionId, selector: "#send" });
+      expect(off.isError && text(off).includes("disabled"), `a disabled button: ${text(off).slice(0, 200)}`);
+      await call("select_option", { sessionId, selector: "#licence-group", option: "Yes" });
+      await call("select_option", { sessionId, selector: "#city-group", option: "No" });
+      const locked = await raw("select_option", { sessionId, selector: "#licence-group", option: "No" });
+      expect(locked.isError && text(locked).includes("the page has it disabled"), `a greyed out question: ${text(locked).slice(0, 200)}`);
+      const v = await values();
+      expect(v["q-city"] === "no" && v["q-licence"] === "yes", `answers: ${JSON.stringify(v)}`);
+    },
+  },
+  {
+    id: "radio-questions",
+    needs: "TYPESAFE_API_KEY",
+    about: "Plain language finds radio questions that only their question text tells apart",
+    async run({ call, session }) {
+      const sessionId = await session({ viewport: WHOLE_PAGE });
+      await call("navigate", { sessionId, url: `${SITE}/questions.html` });
+      const values = () => js(call, sessionId, "JSON.stringify(window.formValues)").then(JSON.parse);
+      await call("select_option", { sessionId, selector: "Are you authorized to work in the country where this job is located?", option: "No" });
+      await call("click", { sessionId, selector: "Yes under: Do you have experience with Rust?" });
+      await call("select_option", { sessionId, selector: "How should we contact you?", option: "Text message" });
+      const v = await values();
+      expect(v["q-auth"] === "no" && v["q-rust"] === "yes" && v["q-contact"] === "text", `answers: ${JSON.stringify(v)}`);
+    },
+  },
+  {
+    id: "takeover-session-closed",
+    about: "A takeover link whose session closed ends instead of reconnecting the page to a tab that's gone",
+    async run() {
+      const port = await new Promise((r) => { const p = http.createServer(); p.listen(0, "127.0.0.1", () => { const n = p.address().port; p.close(() => r(n)); }); });
+      const base = `http://127.0.0.1:${port}`;
+      const daemon = spawn(mcpBin, ["takeover"], {
+        env: { ...process.env, STATE_DIR: stateDir, TAKEOVER_BIND: `127.0.0.1:${port}` },
+        stdio: "ignore",
+      });
+      const saved = process.env.TAKEOVER_BASE_URL;
+      process.env.TAKEOVER_BASE_URL = base;
+      const client = await connect();
+      if (saved === undefined) delete process.env.TAKEOVER_BASE_URL;
+      else process.env.TAKEOVER_BASE_URL = saved;
+      try {
+        for (let i = 0; i < 50 && !(await fetch(`${base}/healthz`).then((r) => r.ok, () => false)); i++) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        const { sessionId } = await client.call("open_browser_session", {});
+        const { token } = await client.call("request_human_takeover", { sessionId, ttlMinutes: 1 });
+        const claim = (cookie) => fetch(`${base}/takeover/${token}/claim`, { method: "POST", headers: cookie ? { cookie } : {} });
+        const first = await claim();
+        expect(first.status === 200, `the open session's link claims: ${first.status}`);
+        const cookie = (first.headers.get("set-cookie") || "").split(";")[0];
+        // Handed back, the page stays open to watch; then the agent closes the session.
+        const back = await fetch(`${base}/takeover/${token}/release`, { method: "POST", headers: { cookie } });
+        expect(back.ok, `handed back: ${back.status}`);
+        await client.call("await_human_takeover", { token, timeout: 3000 });
+        await client.call("close_browser_session", { sessionId });
+        const again = await claim(cookie);
+        const why = await again.text();
+        expect(again.status === 410 && why.includes("closed"), `the closed session's link has ended: ${again.status} ${why}`);
+      } finally {
+        client.close();
+        daemon.kill();
+      }
     },
   },
   {

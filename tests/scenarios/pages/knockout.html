@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Knockout question</title>
+  <style>
+    .locked { opacity: 0.5; pointer-events: none; cursor: not-allowed; }
+    .choice input { pointer-events: none; }
+  </style>
+</head>
+<body>
+  <form id="apply">
+    <fieldset id="city-group">
+      <legend>Are you based in Lisbon?</legend>
+      <input type="radio" name="q-city" id="city-yes" value="yes"><label for="city-yes">Yes</label>
+      <input type="radio" name="q-city" id="city-no" value="no"><label for="city-no">No</label>
+    </fieldset>
+    <div id="rest">
+      <fieldset id="licence-group">
+        <legend>Do you hold a driving licence?</legend>
+        <input type="radio" name="q-licence" id="licence-yes" value="yes"><label for="licence-yes">Yes</label>
+        <input type="radio" name="q-licence" id="licence-no" value="no"><label for="licence-no">No</label>
+      </fieldset>
+      <div class="choice" id="styled" role="checkbox" aria-checked="false"><input type="checkbox" id="styled-box"> Send me job alerts</div>
+      <button type="button" id="send" disabled>Send application</button>
+    </div>
+    <p id="note" hidden>You have to meet these requirements to be able to apply</p>
+  </form>
+  <script>
+    window.formValues = {};
+    document.getElementById('apply').addEventListener('change', function (e) { window.formValues[e.target.name] = e.target.value; });
+    document.getElementById('styled').addEventListener('click', function () {
+      var on = this.getAttribute('aria-checked') !== 'true';
+      this.setAttribute('aria-checked', String(on));
+      document.getElementById('styled-box').checked = on;
+      window.formValues.alerts = on;
+    });
+    document.getElementById('city-group').addEventListener('change', function (e) {
+      var out = e.target.value === 'no';
+      document.getElementById('rest').classList.toggle('locked', out);
+      document.getElementById('note').hidden = !out;
+    });
+  </script>
+</body>
+</html>

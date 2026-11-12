@@ -68,6 +68,8 @@ export async function startJevStandIn({ record, normalize = (s) => s }) {
       return reply(200, used[id]);
     }
     if (!(id in saved.answers)) {
+      // The question itself, so a run that asks something new shows what differs.
+      console.error(`no recorded Jev answer for ${id}: ${normalize(body)}`);
       return reply(400, {
         error: `no recorded Jev answer for this question (${id}); record again: see tests/scenarios/jev-answers.mjs`,
       });

@@ -13,6 +13,11 @@
   .drop { border: 2px dashed #999; padding: 1rem; text-align: center; }
   .drop input { display: none; }
   .file-name { text-transform: uppercase; }
+  .pond { position: relative; border: 1px solid #999; border-radius: 6px; padding: 1rem; text-align: center; }
+  .pond input.sliver { position: absolute; left: 0; bottom: 0; width: 100%; height: 6px; opacity: 0; }
+  .pills input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .pills label { display: inline-block; border: 1px solid #999; border-radius: 12px; padding: 3px 12px; }
+  .pills input:checked + label { background: #36c; color: #fff; }
   /* Kept on the page, one pixel big, so the browser still opens it. */
   .drop input.tiny { display: block; position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
 </style>
@@ -68,6 +73,35 @@
     <span class="question-text">Writing sample</span>
     <div class="drop" id="sample-drop">Drop your writing sample here</div>
   </li>
+  <li class="question radios">
+    <div class="question-text">Are you authorized to work in the country where this job is located?</div>
+    <div><input type="radio" name="q-auth" id="auth-yes" value="yes"><label for="auth-yes">Yes</label>
+      <input type="radio" name="q-auth" id="auth-no" value="no"><label for="auth-no">No</label></div>
+  </li>
+  <li class="question radios">
+    <div class="question-text">Do you have experience with Rust?</div>
+    <div><input type="radio" name="q-rust" id="rust-yes" value="yes"><label for="rust-yes">Yes</label>
+      <input type="radio" name="q-rust" id="rust-no" value="no"><label for="rust-no">No</label></div>
+  </li>
+  <li class="question">
+    <fieldset id="contact-group"><legend>How should we contact you?</legend>
+      <label><input type="radio" name="q-contact" value="email"> Email</label>
+      <label><input type="radio" name="q-contact" value="phone"> Phone</label>
+      <label><input type="radio" name="q-contact" value="text"> Text message</label>
+    </fieldset>
+  </li>
+  <li class="question">
+    <div class="question-text">Preferred shift</div>
+    <!-- Styled buttons: the radios themselves are hidden behind their labels. -->
+    <div class="pills"><input type="radio" name="q-shift" id="shift-day" value="day"><label for="shift-day">Day</label>
+      <input type="radio" name="q-shift" id="shift-night" value="night"><label for="shift-night">Night</label></div>
+  </li>
+  <!-- Upload widgets drawn over a see-through, sliver-thin file input, as
+       FilePond draws them: only the headings tell them apart. -->
+  <li class="question"><h3>Profile picture</h3>
+    <div class="pond"><input type="file" id="photo-input" class="sliver"><span>Drag &amp; Drop your files or Browse</span></div></li>
+  <li class="question"><h3>References</h3>
+    <div class="pond"><input type="file" id="refs-input" class="sliver"><span>Drag &amp; Drop your files or Browse</span></div></li>
 </ul>
 <script>
 const values = (window.formValues = {});
@@ -108,6 +142,13 @@ document.getElementById("pf-folder").addEventListener("change", () => { values.f
 const sample = document.getElementById("sample-drop");
 sample.addEventListener("dragover", (e) => e.preventDefault());
 sample.addEventListener("drop", (e) => { e.preventDefault(); values.sample = e.dataTransfer.files[0]?.name; });
+
+for (const id of ["photo-input", "refs-input"]) {
+  document.getElementById(id).addEventListener("change", (e) => { values[id] = e.target.files[0]?.name; });
+}
+for (const name of ["q-auth", "q-rust", "q-contact", "q-shift"]) {
+  document.querySelectorAll(`input[name=${name}]`).forEach((r) => r.addEventListener("change", () => { values[name] = r.value; }));
+}
 
 // The file name shows up once the upload finishes, in capitals.
 document.getElementById("cv-input").addEventListener("change", (e) => {
