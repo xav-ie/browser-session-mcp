@@ -656,9 +656,14 @@ const recording = !!(process.env.TYPESAFE_API_KEY && process.env.JEV_RECORD);
 const jev = recording || !process.env.TYPESAFE_API_KEY
   ? await startJevStandIn({
       record: recording,
-      // The test server's address and port, with or without the scheme.
-      normalize: (s) => [[SITE, "SITE"], [LAN_SITE, "LAN_SITE"]].reduce(
-        (t, [from, to]) => (from ? t.split(from).join(to).split(new URL(from).host).join(`${to}_HOST`) : t), s),
+      // The test server's address and port in every form a question can
+      // carry them: the URL, URL-encoded, and the host with or without port.
+      normalize: (s) => [[SITE, "SITE"], [LAN_SITE, "LAN_SITE"]].reduce((t, [from, to]) => {
+        if (!from) return t;
+        const u = new URL(from);
+        return [[from, to], [encodeURIComponent(from), to], [u.host, `${to}_HOST`], [u.hostname, `${to}_NAME`]]
+          .reduce((acc, [a, b]) => acc.split(a).join(b), t);
+      }, s),
     })
   : null;
 if (jev) {
