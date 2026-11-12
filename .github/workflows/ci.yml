@@ -46,6 +46,22 @@ jobs:
               - '.github/actions/**'
               - '.github/workflows/ci.yml'
 
+  # The Jev scenarios replay answers recorded with a key; when what shapes
+  # their questions changed, fail here, before any build, so they get
+  # recorded again (see tests/scenarios/jev-answers.mjs).
+  jev-answers:
+    needs: changes
+    if: needs.changes.outputs.nix == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: node tests/scenarios/jev-answers.mjs --check
+
   # Frontend quality gates, one job per check so failures stay isolated.
   frontend:
     needs: changes
@@ -82,7 +98,7 @@ jobs:
   # instead of failing here for lack of /dev/kvm.
   build-linux:
     name: build (x86-64 linux)
-    needs: changes
+    needs: [changes, jev-answers]
     if: needs.changes.outputs.nix == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ github.head_ref == 'release' && 60 || 30 }}
@@ -166,7 +182,7 @@ jobs:
   # /nix/store. macos-latest is arm64, matching aarch64-darwin.
   build-darwin:
     name: build (aarch64-darwin)
-    needs: changes
+    needs: [changes, jev-answers]
     if: needs.changes.outputs.nix == 'true'
     runs-on: macos-latest
     timeout-minutes: 45
@@ -195,7 +211,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: always()
-    needs: [changes, frontend, build-linux, nixos-test, build-darwin]
+    needs: [changes, jev-answers, frontend, build-linux, nixos-test, build-darwin]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
