@@ -33,7 +33,7 @@ use once_cell::sync::Lazy;
 use serde_json::{Map, Value, json};
 use std::time::{Duration, Instant};
 
-use crate::server::iso_eval_function;
+use crate::server::{iso_eval_function, iso_eval_top};
 
 /// Jev's limit on the options of one Choice question.
 const CHOICE_LIMIT: usize = 255;
@@ -368,12 +368,15 @@ fn new_stamp() -> Result<String> {
 /// → `{ el, ox, oy }` or `null`; prepend it to a function body. Runs in the
 /// isolated world, which holds the references.
 pub const DEEP_FIND_JS: &str = r#"var __bsDeep = function(sel) {
+  // In a frame scripts from the page around it can't reach, where this
+  // world's viewport sits in the top one (see frames.rs).
+  var base = globalThis.__bsBase || { x: 0, y: 0 };
   var ref = /^jev-ref:([0-9a-f]+):(\d+)$/.exec(sel);
   if (ref) {
     var picks = globalThis.__bsPicks && globalThis.__bsPicks[ref[1]];
     var el = picks && picks[+ref[2]];
     if (!el || !el.isConnected) return null;
-    var ox = 0, oy = 0, w = el.ownerDocument.defaultView;
+    var ox = base.x, oy = base.y, w = el.ownerDocument.defaultView;
     while (w && w.frameElement) {
       var fe = w.frameElement, fr = fe.getBoundingClientRect();
       ox += fr.left + fe.clientLeft; oy += fr.top + fe.clientTop;
@@ -400,7 +403,7 @@ pub const DEEP_FIND_JS: &str = r#"var __bsDeep = function(sel) {
       }
     }
   };
-  walk(document, 0, 0, 0);
+  walk(document, base.x, base.y, 0);
   return hit;
 };"#;
 
@@ -525,6 +528,10 @@ pub struct Element {
     pub desc: String,
     /// For `<select>` elements: the options (labels capped), in order.
     pub options: Vec<SelectOption>,
+    /// Its reference when it isn't the default one [`PageInfo::css`] makes
+    /// from the id: an element of a frame scripts can't reach, kept in that
+    /// frame's world under a stamp of its own.
+    pub css: Option<String>,
 }
 
 /// A page extraction: what a Jev decision was offered.
@@ -561,6 +568,14 @@ impl PageInfo {
     /// world rather than marked in the page. Finds nothing once the element
     /// left the page or eight newer extractions have run.
     pub fn css(&self, id: &str) -> String {
+        if let Some(css) = self
+            .elements
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.css.clone())
+        {
+            return css;
+        }
         let n = id
             .strip_prefix('e')
             .and_then(|n| n.parse::<usize>().ok())
@@ -736,9 +751,12 @@ async fn extract_with_retry(page: &Page, skip_typed: bool) -> Result<PageInfo> {
     let stamp = new_stamp()?;
     let script = extract_fn(&stamp, skip_typed);
     for attempt in 1..=ATTEMPTS {
-        match iso_eval_function(page, &script).await {
+        match iso_eval_top(page, &script).await {
             Ok(raw) => match parse_extraction(&raw, &stamp) {
-                Ok(info) => return Ok(info),
+                Ok(mut info) => {
+                    add_frames(page, &mut info, skip_typed).await;
+                    return Ok(info);
+                }
                 Err(e) => last = Some(e),
             },
             Err(e) => last = Some(anyhow!("{e:#}")),
@@ -748,6 +766,38 @@ async fn extract_with_retry(page: &Page, skip_typed: bool) -> Result<PageInfo> {
         }
     }
     Err(last.expect("at least one attempt ran")).context("extracting interactive elements")
+}
+
+/// Add the elements of frames page scripts can't reach (an application
+/// form embedded from another site) to `info`, after the page's own. Each
+/// frame keeps its elements under a stamp of its own, so a reference finds
+/// the element in its frame and nowhere else. A frame that fails to answer
+/// is left out.
+async fn add_frames(page: &Page, info: &mut PageInfo, skip_typed: bool) {
+    for (k, frame) in crate::frames::closed(page).await.iter().enumerate() {
+        let stamp = format!("{}{:02x}", info.stamp, k + 1);
+        let Ok(raw) = crate::frames::eval(frame, &extract_fn(&stamp, skip_typed)).await else {
+            continue;
+        };
+        let Ok(inner) = parse_extraction(&raw, &stamp) else {
+            continue;
+        };
+        let host = frame.host();
+        for e in &inner.elements {
+            let css = inner.css(&e.id);
+            info.elements.push(Element {
+                id: format!("e{}", info.elements.len() + 1),
+                desc: format!("{} (in the frame from {host})", e.desc),
+                options: e.options.clone(),
+                css: Some(css),
+            });
+        }
+        info.omitted += inner.omitted;
+        if !inner.text.is_empty() && info.text.len() < 3000 {
+            info.text
+                .push_str(&format!(" [frame from {host}] {}", inner.text));
+        }
+    }
 }
 
 /// Split `n` elements into the fewest groups of at most `cap`, all as
@@ -2178,7 +2228,12 @@ fn parse_extraction(v: &Value, stamp: &str) -> Result<PageInfo> {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    Some(Element { id, desc, options })
+                    Some(Element {
+                        id,
+                        desc,
+                        options,
+                        css: None,
+                    })
                 })
                 .collect::<Vec<_>>()
         })
@@ -2218,11 +2273,13 @@ mod tests {
                     id: "e1".to_string(),
                     desc: "input type=text \"Email\"".to_string(),
                     options: vec![],
+                    css: None,
                 },
                 Element {
                     id: "e2".to_string(),
                     desc: "button \"Log in\"".to_string(),
                     options: vec![],
+                    css: None,
                 },
             ],
             omitted: 3,
@@ -2248,6 +2305,7 @@ mod tests {
                 id: "e1".to_string(),
                 desc: "input type=search \"Search\"".to_string(),
                 options: vec![],
+                css: None,
             }],
             omitted: 0,
             stamp: "ab12".to_string(),
@@ -2294,6 +2352,7 @@ mod tests {
                     id: format!("e{i}"),
                     desc: format!("button {i}"),
                     options: vec![],
+                    css: None,
                 })
                 .collect(),
             omitted: 0,

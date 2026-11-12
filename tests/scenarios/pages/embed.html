@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Careers</title>
+<style>
+  body { font: 15px system-ui, sans-serif; margin: 2rem auto; max-width: 760px; }
+  header { height: 240px; background: #eef; padding: 1rem; }
+  iframe { display: block; width: 100%; height: 2200px; border: 1px solid #ccc; padding: 6px; }
+</style>
+</head>
+<body>
+<header><h1>Careers</h1><p>Join us. Apply below.</p></header>
+<!-- An application form embedded from another site, as job boards offer:
+     its `src` comes in the query string, so the scenario can serve it from
+     another origin. -->
+<iframe id="embed" title="Application form"></iframe>
+<script>
+document.getElementById("embed").src = new URLSearchParams(location.search).get("src");
+// The form posts its values up, since this page can't read them.
+window.embedValues = {};
+addEventListener("message", (e) => { if (e.data && e.data.formValues) window.embedValues = e.data.formValues; });
+</script>
+</body>
+</html>
