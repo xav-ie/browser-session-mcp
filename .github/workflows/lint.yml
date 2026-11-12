@@ -2,6 +2,8 @@ name: Lint
 
 on:
   pull_request:
+    # edited too, so fixing a too-long title reruns the title check.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
@@ -78,8 +80,9 @@ jobs:
           persist-credentials: false
           # Full history so the base of the range resolves.
           fetch-depth: 0
-      - name: Check the new commits' messages
+      - name: Check the new commits' messages and the PR title
         env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
