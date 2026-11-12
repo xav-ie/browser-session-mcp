@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- The sign-in page scripts/screenshot.mjs shows behind the takeover bar. It is
+     local and self-contained, so the screenshot only changes when the takeover
+     page does. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in · Example</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f4f5f7; font: 15px/1.5 system-ui, sans-serif; color: #1f2328; }
+    main { width: 320px; }
+    h1 { font-size: 22px; font-weight: 500; text-align: center; margin: 0 0 20px; }
+    form { background: #fff; border: 1px solid #d1d9e0; border-radius: 8px; padding: 18px; display: grid; gap: 12px; }
+    label { display: grid; gap: 6px; font-weight: 600; font-size: 14px; }
+    input { font: inherit; padding: 6px 10px; border: 1px solid #d1d9e0; border-radius: 6px; }
+    button { font: inherit; font-weight: 600; padding: 7px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; }
+    p { text-align: center; font-size: 14px; }
+    a { color: #1f6feb; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Sign in to Example</h1>
+    <form onsubmit="return false">
+      <label>Username or email address <input name="username" autocomplete="username"></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password"></label>
+      <button>Sign in</button>
+    </form>
+    <p>New to Example? <a href="#">Create an account</a></p>
+  </main>
+</body>
+</html>

@@ -22,6 +22,7 @@ jobs:
     outputs:
       frontend: ${{ steps.filter.outputs.frontend }}
       nix: ${{ steps.filter.outputs.nix }}
+      screenshot: ${{ steps.filter.outputs.screenshot }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,9 +42,14 @@ jobs:
               - '*.nix'
               - 'flake.lock'
               - 'scripts/smoke.sh'
+              - 'scripts/screenshot*'
               - 'tests/**'
               - 'packaging/**'
               - '.github/actions/**'
+              - '.github/workflows/ci.yml'
+            screenshot:
+              - 'frontend/**'
+              - 'scripts/screenshot*'
               - '.github/workflows/ci.yml'
 
   # The Jev scenarios replay answers recorded with a key; when what shapes
@@ -176,6 +182,69 @@ jobs:
         run: xargs sudo "$(command -v nix)" copy --no-check-sigs --from "file://$RUNNER_TEMP/ci-package" <"$RUNNER_TEMP/ci-package/paths.txt"
       - run: nix build -L ".#checks.x86_64-linux.smoke"
 
+  # CI is the one renderer of the README's takeover screenshot, so the image never depends on
+  # whose Chrome took it. When the takeover UI changes, this retakes it from the package
+  # build-linux made; a picture that changed is committed to the PR branch over a write deploy
+  # key, since a push made with GITHUB_TOKEN would not start CI on the new commit. CI then runs
+  # on that commit and renders the same picture. A Dependabot PR reads its key from the
+  # Dependabot secrets, where only DEPENDABOT_PUSH_KEY is set.
+  screenshot:
+    needs: [changes, build-linux]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.screenshot == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/nix-cache
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-package
+          path: ${{ runner.temp }}/ci-package
+      # As root, since only a trusted user may import unsigned paths.
+      - name: Import the package from build-linux
+        run: |
+          xargs sudo "$(command -v nix)" copy --no-check-sigs --from "file://$RUNNER_TEMP/ci-package" <"$RUNNER_TEMP/ci-package/paths.txt"
+          ln -s "$(head -1 "$RUNNER_TEMP/ci-package/paths.txt")" result
+      # The flake's own Chromium, so a new runner image doesn't redraw the picture. Ubuntu
+      # denies Chrome's sandbox the user namespaces it needs, hence --no-sandbox.
+      - name: Retake the screenshot
+        run: |
+          chromium=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#chromium)
+          printf '#!/usr/bin/env bash\nexec %s/bin/chromium --no-sandbox "$@"\n' "$chromium" >"$RUNNER_TEMP/chrome"
+          chmod +x "$RUNNER_TEMP/chrome"
+          CHROME="$RUNNER_TEMP/chrome" node scripts/screenshot.mjs
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: takeover-screenshot
+          path: docs/images/takeover.png
+          retention-days: 7
+      - name: Commit it when it changed
+        env:
+          DEPLOY_KEY: ${{ secrets.SCREENSHOT_PUSH_KEY || secrets.DEPENDABOT_PUSH_KEY }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if git diff --quiet -- docs/images/takeover.png; then echo "The screenshot is current."; exit 0; fi
+          msg="docs: retake the takeover screenshot"
+          if [ "$(git log -1 --format=%s)" = "$msg" ]; then
+            echo "::error::the screenshot changed again right after CI retook it, so its render isn't stable; see the takeover-screenshot artifact"
+            exit 1
+          fi
+          [ -n "$DEPLOY_KEY" ] || { echo "::error::the takeover UI changed the screenshot, but this PR can't read SCREENSHOT_PUSH_KEY to commit it; commit the takeover-screenshot artifact as docs/images/takeover.png"; exit 1; }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -qm "$msg" -- docs/images/takeover.png
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" >"$key"
+          GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes" \
+            git push "git@github.com:${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$HEAD_REF"
+          echo "::notice::committed the retaken screenshot; CI runs again on it"
+
   # Builds the aarch64-darwin package via Nix on an arm64 macOS runner, so the
   # Darwin build path the flake exposes is actually exercised; the release PR
   # also builds the release binary and its check that it links nothing from
@@ -211,7 +280,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: always()
-    needs: [changes, jev-answers, frontend, build-linux, nixos-test, build-darwin]
+    needs: [changes, jev-answers, frontend, build-linux, nixos-test, screenshot, build-darwin]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

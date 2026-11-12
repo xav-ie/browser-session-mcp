@@ -3,11 +3,14 @@
 // docs/images/takeover.png. It starts its own pieces on ports the OS picks, so it never touches
 // a stack that's already running: a Chrome for the agent's session, the takeover daemon, the
 // MCP server, and a second Chrome for the person, who opens the takeover link.
+// The page behind the takeover bar is scripts/screenshot-page.html, served locally, so the image
+// only changes when the takeover page does. CI retakes it when the takeover UI changes (ci.yml).
 // Run after `nix build` (it uses ./result/bin/browser-session, which bundles the takeover UI):
-//   node scripts/screenshot.mjs [url]        url defaults to GitHub's sign-in page
+//   node scripts/screenshot.mjs [url]        url defaults to the local sign-in page
 // CHROME picks the Chrome binary (default: google-chrome).
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -18,7 +21,7 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BIN = path.join(root, "result/bin/browser-session");
 const CHROME = process.env.CHROME ?? "google-chrome";
 const OUT = path.join(root, "docs/images/takeover.png");
-const url = process.argv[2] ?? "https://github.com/login";
+const PAGE = path.join(root, "scripts/screenshot-page.html");
 // The person's window; the session's viewport leaves room for the takeover bar above it.
 const SCREEN = { width: 1280, height: 800 };
 const VIEWPORT = { width: 1280, height: 756 };
@@ -57,8 +60,17 @@ const freePort = () =>
     });
   });
 
+// The sign-in page, unless a URL was given.
+const site = createHttpServer((_, res) => res.writeHead(200, { "content-type": "text/html" }).end(readFileSync(PAGE)));
+await new Promise((r) => site.listen(0, "127.0.0.1", r));
+// The session's Chrome reaches it as example.com, so the address bar reads the same every run.
+const url = process.argv[2] ?? "http://example.com/login";
+
 try {
-  const session = await chrome("session", ["--disable-blink-features=AutomationControlled"]);
+  const session = await chrome("session", [
+    "--disable-blink-features=AutomationControlled",
+    `--host-resolver-rules=MAP example.com 127.0.0.1:${site.address().port}`,
+  ]);
   const person = await chrome("person", ["--hide-scrollbars"]);
   const takeover = `127.0.0.1:${await freePort()}`;
   const env = {
@@ -119,8 +131,9 @@ try {
   const { data } = await cdp("Page.captureScreenshot", { format: "png" }, tab);
   writeFileSync(OUT, Buffer.from(data, "base64"));
   ws.close();
-  console.log(`Wrote ${path.relative(root, OUT)} from ${url}`);
+  console.log(`Wrote ${path.relative(root, OUT)} from ${process.argv[2] ?? "the local sign-in page"}`);
 } finally {
+  site.close();
   for (const child of children) child.kill();
   await sleep(500);
   rmSync(tmp, { recursive: true, force: true });
