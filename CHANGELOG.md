@@ -1,4 +1,39 @@
 # Changelog
+## 0.1.23 (2026-11-12)
+
+### Fixes
+
+#### act holds submits, and a shared word isn't a match
+
+- With `confirmIrreversible`, `act` also holds a click whose label says it
+  submits, sends, pays, orders, publishes, deletes or signs up (a trash icon
+  too), read as the label shows now, so a "Next" button that became "Submit"
+  is held. Jev is asked about submitting forms and signing up as well.
+- `act`'s retry after a step with no effect only moves to an element in the
+  same document and form, never to a page control around the work.
+- Plain-language selectors and `act` treat an element that only shares a word
+  with the goal as no match: "accept cookies" no longer clicks a footer
+  "cookies" link when no consent banner is showing.
+
+#### Reports that match the page
+
+- After `type`, the next action reports when the page changed the field once
+  focus left it, such as a date field that reverts or reformats on blur.
+- `type` with `clear` uses the page's own select all and delete (Control+A,
+  Backspace) when what has focus isn't the field as a plain input: a rich
+  text editor, or a date field whose visible boxes stand in front of a hidden
+  input, which used to lose both the old and the new text.
+- `rejected` also covers fields in same-origin frames and fields a page marks
+  only with a class such as `invalid` or `is-invalid`.
+- A click on a shape inside an icon names the control around it, with its icon
+  hint, instead of `path` or `line`.
+- A target parked off the page to hide it (a "Skip to content" link) is
+  reported as such, instead of advice to scroll it into view.
+- The `dialog` field gives a dialog's name or heading, and cuts its text at a
+  word. A plain-language selector that matches nothing as CSS no longer says
+  it timed out, and `select_option` on something that isn't a dropdown says
+  to use click or type.
+
 ## 0.1.22 (2026-11-12)
 
 ### Fixes
