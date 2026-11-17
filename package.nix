@@ -59,7 +59,7 @@ let
       (fetchPnpm10Deps {
         inherit (finalAttrs) pname version src;
         fetcherVersion = 3;
-        hash = "sha256-zVT3tPqw1/bWyo7bAtS7Y4kBtcwwKZHrkbnPGXpe/tY=";
+        hash = "sha256-D64+I0MVkHWIAoKftXCV7yFc7IgG+POuoqovlmq59aA=";
       }).overrideAttrs
         (o: {
           env = (o.env or { }) // {
