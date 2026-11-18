@@ -183,6 +183,36 @@ body.watching #screen {
 #vault button:hover {
   background: rgba(81, 209, 54, 0.14);
 }
+#vault .head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+#vault #vaultclose {
+  flex: 0 0 auto;
+  padding: 3px;
+  border-color: transparent;
+  color: var(--muted);
+}
+#vault #vaultclose:hover {
+  color: var(--fg);
+  background: transparent;
+}
+#vault #autologin {
+  width: 100%;
+  justify-content: center;
+  margin-top: 8px;
+  background: var(--green);
+  color: var(--bar);
+  font-weight: 600;
+}
+#vault #autologin:hover {
+  filter: brightness(1.1);
+}
+#vault #autologin[aria-busy="true"] {
+  background: transparent;
+  color: var(--green);
+}
 
 /* --- tab strip (only when the session has more than one tab) ---------------- */
 
