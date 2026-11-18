@@ -37,14 +37,31 @@ import Base from "../layouts/base.astro";
     </div>
   </header>
 
-  <form id="vault" popover autocomplete="on" action="#" onsubmit="return false">
+  <form
+    id="vault"
+    popover="manual"
+    autocomplete="on"
+    action="#"
+    onsubmit="return false"
+  >
     {/* A real login form so your local password manager recognizes it and
         autofills. Values are read same-origin and typed into the remote page's
-        focused field over CDP. */}
-    <p>
-      Autofill here, then send each into the field focused on the page; each
-      send presses Tab after, to move on to the next field.
-    </p>
+        fields over CDP. Manual popover: it stays open while you use the page
+        and closes only from its own close button or the key button. */}
+    <div class="head">
+      <p>
+        Fill these from your password manager. Autofill then logs in: username
+        and password, submit, then the one-time code on the next step. Or send
+        one value into the focused field.
+      </p>
+      <button
+        type="button"
+        id="vaultclose"
+        popovertarget="vault"
+        popovertargetaction="hide"
+        title="Close"
+      ></button>
+    </div>
     <div class="row">
       <input
         id="vu"
@@ -82,6 +99,13 @@ import Base from "../layouts/base.astro";
         <span>send</span>
       </button>
     </div>
+    <button
+      type="button"
+      id="autologin"
+      title="Fill username and password, submit, then fill the one-time code on the next step and submit again"
+    >
+      Autofill
+    </button>
   </form>
 
   <div id="wrap">

@@ -187,9 +187,392 @@ function setView(zoom: number, x: number, y: number) {
 }
 
 // --- vault relay ----------------------------------------------------------
-function relay(id: string) {
-  const el = document.getElementById(id) as HTMLInputElement | null;
-  const text = (el && el.value) || "";
+// Values only ever reach the page as typed input (Input.insertText and key
+// events). Scripts run in the page (loginPage) find, focus and locate fields
+// and buttons; they never carry a value.
+
+type VaultKind = "user" | "pass" | "otp";
+const VAULT_IDS: Record<VaultKind, string> = {
+  user: "vu",
+  pass: "vp",
+  otp: "vo",
+};
+const KIND_NAME: Record<VaultKind, string> = {
+  user: "username",
+  pass: "password",
+  otp: "one-time code",
+};
+const vaultValue = (kind: VaultKind) =>
+  (document.getElementById(VAULT_IDS[kind]) as HTMLInputElement).value;
+
+// Runs inside the remote page (stringified into Runtime.evaluate), so it must
+// stay self-contained: no imports, no outside names. `op` is one of:
+//   reset         forget the fields filled by an earlier run
+//   scan          the login step showing: each kind's field as "empty",
+//                 "full" or "locked" (disabled or read-only) or absent; the
+//                 submit button's state ("ready", "busy", "captcha" or
+//                 "none"); any error the page shows; and a signature that
+//                 changes when the page moves on (new address, different
+//                 fields, or the filled fields gone)
+//   fill <kind>   focus, select and remember that field; true if it can take text
+//   submit <kind> the button that submits that field's step: its center
+//                 { x, y } in viewport pixels once it's ready, else
+//                 { wait: "busy" | "captcha" }, or null if there is none
+//   stop          whether the focused element is worth stopping a Tab on: a
+//                 text field, a submit button, or a frame we can't see into
+function loginPage(op: string, kind?: string): unknown {
+  const OTP_RE =
+    /one.?time|otp|totp|2fa|mfa|two.?factor|verification|security.?code|auth\w*.?code|passcode|^code$/i;
+  const USER_RE =
+    /user|e-?mail|login|account|identifier|phone|online.?id|^id$/i;
+  const SUBMIT_RE =
+    /^\s*(log\s*-?\s*(in|on)|sign\s*-?\s*(in|on)|continue|next|submit|verify|confirm|done|ok|go)\b/i;
+  const NOT_SUBMIT_RE =
+    /\bwith\b|google|apple|facebook|microsoft|github|passkey|sso|sign\s*-?\s*up|register|create|forgot|reset|cancel|back/i;
+  const BUSY_TEXT_RE =
+    /^\s*(loading|please wait|signing|logging|verifying|checking|submitting)/i;
+  const SPINNER_RE =
+    /^(spinner|loader|loading|spin|animate-spin|[\w-]*-spinner|spinner-[\w-]*)$/i;
+  const BUSY_CLASS_RE = /^(is-)?(loading|busy|disabled|submitting)$/i;
+  const CAPTCHA =
+    "[name=cf-turnstile-response], [name=g-recaptcha-response], [name=h-captcha-response]";
+  const TEXT_TYPES = ["", "text", "email", "tel", "number", "password", "url"];
+  const MARK = Symbol.for("browser-session.autofill");
+  const w = window as any;
+  if (op === "reset") {
+    w[MARK] = [];
+    return true;
+  }
+  const marks: WeakRef<Element>[] = (w[MARK] ||= []);
+
+  // Elements in document order, through open shadow roots.
+  const all = (sel: string): Element[] => {
+    const out: Element[] = [];
+    const walk = (root: Document | ShadowRoot) => {
+      root.querySelectorAll("*").forEach((el) => {
+        if (el.matches(sel)) out.push(el);
+        if (el.shadowRoot) walk(el.shadowRoot);
+      });
+    };
+    walk(document);
+    return out;
+  };
+  const visible = (el: Element) => {
+    const r = el.getBoundingClientRect();
+    const s = getComputedStyle(el);
+    return (
+      r.width > 2 &&
+      r.height > 2 &&
+      s.visibility !== "hidden" &&
+      s.display !== "none" &&
+      Number(s.opacity) > 0.05
+    );
+  };
+  const classes = (el: Element) =>
+    (el.getAttribute("class") || "").split(/\s+/).filter(Boolean);
+  const hint = (el: Element) => {
+    const i = el as HTMLInputElement;
+    const labels = Array.from(i.labels || [])
+      .map((l) => l.textContent)
+      .join(" ");
+    return [
+      i.name,
+      i.id,
+      i.placeholder,
+      el.getAttribute("aria-label"),
+      i.autocomplete,
+      labels,
+    ]
+      .join(" ")
+      .trim();
+  };
+  const textInput = (el: Element) =>
+    el.tagName === "TEXTAREA" ||
+    (el.tagName === "INPUT" &&
+      TEXT_TYPES.includes((el.getAttribute("type") || "").toLowerCase()));
+  const locked = (el: Element) =>
+    (el as HTMLInputElement).disabled || (el as HTMLInputElement).readOnly;
+  const textField = (el: Element) => textInput(el) && !locked(el);
+  const label = (el: Element) =>
+    ((el as HTMLInputElement).value && el.tagName === "INPUT"
+      ? (el as HTMLInputElement).value
+      : el.textContent || el.getAttribute("aria-label") || ""
+    ).trim();
+  // A button that submits, whether or not it's usable yet.
+  const isSubmit = (el: Element) => {
+    if (!visible(el)) return false;
+    const text = label(el);
+    if (NOT_SUBMIT_RE.test(text)) return false;
+    const type = (el.getAttribute("type") || "").toLowerCase();
+    const formSubmit =
+      (el.tagName === "BUTTON" && (type === "" || type === "submit")) ||
+      (el.tagName === "INPUT" && (type === "submit" || type === "image"));
+    return (
+      (formSubmit && !!(el as HTMLButtonElement).form) ||
+      SUBMIT_RE.test(text) ||
+      BUSY_TEXT_RE.test(text)
+    );
+  };
+  // Disabled, marked busy, showing a spinner or a "Signing in…" label: a
+  // click now would be lost.
+  const busy = (b: Element) =>
+    (b as HTMLButtonElement).disabled ||
+    b.getAttribute("aria-disabled") === "true" ||
+    !!b.closest("[aria-busy=true]") ||
+    getComputedStyle(b).pointerEvents === "none" ||
+    classes(b).some((c) => BUSY_CLASS_RE.test(c)) ||
+    BUSY_TEXT_RE.test(label(b)) ||
+    Array.from(b.querySelectorAll("*")).some(
+      (d) =>
+        (d.getAttribute("role") === "progressbar" ||
+          classes(d).some((c) => SPINNER_RE.test(c))) &&
+        visible(d),
+    );
+
+  const fields = all("input, textarea").filter(
+    (el) => textInput(el) && visible(el),
+  );
+  const isOtp = (el: Element) =>
+    (el as HTMLInputElement).autocomplete === "one-time-code" ||
+    OTP_RE.test(hint(el)) ||
+    // Split code boxes: one digit each.
+    (el as HTMLInputElement).maxLength === 1;
+  const find = (k: string | null | undefined) => {
+    const pass = fields.find(
+      (el) => (el as HTMLInputElement).type === "password" && !isOtp(el),
+    ) as HTMLInputElement | undefined;
+    if (k === "pass") return pass;
+    if (k === "otp")
+      return fields.find(
+        (el) => isOtp(el) && el.getAttribute("type") !== "password",
+      ) as HTMLInputElement | undefined;
+    if (k !== "user") return undefined;
+    const users = fields.filter(
+      (el) =>
+        (el as HTMLInputElement).type !== "password" &&
+        el.tagName === "INPUT" &&
+        !isOtp(el) &&
+        !/search/i.test(hint(el)),
+    ) as HTMLInputElement[];
+    const named = users.find(
+      (el) =>
+        /username|email/.test(el.autocomplete) ||
+        el.type === "email" ||
+        USER_RE.test(hint(el)),
+    );
+    if (named) return named;
+    // Otherwise the text field just before the password one.
+    if (pass) {
+      const before = users.filter(
+        (el) =>
+          el.compareDocumentPosition(pass) & Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+      return before[before.length - 1];
+    }
+    return undefined;
+  };
+
+  const submitButton = (anchor: HTMLInputElement | undefined) => {
+    const form = anchor?.form;
+    const inForm = form
+      ? all("button, input[type=submit], input[type=image]").filter(
+          (el) => (el as HTMLButtonElement).form === form && isSubmit(el),
+        )
+      : [];
+    return (
+      inForm.find(
+        (el) => SUBMIT_RE.test(label(el)) || BUSY_TEXT_RE.test(label(el)),
+      ) ||
+      inForm[0] ||
+      all("button, [role=button], input[type=button], input[type=submit]").find(
+        (el) =>
+          isSubmit(el) &&
+          (SUBMIT_RE.test(label(el)) || BUSY_TEXT_RE.test(label(el))),
+      )
+    );
+  };
+  // A captcha whose answer isn't in yet, in the form or on the page.
+  const captchaPending = (anchor: HTMLInputElement | undefined) =>
+    Array.from((anchor?.form || document).querySelectorAll(CAPTCHA)).some(
+      (el) => !(el as HTMLInputElement).value,
+    );
+  const buttonState = (anchor: HTMLInputElement | undefined) => {
+    const btn = submitButton(anchor);
+    if (!btn) return "none";
+    if (busy(btn)) return "busy";
+    if (captchaPending(anchor)) return "captcha";
+    return "ready";
+  };
+  const errorText = () => {
+    const texts: string[] = [];
+    for (const el of all(
+      "[role=alert], [aria-live=assertive], [aria-invalid=true]",
+    )) {
+      let t = "";
+      if (el.getAttribute("aria-invalid") === "true") {
+        const ids = (el.getAttribute("aria-describedby") || "").split(/\s+/);
+        t = ids
+          .map((id) => (id && document.getElementById(id)?.textContent) || "")
+          .join(" ");
+        if (!t.trim()) t = "a field was marked invalid";
+      } else if (visible(el)) t = el.textContent || "";
+      t = t.replace(/\s+/g, " ").trim();
+      if (t && t.length < 200 && !BUSY_TEXT_RE.test(t)) texts.push(t);
+    }
+    return texts.join(" · ").slice(0, 160);
+  };
+  const state = (el: HTMLInputElement | undefined) =>
+    !el ? undefined : locked(el) ? "locked" : el.value ? "full" : "empty";
+
+  if (op === "scan") {
+    const f = { user: find("user"), pass: find("pass"), otp: find("otp") };
+    const anchor = f.otp || f.pass || f.user;
+    const alive = marks.filter((r) => {
+      const e = r.deref();
+      return e && e.isConnected && visible(e);
+    }).length;
+    return {
+      user: state(f.user),
+      pass: state(f.pass),
+      otp: state(f.otp),
+      button: buttonState(anchor),
+      error: errorText(),
+      sig: [location.href, !!f.user, !!f.pass, !!f.otp, alive].join("|"),
+    };
+  }
+
+  if (op === "fill") {
+    const el = find(kind);
+    if (!el || locked(el)) return false;
+    el.scrollIntoView({ block: "center" });
+    el.focus();
+    try {
+      el.select();
+    } catch {
+      // Not every input type supports a selection.
+    }
+    if (!marks.some((r) => r.deref() === el)) marks.push(new WeakRef(el));
+    return true;
+  }
+
+  if (op === "submit") {
+    const anchor = find(kind);
+    const btn = submitButton(anchor);
+    if (!btn) return null;
+    if (busy(btn)) return { wait: "busy" };
+    if (captchaPending(anchor)) return { wait: "captcha" };
+    btn.scrollIntoView({ block: "center" });
+    const r = btn.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }
+
+  if (op === "stop") {
+    let a = document.activeElement;
+    while (a && a.shadowRoot && a.shadowRoot.activeElement)
+      a = a.shadowRoot.activeElement;
+    if (!a || a === document.body) return false;
+    if (a.tagName === "IFRAME" || a.tagName === "SELECT") return true;
+    return textField(a) || (isSubmit(a) && !busy(a));
+  }
+  return undefined;
+}
+
+// Run loginPage in the tab and return its value; undefined when the page is
+// mid-navigation, the script threw, or no answer came within 3 s.
+async function inPage(op: string, kind?: string): Promise<any> {
+  const expression = `(${loginPage.toString()})(${JSON.stringify(op)}, ${JSON.stringify(kind ?? null)})`;
+  const r = await Promise.race([
+    call("Runtime.evaluate", { expression, returnByValue: true }),
+    new Promise((resolve) => setTimeout(resolve, 3000)),
+  ]);
+  const res = r as any;
+  if (!res || res.exceptionDetails) return undefined;
+  return res.result?.value;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+type Key = { key: string; code: string; keyCode: number; text?: string };
+const TAB: Key = { key: "Tab", code: "Tab", keyCode: 9 };
+const ENTER: Key = { key: "Enter", code: "Enter", keyCode: 13, text: "\r" };
+// A key press the way Chrome's own input does it: rawKeyDown for keys that
+// type nothing, keyDown with text (which also fires keypress) for those that do.
+function press(k: Key, modifiers = 0) {
+  const base = {
+    key: k.key,
+    code: k.code,
+    windowsVirtualKeyCode: k.keyCode,
+    nativeVirtualKeyCode: k.keyCode,
+    modifiers,
+  };
+  send("Input.dispatchKeyEvent", {
+    type: k.text ? "keyDown" : "rawKeyDown",
+    text: k.text,
+    unmodifiedText: k.text,
+    ...base,
+  });
+  send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
+}
+
+function clickAt(x: number, y: number) {
+  const base = { x, y, button: "left", modifiers: 0 };
+  send("Input.dispatchMouseEvent", {
+    ...base,
+    type: "mouseMoved",
+    button: "none",
+  });
+  send("Input.dispatchMouseEvent", {
+    ...base,
+    type: "mousePressed",
+    buttons: 1,
+    clickCount: 1,
+  });
+  send("Input.dispatchMouseEvent", {
+    ...base,
+    type: "mouseReleased",
+    buttons: 0,
+    clickCount: 1,
+  });
+}
+
+// Type into the focused field, replacing what's selected. A code goes in one
+// key at a time, so split one-digit boxes advance to the next box themselves.
+function typeValue(kind: VaultKind, text: string) {
+  if (kind !== "otp") {
+    send("Input.insertText", { text });
+    return;
+  }
+  for (const ch of text) {
+    if (/\d/.test(ch))
+      press({
+        key: ch,
+        code: "Digit" + ch,
+        keyCode: 48 + Number(ch),
+        text: ch,
+      });
+    else send("Input.insertText", { text: ch });
+  }
+}
+
+// After a value, move on the way a person would, but past the links in
+// between (show password, forgot username, remember me): Tab up to MAX_SKIP
+// times until a text field or a submit button has focus. If none does, go back
+// to where the first Tab landed.
+const MAX_SKIP = 5;
+async function advance(): Promise<boolean> {
+  for (let i = 1; i <= MAX_SKIP; i++) {
+    press(TAB);
+    if (await inPage("stop")) return true;
+  }
+  for (let i = 1; i < MAX_SKIP; i++) press(TAB, 8);
+  return false;
+}
+
+async function relay(id: string) {
+  const kind = (Object.keys(VAULT_IDS) as VaultKind[]).find(
+    (k) => VAULT_IDS[k] === id,
+  )!;
+  const text = vaultValue(kind);
   if (!text) {
     setStatus("nothing to send: autofill the box first, then try again");
     return;
@@ -198,28 +581,222 @@ function relay(id: string) {
     setStatus("not connected", "err");
     return;
   }
-  const a = {
-    key: "a",
-    code: "KeyA",
-    windowsVirtualKeyCode: 65,
-    nativeVirtualKeyCode: 65,
-    modifiers: 2,
-  };
-  send("Input.dispatchKeyEvent", { type: "keyDown", ...a });
-  send("Input.dispatchKeyEvent", { type: "keyUp", ...a });
-  send("Input.insertText", { text });
-  // On to the next field, as a person does after typing one.
-  const tab = {
-    key: "Tab",
-    code: "Tab",
-    windowsVirtualKeyCode: 9,
-    nativeVirtualKeyCode: 9,
-  };
-  send("Input.dispatchKeyEvent", { type: "keyDown", ...tab });
-  send("Input.dispatchKeyEvent", { type: "keyUp", ...tab });
-  const what = { vu: "username", vp: "password", vo: "one-time code" }[id];
-  setStatus(`${what ?? "value"} sent to the focused field, then Tab`);
+  const a = { key: "a", code: "KeyA", keyCode: 65 };
+  press(a, 2); // select what's there, so the value replaces it
+  typeValue(kind, text);
+  const found = await advance();
+  setStatus(
+    found
+      ? `${KIND_NAME[kind]} sent, on to the next field`
+      : `${KIND_NAME[kind]} sent; no field or button within ${MAX_SKIP} tabs`,
+  );
 }
+
+// Autofill works from what the page shows, not a fixed script, so it handles
+// one-page logins, an email step before the password, a step that asks for
+// the email again with the password, and a one-time code step after:
+//   1. wait for a login step: fields showing that are empty and have a value
+//      in the vault (a code typed into the vault box late is picked up too)
+//   2. fill them
+//   3. wait until the step's button is usable (not disabled, busy or behind
+//      an unanswered captcha), then click it, or press Enter if there is none
+//   4. watch what happens: the page moves on (go to 1), shows an error (stop
+//      and say it), or stays put (click again, up to MAX_TRIES)
+// A field kind is filled at most MAX_FILLS times, so a page that keeps
+// clearing a rejected password doesn't loop.
+const autoBtn = document.getElementById("autologin") as HTMLButtonElement;
+let autoRun = 0; // bumped to cancel a run in progress
+const KINDS: VaultKind[] = ["user", "pass", "otp"];
+const MAX_TRIES = 3;
+const MAX_FILLS = 3;
+const NEXT_STEP_MS = 90000; // time to pick a code method, get the code, etc.
+const READY_MS = 60000; // a busy button or a captcha the person solves
+const OUTCOME_MS = 20000;
+const NO_FIELD_MS = 15000;
+
+type Scan = {
+  user?: string;
+  pass?: string;
+  otp?: string;
+  button: "ready" | "busy" | "captcha" | "none";
+  error: string;
+  sig: string;
+};
+
+function autoIdle() {
+  autoBtn.removeAttribute("aria-busy");
+  autoBtn.textContent = "Autofill";
+}
+
+async function autofill() {
+  if (autoBtn.getAttribute("aria-busy") === "true") {
+    autoRun++;
+    autoIdle();
+    setStatus("autofill stopped");
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    setStatus("not connected", "err");
+    return;
+  }
+  if (!KINDS.some((k) => vaultValue(k))) {
+    setStatus("nothing to fill: autofill the boxes first, then try again");
+    return;
+  }
+  const run = ++autoRun;
+  const live = () => run === autoRun && control && !ended;
+  autoBtn.setAttribute("aria-busy", "true");
+  autoBtn.textContent = "Stop";
+
+  const fills: Record<VaultKind, number> = { user: 0, pass: 0, otp: 0 };
+  const shown = (s: Scan | undefined) => KINDS.filter((k) => s?.[k]);
+  const todo = (s: Scan | undefined) =>
+    KINDS.filter(
+      (k) => s?.[k] === "empty" && vaultValue(k) && fills[k] < MAX_FILLS,
+    );
+  const scan = (): Promise<Scan | undefined> => inPage("scan");
+  // Poll the page until `ok` says so or `ms` pass; the last scan either way.
+  async function until(
+    ms: number,
+    ok: (s: Scan | undefined, waited: number) => boolean,
+  ) {
+    const t0 = Date.now();
+    let s: Scan | undefined;
+    while (live()) {
+      s = await scan();
+      if (ok(s, Date.now() - t0) || Date.now() - t0 > ms) break;
+      await sleep(400);
+    }
+    return s;
+  }
+  const finish = (msg: string, kind: StatusKind = "info") => {
+    if (live()) setStatus(msg, kind);
+  };
+
+  let steps = 0;
+  let tries = 0; // clicks on this step that didn't move the page
+  try {
+    await inPage("reset");
+    while (live()) {
+      // 1. A step to work on.
+      const first = steps === 0 && tries === 0;
+      if (!first && !tries)
+        setStatus("waiting for the next login step…", "pending");
+      const s = await until(first ? 3000 : NEXT_STEP_MS, (s, waited) => {
+        if (todo(s).length || ((tries || first) && shown(s).length))
+          return true;
+        // No login field at all for a while: logged in, or a step that
+        // needs the person (pick where to send a code).
+        if (!shown(s).length && waited > NO_FIELD_MS) return true;
+        // A code field with the vault box still empty: ask for the code
+        // and keep waiting for it.
+        if (s?.otp === "empty" && !vaultValue("otp"))
+          setStatus(
+            "type the one-time code into the box; autofill goes on once it's there",
+            "pending",
+          );
+        return false;
+      });
+      if (!live()) return;
+      const fill = todo(s);
+      if (!fill.length && !((tries || first) && shown(s).length)) {
+        if (first) finish("no login field found on this page", "err");
+        else
+          finish(
+            `autofill done after ${steps} step${steps === 1 ? "" : "s"}; press it again for a later step`,
+          );
+        return;
+      }
+
+      // 2. Fill.
+      for (const k of fill) {
+        if (!(await inPage("fill", k))) continue;
+        typeValue(k, vaultValue(k));
+        fills[k]++;
+        await sleep(200); // let the page's own input handlers run
+      }
+      const anchor = [...shown(s)].reverse()[0] ?? "user";
+      if (fill.length)
+        setStatus(
+          `filled ${fill.map((k) => KIND_NAME[k]).join(" and ")}, submitting`,
+          "pending",
+        );
+
+      // 3. Wait for a usable button, then click it.
+      await sleep(300); // validation that runs as the field changes
+      let at: any = null;
+      for (const t0 = Date.now(); live() && Date.now() - t0 < READY_MS;) {
+        at = await inPage("submit", anchor);
+        if (at && at.x !== undefined) break;
+        if (at === null && Date.now() - t0 > 2000) break; // no button: Enter
+        if (Date.now() - t0 > 1500)
+          setStatus(
+            at?.wait === "captcha"
+              ? "waiting for the captcha: solve it on the page"
+              : "waiting for the page's button to be ready…",
+            "pending",
+          );
+        await sleep(300);
+      }
+      if (!live()) return;
+      if (at?.wait) {
+        finish(
+          at.wait === "captcha"
+            ? "the captcha wasn't solved; solve it, then press Autofill again"
+            : "the page's button stayed busy; press Autofill again when it's ready",
+          "err",
+        );
+        return;
+      }
+      const before = await scan();
+      if (at) clickAt(at.x, at.y);
+      else {
+        await inPage("fill", anchor);
+        press(ENTER);
+      }
+
+      // 4. Did it go anywhere?
+      let sawBusy = false;
+      const after = await until(OUTCOME_MS, (s, waited) => {
+        if (!s) return false; // mid-navigation
+        if (s.sig !== before?.sig) return true;
+        if (s.error && s.error !== before?.error) return true;
+        if (s.button === "busy") sawBusy = true;
+        // It went busy and came back on the same step, or never reacted.
+        return (
+          (sawBusy && s.button !== "busy" && waited > 1000) ||
+          (!sawBusy && waited > 4000)
+        );
+      });
+      if (!live()) return;
+      if (after && after.sig !== before?.sig) {
+        steps++;
+        tries = 0;
+        continue;
+      }
+      if (after?.error && after.error !== before?.error) {
+        finish(`the page says: ${after.error}`, "err");
+        return;
+      }
+      if (++tries >= MAX_TRIES) {
+        finish(
+          `the page didn't move on after ${MAX_TRIES} tries; check it and press Autofill again`,
+          "err",
+        );
+        return;
+      }
+      setStatus("the page didn't move on, trying again…", "pending");
+    }
+  } catch {
+    finish("autofill stopped: lost the page", "err");
+  } finally {
+    if (run === autoRun) autoIdle();
+  }
+}
+autoBtn.addEventListener("click", (e) => {
+  e.preventDefault();
+  autofill();
+});
 
 // --- tabs -----------------------------------------------------------------
 const tabWsUrl = (targetId: string) => wsBase + "/devtools/page/" + targetId;
@@ -545,24 +1122,7 @@ function pinchState() {
 }
 function tap(ev: PointerEvent) {
   const { x, y } = toPage(ev);
-  const base = { x, y, button: "left", modifiers: 0 };
-  send("Input.dispatchMouseEvent", {
-    ...base,
-    type: "mouseMoved",
-    button: "none",
-  });
-  send("Input.dispatchMouseEvent", {
-    ...base,
-    type: "mousePressed",
-    buttons: 1,
-    clickCount: 1,
-  });
-  send("Input.dispatchMouseEvent", {
-    ...base,
-    type: "mouseReleased",
-    buttons: 0,
-    clickCount: 1,
-  });
+  clickAt(x, y);
 }
 canvas.addEventListener("pointerdown", (e) => {
   if (e.pointerType === "mouse") return;
@@ -640,15 +1200,24 @@ function touchEnd(e: PointerEvent) {
 canvas.addEventListener("pointerup", touchEnd);
 canvas.addEventListener("pointercancel", touchEnd);
 
+// Keys that type something without being one character: Enter must carry
+// "\r", or Chrome fires no keypress and forms never submit.
+const KEY_TEXT: Record<string, string> = { Enter: "\r" };
 function keyEvent(type: string, ev: KeyboardEvent) {
-  const isChar = type === "keyDown" && ev.key.length === 1;
+  const text =
+    type === "keyDown"
+      ? ev.key.length === 1
+        ? ev.key
+        : KEY_TEXT[ev.key]
+      : undefined;
   send("Input.dispatchKeyEvent", {
-    type: isChar ? "keyDown" : type,
+    type: type === "keyDown" && !text ? "rawKeyDown" : type,
     key: ev.key,
     code: ev.code,
     windowsVirtualKeyCode: ev.keyCode,
     nativeVirtualKeyCode: ev.keyCode,
-    text: ev.key.length === 1 ? ev.key : undefined,
+    text,
+    unmodifiedText: text,
     modifiers: modBits(ev),
   });
 }
@@ -908,6 +1477,15 @@ document.addEventListener("visibilitychange", () => {
     start();
 });
 
+(document.getElementById("vaultclose") as HTMLElement).innerHTML = ICONS.close;
+// Enter in a vault box runs Autofill, as Enter in a login form logs in.
+document.querySelectorAll("#vault input").forEach((i) =>
+  i.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key !== "Enter") return;
+    e.preventDefault();
+    autofill();
+  }),
+);
 document.querySelectorAll("#vault button[data-for]").forEach((b) => {
   b.insertAdjacentHTML("afterbegin", ICONS.enter);
   b.addEventListener("click", (e) => {
