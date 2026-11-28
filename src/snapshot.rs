@@ -68,6 +68,38 @@ pub async fn snapshot(page: &Page) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
+/// The tree from raw `Accessibility.getFullAXTree` nodes of one document,
+/// with no frames inside it and no icon hints. For guest sessions, whose
+/// extension runs no script and reaches no other target.
+pub fn render_nodes(nodes: &[AxNode]) -> String {
+    // Chrome adds a node per line of text for a debugger attached from an
+    // extension; its StaticText parent already says it all.
+    let nodes: Vec<AxNode> = nodes
+        .iter()
+        .cloned()
+        .map(|mut n| {
+            if role_of(&n) == Some("InlineTextBox") {
+                n.ignored = true;
+            }
+            n
+        })
+        .collect();
+    let nodes = &nodes[..];
+    let (trees, icons) = (HashMap::new(), HashMap::new());
+    let ctx = Frames {
+        frames: &[],
+        trees: &trees,
+        top: "",
+        icons: &icons,
+    };
+    let mut lines = Vec::new();
+    render(nodes, "", &ctx, 0, &mut lines);
+    if lines.is_empty() {
+        return "(empty accessibility tree)".to_string();
+    }
+    lines.join("\n")
+}
+
 /// The page's frames and their trees, for [`render`].
 struct Frames<'a> {
     frames: &'a [crate::frames::Frame],
@@ -81,13 +113,17 @@ struct Frames<'a> {
 /// Most unnamed controls a snapshot looks up icon hints for.
 const MAX_ICON_HINTS: usize = 60;
 
+fn role_of(node: &AxNode) -> Option<&str> {
+    node.role
+        .as_ref()
+        .and_then(|v| v.value.as_ref())
+        .and_then(|v| v.as_str())
+}
+
 /// Roles a person acts on, whose unnamed instances get an icon hint.
 fn is_control(node: &AxNode) -> bool {
     matches!(
-        node.role
-            .as_ref()
-            .and_then(|v| v.value.as_ref())
-            .and_then(|v| v.as_str()),
+        role_of(node),
         Some("button" | "link" | "menuitem" | "tab" | "switch" | "checkbox" | "radio")
     )
 }
