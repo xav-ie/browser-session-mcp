@@ -124,6 +124,8 @@ let
     commonArgs
     // {
       version = depsVersion;
+      # crane builds from dummySrc alone; a src beside it only draws a warning.
+      src = null;
       dummySrc = craneLib.mkDummySrc {
         src = lib.cleanSourceWith {
           inherit src;
