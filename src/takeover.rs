@@ -153,6 +153,80 @@ pub async fn set_stealth(session_id: &str, stealth: bool) -> Result<()> {
     Ok(())
 }
 
+/// Per-session "humanize off" flag, keyed like the stealth flag. Humanized
+/// input is the default, so only turning it off writes a file.
+fn humanize_off_path(ctx: &str) -> PathBuf {
+    takeover_dir().join("humanize-off").join(ctx)
+}
+/// Where the session's mouse cursor was left, as "x y" in viewport CSS
+/// pixels, so a new MCP process moves on from there.
+fn cursor_path(ctx: &str) -> PathBuf {
+    takeover_dir().join("cursor").join(ctx)
+}
+
+/// Turn humanized input on or off for a session (`open_browser_session`'s
+/// `humanize`).
+pub async fn set_humanize(session_id: &str, on: bool) -> Result<()> {
+    if !valid_ctx(session_id) {
+        return Err(anyhow!("invalid session id"));
+    }
+    let path = humanize_off_path(session_id);
+    if on {
+        let _ = tokio::fs::remove_file(&path).await;
+    } else {
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir).await.ok();
+        }
+        tokio::fs::write(&path, b"1")
+            .await
+            .context("writing humanize flag")?;
+    }
+    Ok(())
+}
+
+/// Whether humanized input is on for a session (it is unless turned off).
+pub async fn is_humanize(session_id: &str) -> bool {
+    if !valid_ctx(session_id) {
+        return true;
+    }
+    !tokio::fs::try_exists(humanize_off_path(session_id))
+        .await
+        .unwrap_or(false)
+}
+
+/// The cursor position saved for a session, if any.
+pub async fn cursor(session_id: &str) -> Option<(f64, f64)> {
+    if !valid_ctx(session_id) {
+        return None;
+    }
+    let text = tokio::fs::read_to_string(cursor_path(session_id))
+        .await
+        .ok()?;
+    let (x, y) = text.trim().split_once(' ')?;
+    Some((x.parse().ok()?, y.parse().ok()?))
+}
+
+/// Save the session's cursor position. Best effort.
+pub async fn set_cursor(session_id: &str, (x, y): (f64, f64)) {
+    if !valid_ctx(session_id) {
+        return;
+    }
+    let path = cursor_path(session_id);
+    if let Some(dir) = path.parent() {
+        tokio::fs::create_dir_all(dir).await.ok();
+    }
+    let _ = tokio::fs::write(&path, format!("{x:.1} {y:.1}")).await;
+}
+
+/// Drop a closed session's humanize flag and cursor. Best effort.
+pub async fn forget_input(session_id: &str) {
+    if !valid_ctx(session_id) {
+        return;
+    }
+    let _ = tokio::fs::remove_file(humanize_off_path(session_id)).await;
+    let _ = tokio::fs::remove_file(cursor_path(session_id)).await;
+}
+
 /// Whether a person has control of a session through a takeover link: an
 /// unexpired ticket for it that hasn't ended or been handed back. Counts from
 /// the moment the ticket is minted, before the human claims it, so nothing
