@@ -98,8 +98,48 @@ removes the common headless/automation tells:
   `localhost`/`127.0.0.1`/`::1`/`0.0.0.0` on every target, so a page can't
   port-scan the DevTools port, the takeover daemon, or any other local service.
 - **Trusted input.** `click`/`type`/`press_key`/`scroll`/`move_mouse` dispatch
-  real CDP input events (not synthetic JS), which fire handlers reliably, grant
-  user activation (can open popups), and produce human-like behavioral signals.
+  real CDP input events (not synthetic JS), which fire handlers reliably and
+  grant user activation (can open popups). A button held down reports a real
+  mouse's pressure, a capital or `!` is typed with Shift held, and
+  `select_option` chooses a native `<select>`'s option with a click and the
+  keyboard, so the page sees trusted `input` and `change` events (it falls
+  back to setting the value, and says so, when that doesn't take).
+- **A consistent window.** Each session's window is the page plus a
+  toolbar's height, placed on a common screen size that holds it (1920x1080
+  for the default 1280x800 page), so `screen` >= `outerWidth/Height` >=
+  `innerWidth/Height` and `screenX/Y` fall inside the screen; a phone's
+  window fills its screen. Set through `Browser.setWindowBounds`, so on a
+  Chrome with a visible window it moves and resizes that window.
+
+### Humanized input
+
+Bot detection also watches how input moves, so by default it moves like a
+person's (`humanize: false` on `open_browser_session` turns it off for the
+session's life, for speed on sites that don't care):
+
+- **The mouse travels.** A click moves the cursor from where it last was (or
+  from the edge of the screen nearest the target) along a curved path timed
+  by Fitts' law (120 to 450 ms), with minimum-jerk speed, a point every 7 to
+  17 ms, a little jitter and a settle; it overshoots a small far target and
+  corrects. It aims around the element's center, not at it, re-measures the
+  element before arriving, pauses before pressing and holds the button about
+  85 ms. The cursor is saved per session, so a new MCP process moves on from
+  there.
+- **Typing has a rhythm.** Keys are held about 95 ms with gaps of about
+  110 ms, longer now and then after a space or punctuation, the next key
+  going down before the last comes up when the gap is short. Text over 60
+  characters is pasted (Control, V and the text inserted; the V carries no
+  key code, so Chrome doesn't paste its own clipboard, which every session
+  shares). A field is focused by the click that lands in it.
+- **The wheel scrolls.** An element out of view is scrolled to with wheel
+  notches until it is in the middle of the screen; one in a scrolling box or
+  a frame, or one the wheel doesn't bring closer, is scrolled to directly.
+  An element already in full view isn't scrolled at all.
+- **Fingers keep an uneven pace.** On a phone, taps and swipes get the same
+  pauses and holds, with no cursor.
+
+A click takes about half a second more than with humanize off, and typing
+20 characters about two seconds.
 
 ### The stealth toggle
 
@@ -152,7 +192,9 @@ daemons — the processes coordinate purely through files in it.
     ├── claims/<token>                # first-claimant secret
     ├── released/<token>              # presence = handed back, person watching
     ├── done/<token>                  # presence = link ended
-    └── stealth/<sessionId>           # presence = stealth on for that session
+    ├── stealth/<sessionId>           # presence = stealth on for that session
+    ├── humanize-off/<sessionId>      # presence = humanized input off
+    └── cursor/<sessionId>            # where the session's mouse cursor is
 ```
 
 A **visit** is one top-level navigation in one tab — the boundary is CDP
