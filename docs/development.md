@@ -28,6 +28,7 @@ Every push and pull request runs these; run them locally before you push:
 |---|---|---|
 | Build, clippy, formatting, NixOS VM test | `nix flake check` (formatting: `nix fmt`) | CI |
 | Takeover UI types, lint, formatting | `pnpm check:astro`, `pnpm check:lint`, `pnpm check:format` in `frontend/` | CI |
+| Guest extension policy | `node --test 'tests/extension/*.test.mjs'` | CI |
 | Workflows | `actionlint`, `zizmor .github` | Lint |
 | Shell scripts | `shellcheck scripts/*.sh` | Lint |
 | Diagrams and logo up to date | `node scripts/diagrams.mjs` and `node scripts/logo.mjs`, then `git status` | Lint |

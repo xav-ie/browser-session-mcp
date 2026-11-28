@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Guest grant</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header id="banner" class="banner idle">
+      <div id="banner-title">No agent</div>
+      <div id="banner-sub">Nothing is attached to your browser.</div>
+    </header>
+
+    <p id="error" class="error" hidden></p>
+
+    <!-- Waiting for a link. -->
+    <section id="view-idle">
+      <label for="link">Paste the grant link you were sent</label>
+      <input id="link" type="url" placeholder="https://…/guest/…" autocomplete="off" spellcheck="false" />
+      <button id="load" class="primary">Show me what it asks for</button>
+      <p class="note">
+        Loading a link only reads what the operator is asking for. Nothing connects to your browser until you press
+        Accept.
+      </p>
+    </section>
+
+    <!-- A grant to accept or decline. Everything here comes from the operator, except the rules this extension
+         adds itself. -->
+    <section id="view-review" hidden>
+      <h2>Someone asks to drive tabs in your Chrome</h2>
+      <dl class="grant">
+        <dt>Who is asking <span class="tag">unverified, written by the operator</span></dt>
+        <dd id="g-requester"></dd>
+        <dt>Purpose <span class="tag">written by the operator</span></dt>
+        <dd id="g-purpose"></dd>
+        <dt>Relay it connects to</dt>
+        <dd id="g-relay" class="mono"></dd>
+        <dt>Starts at</dt>
+        <dd id="g-start" class="mono"></dd>
+        <dt>Pages the agent may be on</dt>
+        <dd><ul id="g-patterns" class="mono"></ul></dd>
+        <dt>Time limit</dt>
+        <dd id="g-expiry"></dd>
+      </dl>
+      <fieldset>
+        <legend>Before every click, Enter or Space key</legend>
+        <label><input type="radio" name="mode" value="ask" /> Ask me each time (recommended)</label>
+        <label><input type="radio" name="mode" value="auto" /> Don't ask</label>
+        <p class="note" id="g-mode-asked"></p>
+      </fieldset>
+      <details>
+        <summary>What the agent can and can't do</summary>
+        <ul class="note">
+          <li>It only works in one new tab group, and in tabs opened from it. Your other tabs are never touched.</li>
+          <li>It can load pages matching the list above, read the page's text and controls, take screenshots, click and type.</li>
+          <li>It can't read cookies or saved passwords, run scripts, download or upload files, or open settings pages.</li>
+          <li>Sign-in, password, two-factor, token, key and billing pages are always blocked, whatever the list says.</li>
+          <li>Whatever it sees on those pages (text, screenshots) does reach the operator.</li>
+          <li>Chrome will show a bar saying this extension "started debugging this browser". That is expected; its Cancel button ends the grant.</li>
+        </ul>
+      </details>
+      <div class="row">
+        <button id="accept" class="primary">Accept</button>
+        <button id="decline">Decline</button>
+      </div>
+    </section>
+
+    <!-- A live or paused grant. -->
+    <section id="view-live" hidden>
+      <div id="approvals"></div>
+      <dl class="grant">
+        <dt>Purpose</dt>
+        <dd id="l-purpose"></dd>
+        <dt>Time left</dt>
+        <dd id="l-countdown" class="big"></dd>
+        <dt>Approval</dt>
+        <dd id="l-mode"></dd>
+        <dt>Agent tabs</dt>
+        <dd id="l-tabs"></dd>
+      </dl>
+      <p id="l-outofscope" class="warn" hidden></p>
+      <p class="note">
+        Chrome's "started debugging this browser" bar is expected while the agent is here. The agent's tabs are in the
+        colored tab group; closing the group ends the grant.
+      </p>
+      <div class="row">
+        <button id="pause">Pause</button>
+        <button id="resume" hidden>Resume</button>
+        <button id="end" class="danger">End now</button>
+      </div>
+    </section>
+
+    <!-- After the end. -->
+    <section id="view-ended" hidden>
+      <p id="e-reason"></p>
+      <p class="note">The debugger is detached and nothing is forwarded any more. The tabs are yours to keep or close.</p>
+      <button id="reset">Done</button>
+    </section>
+
+    <section id="view-log">
+      <details id="log-box">
+        <summary>Action log</summary>
+        <p class="note">Every command forwarded, every denial and every approval, kept only in this browser.</p>
+        <div class="row">
+          <button id="log-export">Export JSON</button>
+          <button id="log-clear">Clear</button>
+        </div>
+        <ol id="log" class="log mono"></ol>
+      </details>
+    </section>
+
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>

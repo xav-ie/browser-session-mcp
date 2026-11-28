@@ -20,6 +20,7 @@ jobs:
       contents: read
       pull-requests: read # paths-filter lists a PR's files through the API
     outputs:
+      extension: ${{ steps.filter.outputs.extension }}
       frontend: ${{ steps.filter.outputs.frontend }}
       nix: ${{ steps.filter.outputs.nix }}
       screenshot: ${{ steps.filter.outputs.screenshot }}
@@ -31,6 +32,10 @@ jobs:
         id: filter
         with:
           filters: |
+            extension:
+              - 'extension/**'
+              - 'tests/extension/**'
+              - '.github/workflows/ci.yml'
             frontend:
               - 'frontend/**'
               - '.github/workflows/ci.yml'
@@ -67,6 +72,24 @@ jobs:
         with:
           persist-credentials: false
       - run: node tests/scenarios/jev-answers.mjs --check
+
+  # The guest extension's policy (CDP allowlist, URL scope, denylist), with
+  # Node's own test runner: the extension has no dependencies to install.
+  extension:
+    needs: changes
+    if: needs.changes.outputs.extension == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - run: node --test 'tests/extension/*.test.mjs'
 
   # Frontend quality gates, one job per check so failures stay isolated.
   frontend:
@@ -280,7 +303,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: always()
-    needs: [changes, jev-answers, frontend, build-linux, nixos-test, screenshot, build-darwin]
+    needs: [changes, jev-answers, extension, frontend, build-linux, nixos-test, screenshot, build-darwin]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

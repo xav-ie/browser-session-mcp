@@ -1,0 +1,142 @@
+:root {
+  color-scheme: light dark;
+  --purple: #7c4dbb;
+  --amber: #b8860b;
+  --red: #d93025;
+  --grey: #6b6b6b;
+  font: 14px/1.4 system-ui, sans-serif;
+}
+body {
+  margin: 0;
+  padding: 0 12px 24px;
+}
+.banner {
+  margin: 0 -12px 12px;
+  padding: 16px 12px;
+  color: #fff;
+}
+.banner.idle,
+.banner.ended {
+  background: var(--grey);
+}
+.banner.review {
+  background: #1a73e8;
+}
+.banner.active {
+  background: var(--purple);
+}
+.banner.paused {
+  background: var(--amber);
+}
+.banner.asking {
+  background: var(--red);
+}
+#banner-title {
+  font-size: 22px;
+  font-weight: 700;
+}
+h2 {
+  font-size: 16px;
+}
+label {
+  display: block;
+  margin: 4px 0;
+}
+input[type="url"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px;
+  margin: 4px 0 8px;
+}
+button {
+  padding: 8px 14px;
+  font-size: 14px;
+  cursor: pointer;
+}
+button.primary {
+  background: var(--purple);
+  color: #fff;
+  border: 0;
+}
+button.danger {
+  background: var(--red);
+  color: #fff;
+  border: 0;
+}
+.row {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+.grant dt {
+  font-weight: 600;
+  margin-top: 8px;
+}
+.grant dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+.grant ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.tag {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--amber);
+}
+.mono {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+.big {
+  font-size: 20px;
+  font-weight: 700;
+}
+.note {
+  color: var(--grey);
+  font-size: 12px;
+}
+.error,
+.warn {
+  padding: 8px;
+  border-left: 4px solid var(--red);
+  background: rgb(217 48 37 / 10%);
+}
+.approval {
+  border: 3px solid var(--red);
+  padding: 10px;
+  margin-bottom: 12px;
+}
+.approval h3 {
+  margin: 0 0 6px;
+}
+.thumb {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+}
+.thumb img {
+  max-width: 100%;
+  border: 1px solid var(--grey);
+}
+.thumb::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  margin: -11px 0 0 -11px;
+  border: 2px solid var(--red);
+  border-radius: 50%;
+}
+.log {
+  max-height: 320px;
+  overflow: auto;
+  padding-left: 20px;
+}
+.log li {
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
