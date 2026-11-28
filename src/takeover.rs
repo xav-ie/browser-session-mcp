@@ -499,6 +499,13 @@ pub async fn run() -> Result<()> {
         .with_context(|| format!("binding {bind}"))?;
     tracing::info!(%bind, "browser-session-takeover listening");
 
+    // The guest grant relay's socket for the MCP role (see crate::guest).
+    tokio::spawn(async {
+        if let Err(err) = crate::guest::serve_socket().await {
+            tracing::warn!(error = %err, "guest relay socket failed; guest grants are unavailable");
+        }
+    });
+
     // Periodically prune expired/abandoned tickets so the state dir stays bounded.
     tokio::spawn(async {
         loop {
@@ -565,6 +572,12 @@ async fn handle_conn(mut stream: TcpStream, browser_url: &str) -> Result<()> {
         // GET /takeover/<token>/devtools/page/<targetId> with an Upgrade is
         // the page's CDP socket: hand the connection to the relay.
         if method == "GET" {
+            // GET /guest/<token>/ext with an Upgrade is a guest extension's
+            // socket (see crate::guest).
+            if let Some(token) = guest_path(path, "/ext") {
+                let head = head.into_owned();
+                return crate::guest::serve_extension(stream, &head, &token).await;
+            }
             if let Some((token, target)) = relay_path(path) {
                 let head = head.into_owned();
                 return crate::takeover_relay::serve(
@@ -591,8 +604,15 @@ async fn handle_conn(mut stream: TcpStream, browser_url: &str) -> Result<()> {
         Some(c) => format!("Set-Cookie: {c}\r\n"),
         None => String::new(),
     };
+    // The guest grant endpoints are read by the extension from its own
+    // origin, with no credentials.
+    let cors = if r.cors {
+        "Access-Control-Allow-Origin: *\r\n"
+    } else {
+        ""
+    };
     let resp = format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{set_cookie}Connection: close\r\nCache-Control: no-store\r\n\r\n",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{set_cookie}{cors}Connection: close\r\nCache-Control: no-store\r\n\r\n",
         r.status,
         r.ctype,
         r.body.len(),
@@ -609,6 +629,7 @@ struct Resp {
     ctype: &'static str,
     body: String,
     set_cookie: Option<String>,
+    cors: bool,
 }
 
 impl Resp {
@@ -618,7 +639,12 @@ impl Resp {
             ctype,
             body: body.into(),
             set_cookie: None,
+            cors: false,
         }
+    }
+    fn cors(mut self) -> Self {
+        self.cors = true;
+        self
     }
     fn cookie(mut self, c: String) -> Self {
         self.set_cookie = Some(c);
@@ -633,6 +659,25 @@ fn relay_path(path: &str) -> Option<(String, String)> {
     (valid_token(token) && !target.is_empty() && target.bytes().all(|b| b.is_ascii_alphanumeric()))
         .then(|| (token.to_string(), target.to_string()))
 }
+
+/// The token of a guest grant path, `/guest/<token><suffix>`.
+fn guest_path(path: &str, suffix: &str) -> Option<String> {
+    let token = path
+        .split('?')
+        .next()?
+        .strip_prefix("/guest/")?
+        .strip_suffix(suffix)?;
+    valid_token(token).then(|| token.to_string())
+}
+
+/// What a person sees opening a grant link in a browser: it is meant for the
+/// guest extension, not for a tab.
+const GUEST_LINK_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Guest grant</title>\
+<body style=\"font:16px system-ui;max-width:36em;margin:3em auto\"><h1>This is a guest grant link</h1>\
+<p>Someone is asking to drive tabs in your Chrome. To see what they ask for, open the \
+<b>browser-session guest grant</b> extension's side panel and paste this page's address there. \
+Nothing happens until you press Accept in the extension.</p>\
+<p>Don't have the extension? Ask the person who sent the link for the release it came from.</p>";
 
 /// Value of the first header called `name` (case-insensitive).
 pub(crate) fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
@@ -678,6 +723,27 @@ async fn route(method: &str, path: &str, cookie: Option<&str>, browser_url: &str
 
     if method == "GET" && path == "/healthz" {
         return Resp::new("200 OK", "text/plain", "ok");
+    }
+
+    // Guest grants: the extension reads the grant and may decline it.
+    if method == "GET" {
+        if let Some(token) = guest_path(path, "/grant") {
+            return match crate::guest::grant_json(&token).await {
+                Ok(body) => Resp::new("200 OK", "application/json", body).cors(),
+                Err((status, why)) => Resp::new(status, "text/plain", why).cors(),
+            };
+        }
+        if guest_path(path, "").is_some() || guest_path(path, "/").is_some() {
+            return Resp::new("200 OK", "text/html; charset=utf-8", GUEST_LINK_PAGE);
+        }
+    }
+    if method == "POST" {
+        if let Some(token) = guest_path(path, "/decline") {
+            return match crate::guest::decline(&token).await {
+                Ok(()) => Resp::new("200 OK", "text/plain", "declined").cors(),
+                Err(why) => Resp::new("409 Conflict", "text/plain", why).cors(),
+            };
+        }
     }
 
     if method == "POST" {
@@ -981,7 +1047,7 @@ pub(crate) async fn relay_gate(token: &str, presented: Option<&str>) -> Option<(
 
 /// Tokens are 32 lowercase hex chars (see `mint_token`). Reject anything else
 /// so a crafted path can't escape the tokens dir or match a sentinel.
-fn valid_token(token: &str) -> bool {
+pub(crate) fn valid_token(token: &str) -> bool {
     token.len() == 32 && token.bytes().all(|b| b.is_ascii_hexdigit())
 }
 

@@ -61,6 +61,7 @@ pub mod devices;
 pub mod emulation;
 pub mod frames;
 pub mod humanize;
+pub mod guest;
 pub mod jev;
 pub mod listener;
 pub mod logs;
