@@ -37,7 +37,10 @@ credentials.
   keyboard input. Stealth can be switched on and off per session.
 - **Test like a slow phone.** Throttle a session's CPU and network, and run
   your own script before the page's to time what happens from the first byte.
-- **[42 tools](#all-42-tools)** for tabs, navigation, clicks and typing,
+- **Drive someone's own Chrome.** A guest grant lets an agent work in a
+  person's own browser through an extension they load, which keeps their
+  logins on their machine and limits what the agent can do and where.
+- **[44 tools](#all-44-tools)** for tabs, navigation, clicks and typing,
   screenshots, accessibility snapshots, logs, page speed, CPU profiles and
   throttling.
 
@@ -175,7 +178,7 @@ type stays out of the model, and every miss is an error, never a guess.
 [Picking elements with Jev](docs/jev.md) covers the benefits, what Jev sees,
 and tuning.
 
-## All 42 tools
+## All 44 tools
 
 Most tools take a `sessionId` first. Tools marked ⚙ need one of the optional
 background roles from [Deployment](docs/deployment.md).
@@ -198,6 +201,7 @@ turns passkey prompts down, so sites fall back to a password or a code.
 | Stealth | `set_stealth`, `get_stealth` |
 | Slow devices ⚙ | `set_emulation`, `get_emulation`, `add_init_script`, `remove_init_script` |
 | Human takeover ⚙ | `request_human_takeover`, `await_human_takeover` |
+| Guest grant ⚙ | `request_guest_grant`, `revoke_guest_grant` |
 | Saved logins | `save_browser_state`, `load_browser_state`, `list_browser_states`, `delete_browser_state` |
 
 <details>
@@ -262,6 +266,10 @@ Find the JavaScript behind a slow or hung page:
 **Human takeover** ⚙ (needs the `takeover` role and `TAKEOVER_BASE_URL`)
 - `request_human_takeover({ sessionId, ttlMinutes? })` → `{ url, token, expiresAtMs }`: returns right away with a link
 - `await_human_takeover({ token, timeout? })` → `{ completed, watching, expired, url?, title? }`: waits up to `timeout` (default 25 s) for the person to hand control back; call it in a loop until `completed`, or until `expired` says to request a new link. `watching` means the link is still open: if they take control again, calls on the session fail until you await the same token again
+
+**Guest grant** ⚙ (needs the `takeover` role and `TAKEOVER_BASE_URL`; the guest loads [the extension](docs/workflows.md#guest-grant))
+- `request_guest_grant({ purpose, requester, allowedUrlPatterns, startUrl, ttlMinutes?, approvalMode? })` → `{ url, sessionId, expiresAtMs, approvalMode }`: a link for a person to paste into the guest extension in their own Chrome; once they accept, `navigate`, `take_snapshot`, `take_screenshot`, `click` and `type` work with the `guest-…` sessionId, inside the limits their extension enforces
+- `revoke_guest_grant({ sessionId })` → `{ revoked }`: ends it now
 
 **Saved logins**
 - `save_browser_state({ sessionId, name })`

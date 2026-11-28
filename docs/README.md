@@ -7,8 +7,9 @@ Start at the project [README](../README.md) for the pitch and
 people want them:
 
 1. **[Workflows](workflows.md)** — read when you need a login the agent must not
-   see ([human takeover](workflows.md#human-takeover)) or want to reuse cookies
-   across sessions ([saved cookie state](workflows.md#saved-cookie-state)).
+   see ([human takeover](workflows.md#human-takeover)), need an agent to work in
+   someone's own Chrome ([guest grant](workflows.md#guest-grant)), or want to
+   reuse cookies across sessions ([saved cookie state](workflows.md#saved-cookie-state)).
 2. **[How it works](how-it-works.md)** — read to understand the design: why
    [sessions are a tool argument](how-it-works.md#sessions-are-a-tool-argument),
    the [four-process architecture](how-it-works.md#architecture), the

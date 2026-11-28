@@ -194,7 +194,12 @@ daemons — the processes coordinate purely through files in it.
     ├── done/<token>                  # presence = link ended
     ├── stealth/<sessionId>           # presence = stealth on for that session
     ├── humanize-off/<sessionId>      # presence = humanized input off
-    └── cursor/<sessionId>            # where the session's mouse cursor is
+    ├── cursor/<sessionId>            # where the session's mouse cursor is
+    └── guest/                        # guest grants (see workflows.md)
+        ├── grants/<token>.json       # what was asked: purpose, URL patterns, expiry
+        ├── status/<token>            # "active" or "paused" while the extension is connected
+        ├── ended/<token>             # why it ended (revoked, expired, the guest ended it)
+        └── relay.sock                # the takeover daemon's socket for the mcp role
 ```
 
 A **visit** is one top-level navigation in one tab — the boundary is CDP
