@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chromiumoxide::Browser;
 use chromiumoxide::Page;
 use chromiumoxide::cdp::browser_protocol::{
-    browser::BrowserContextId,
+    browser::{Bounds, BrowserContextId, GetWindowForTargetParams, SetWindowBoundsParams},
     emulation::{SetDeviceMetricsOverrideParams, SetTouchEmulationEnabledParams},
     network::SetUserAgentOverrideParams,
     page::GetLayoutMetricsParams,
@@ -251,11 +251,16 @@ impl SessionManager {
         }
 
         let vp = viewport.unwrap_or_default();
-        if let Err(err) = self.apply_viewport(&page, vp, use_mobile_ua).await {
+        if let Err(err) = self
+            .apply_viewport(&session_id, &page, vp, use_mobile_ua)
+            .await
+        {
             self.cleanup_failed_open(&session_id, ctx_id).await;
             return Err(err);
         }
-        self.state.set_viewport(&session_id, vp).await;
+        self.state
+            .set_viewport(&session_id, vp, use_mobile_ua)
+            .await;
         // Write now rather than on the flusher's delay: the listener's attach
         // guard reads this session's UA from disk to mask popups, and a page can
         // open one within that second.
@@ -678,24 +683,44 @@ impl SessionManager {
         {
             return Ok(());
         }
-        self.apply_viewport(page, vp, mobile).await
+        self.apply_viewport(session_id, page, vp, mobile).await
     }
 
     /// Size the page and, for a mobile session, emulate a phone: `mobile`
     /// device metrics (the page's `<meta name=viewport>` applies, scrollbars
     /// overlay) and a touch screen.
-    async fn apply_viewport(&self, page: &Page, vp: Viewport, mobile: bool) -> Result<()> {
+    async fn apply_viewport(
+        &self,
+        session_id: &str,
+        page: &Page,
+        vp: Viewport,
+        mobile: bool,
+    ) -> Result<()> {
         if mobile {
             apply_touch(page).await?;
         }
+        let geo = window_geometry(vp, mobile, session_id);
+        // The window around the page: its outer size and place on the
+        // screen are what `outerWidth` and `screenX` report. Best effort; a
+        // Chrome that won't move its window keeps a screen that holds it.
+        let screen = match self.place_window(page, geo.window).await {
+            Ok(()) => geo.screen,
+            Err(err) => {
+                tracing::debug!(error = %format!("{err:#}"), "placing the window failed");
+                match self.window_bounds(page).await {
+                    Some((w, h)) if !mobile => fit_screen(w.max(vp.width), h.max(vp.height), false),
+                    _ => geo.screen,
+                }
+            }
+        };
         let params = SetDeviceMetricsOverrideParams::builder()
             .width(vp.width)
             .height(vp.height)
             .device_scale_factor(vp.scale)
             // `screen.width`/`height` too: sites read them to tell a phone
-            // from a desktop, and left alone they report the window.
-            .screen_width(vp.width)
-            .screen_height(vp.height)
+            // from a desktop, and check them against the window's size.
+            .screen_width(screen.0)
+            .screen_height(screen.1)
             .mobile(mobile)
             .build()
             .map_err(|e| anyhow!("SetDeviceMetricsOverrideParams: {e}"))?;
@@ -703,6 +728,115 @@ impl SessionManager {
             .await
             .context("Emulation.setDeviceMetricsOverride")?;
         Ok(())
+    }
+}
+
+impl SessionManager {
+    /// Put the window `page` is in at `left`, `top` with the outer size
+    /// `width` by `height`, unless it is there already.
+    async fn place_window(
+        &self,
+        page: &Page,
+        (left, top, width, height): (i64, i64, i64, i64),
+    ) -> Result<()> {
+        let window = self
+            .browser
+            .execute(
+                GetWindowForTargetParams::builder()
+                    .target_id(page.target_id().clone())
+                    .build(),
+            )
+            .await
+            .context("Browser.getWindowForTarget")?;
+        let now = &window.result.bounds;
+        if (now.left, now.top, now.width, now.height)
+            == (Some(left), Some(top), Some(width), Some(height))
+        {
+            return Ok(());
+        }
+        let bounds = Bounds::builder()
+            .left(left)
+            .top(top)
+            .width(width)
+            .height(height)
+            .build();
+        self.browser
+            .execute(SetWindowBoundsParams::new(window.result.window_id, bounds))
+            .await
+            .context("Browser.setWindowBounds")?;
+        Ok(())
+    }
+
+    /// The outer size of the window `page` is in.
+    async fn window_bounds(&self, page: &Page) -> Option<(i64, i64)> {
+        let window = self
+            .browser
+            .execute(
+                GetWindowForTargetParams::builder()
+                    .target_id(page.target_id().clone())
+                    .build(),
+            )
+            .await
+            .ok()?;
+        let b = &window.result.bounds;
+        Some((b.width?, b.height?))
+    }
+}
+
+/// A screen and a window on it, consistent the way a real browser's are.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Geometry {
+    /// The screen's size.
+    screen: (i64, i64),
+    /// The window's left, top, width and height on it.
+    window: (i64, i64, i64, i64),
+}
+
+/// Height of a desktop Chrome's tab strip and toolbar above the page.
+const BROWSER_CHROME_HEIGHT: i64 = 87;
+/// Height of the taskbar a desktop screen keeps below its windows.
+const TASKBAR_HEIGHT: i64 = 48;
+/// Common desktop screens, smallest first.
+const DESKTOP_SCREENS: &[(i64, i64)] = &[(1920, 1080), (2560, 1440), (3840, 2160)];
+
+/// The smallest common screen that holds a `w` by `h` window above a
+/// taskbar (a phone's screen is its window).
+fn fit_screen(w: i64, h: i64, mobile: bool) -> (i64, i64) {
+    if mobile {
+        return (w, h);
+    }
+    DESKTOP_SCREENS
+        .iter()
+        .copied()
+        .find(|&(sw, sh)| sw >= w && sh >= h + TASKBAR_HEIGHT)
+        .unwrap_or((w, h + TASKBAR_HEIGHT))
+}
+
+/// The screen and window a session with viewport `vp` reports: on a
+/// desktop, a window the page fits in under Chrome's toolbar, on a common
+/// screen at least as big, at a place on it that stays the same for the
+/// session; a phone's window fills its screen. So `screen` >= `outer` >=
+/// `inner` and the window sits inside the screen.
+fn window_geometry(vp: Viewport, mobile: bool, session_id: &str) -> Geometry {
+    if mobile {
+        return Geometry {
+            screen: (vp.width, vp.height),
+            window: (0, 0, vp.width, vp.height),
+        };
+    }
+    let (w, h) = (vp.width, vp.height + BROWSER_CHROME_HEIGHT);
+    let screen = fit_screen(w, h, false);
+    // FNV-1a: a stable place per session.
+    let seed = session_id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    let room_x = (screen.0 - w).max(0) as u64;
+    let room_y = (screen.1 - TASKBAR_HEIGHT - h).max(0) as u64;
+    let left = (seed % (room_x + 1)) as i64;
+    let top = ((seed >> 32) % (room_y + 1)) as i64;
+    Geometry {
+        screen,
+        window: (left, top, w, h),
     }
 }
 
@@ -758,4 +892,48 @@ async fn apply_touch(page: &Page) -> Result<()> {
 
 fn parse_context_id(session_id: &str) -> BrowserContextId {
     BrowserContextId::new(session_id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screen_holds_window_holds_page() {
+        let views = [
+            (1280, 800),
+            (1920, 1080),
+            (2560, 1440),
+            (800, 600),
+            (3000, 2000),
+        ];
+        for (i, &(width, height)) in views.iter().enumerate() {
+            let vp = Viewport {
+                width,
+                height,
+                scale: 1.0,
+            };
+            let g = window_geometry(vp, false, &format!("ABC{i}DEF"));
+            let (left, top, w, h) = g.window;
+            assert!(w >= width && h > height, "{g:?}");
+            assert!(left >= 0 && top >= 0, "{g:?}");
+            assert!(left + w <= g.screen.0, "{g:?}");
+            assert!(top + h <= g.screen.1 - TASKBAR_HEIGHT, "{g:?}");
+            assert_eq!(
+                g,
+                window_geometry(vp, false, &format!("ABC{i}DEF")),
+                "stable"
+            );
+        }
+        let g = window_geometry(Viewport::default(), false, "X");
+        assert_eq!(g.screen, (1920, 1080));
+        let phone = Viewport {
+            width: 390,
+            height: 844,
+            scale: 3.0,
+        };
+        let g = window_geometry(phone, true, "X");
+        assert_eq!(g.screen, (390, 844));
+        assert_eq!(g.window, (0, 0, 390, 844));
+    }
 }

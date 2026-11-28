@@ -81,6 +81,9 @@ so the profile still comes back.
 
 **Stealth** — `set_stealth({ sessionId, enabled })`, `get_stealth({ sessionId })`.
 Leave stealth as-is unless a site is tripping bot gates.
+Input is humanized by default (a curved cursor path, a typing rhythm, wheel
+scrolling), so a click takes about half a second; open the session with
+`humanize: false` only when speed matters and the site has no bot detection.
 
 **Slow devices** (needs the `listener` daemon) —
 `set_emulation({ sessionId, cpuThrottlingRate?, network? })` throttles every

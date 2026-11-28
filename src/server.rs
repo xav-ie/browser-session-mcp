@@ -5,8 +5,8 @@ use base64::Engine as _;
 use chromiumoxide::Page;
 use chromiumoxide::cdp::browser_protocol::input::{
     DispatchDragEventParams, DispatchDragEventType, DispatchKeyEventParams, DispatchKeyEventType,
-    DispatchMouseEventParams, DispatchMouseEventType, EventDragIntercepted, InsertTextParams,
-    MouseButton, SetInterceptDragsParams,
+    DispatchMouseEventType, EventDragIntercepted, InsertTextParams, MouseButton,
+    SetInterceptDragsParams,
 };
 use chromiumoxide::cdp::browser_protocol::{
     network::CookieParam,
@@ -17,8 +17,7 @@ use chromiumoxide::cdp::browser_protocol::{
     storage::{GetCookiesParams, SetCookiesParams},
 };
 use chromiumoxide::cdp::js_protocol::runtime::{CallFunctionOnParams, EvaluateParams};
-use chromiumoxide::keys::USKEYBOARD_LAYOUT;
-use chromiumoxide::layout::Point;
+use chromiumoxide::keys::{KeyDefinition, USKEYBOARD_LAYOUT};
 use chromiumoxide::page::ScreenshotParams;
 use futures::StreamExt;
 use rmcp::model::{
@@ -37,6 +36,7 @@ use std::time::Duration;
 
 use crate::chrome_ctx::ChromeContext;
 use crate::emulation::{self, Emulation, InitScript, NetworkConditions};
+use crate::humanize::Rect;
 use crate::jev;
 use crate::logs::{self, LogKind, ReadOpts, SessionLogEntry};
 use crate::profiler;
@@ -123,7 +123,13 @@ impl ServerHandler for BrowserSessionServer {
             },
             _ => None,
         };
-        match crate::frames::scope(self.dispatch(name, args)).await {
+        let session = args
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        // Boxed: the tools' futures together are too big for a worker thread's stack.
+        let call = crate::humanize::scope(session.as_deref(), Box::pin(self.dispatch(name, args)));
+        match crate::frames::scope(call).await {
             Ok(result) => Ok(result.into()),
             Err(err) => {
                 // A transport-level failure may mean the connection died:
@@ -232,6 +238,7 @@ impl BrowserSessionServer {
         let use_mobile =
             optional_bool(&args, "useMobileUA").unwrap_or(device.is_some_and(|d| d.mobile));
         let name = optional_str(&args, "name").map(str::to_string);
+        let humanize = optional_bool(&args, "humanize");
         // A named session is reused while it lives, and otherwise starts
         // with the login last saved under its name, so a login outlives
         // the task, the session and a Chrome restart.
@@ -243,6 +250,9 @@ impl BrowserSessionServer {
                     .into_iter()
                     .find(|s| s.session_id == id)
                     .ok_or_else(|| anyhow!("session {id} closed while reopening it"))?;
+                if let Some(on) = humanize {
+                    takeover::set_humanize(&id, on).await?;
+                }
                 return Ok(ok_text_struct(
                     format!(
                         "Reusing session {id}, already open as \"{name}\" (on {}); its viewport and phone setting stay as they were.",
@@ -254,6 +264,10 @@ impl BrowserSessionServer {
         }
         let custom_ua = optional_str(&args, "userAgent").or(device.and_then(|d| d.user_agent));
         let info = sessions.open(viewport, use_mobile, custom_ua).await?;
+        // Humanized input is the default; only turning it off is recorded.
+        if humanize == Some(false) {
+            takeover::set_humanize(&info.session_id, false).await?;
+        }
         let Some(name) = name else {
             return Ok(ok_text_struct(
                 format!("Opened session {}", info.session_id),
@@ -286,6 +300,7 @@ impl BrowserSessionServer {
         }
         let writer = logs::LogWriter::new(self.logs_dir.clone());
         let _ = writer.close_session(&session_id).await;
+        takeover::forget_input(&session_id).await;
         if let Ok(dir) = logs::session_dir(&crate::state_dir().join("locks"), &session_id) {
             let _ = tokio::fs::remove_file(dir.with_extension("lock")).await;
         }
@@ -557,19 +572,19 @@ impl BrowserSessionServer {
         // CDP Input (trusted events): reliably fires handlers AND grants user
         // activation, so it can open popups/new tabs that a synthetic JS
         // `.click()` cannot. Target a selector's center or explicit x/y.
-        let (x, y, label, target) = if let Some(sel) = optional_str(&args, "selector") {
+        let (aim, label) = if let Some(sel) = optional_str(&args, "selector") {
             let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
             let (css, note) = resolve_and_wait(&page, sel, timeout).await?;
-            let (x, y) = element_center(&page, &css).await?;
-            (x, y, note.unwrap_or(css.clone()), Some(css))
+            let aim = aim_at(&page, &css).await?;
+            (aim, note.unwrap_or(css))
         } else if let (Some(x), Some(y)) = (optional_f64(&args, "x"), optional_f64(&args, "y")) {
-            (x, y, format!("({x}, {y})"), None)
+            (Aim::point((x, y)), format!("({x}, {y})"))
         } else {
             bail!("click requires either `selector` or both `x` and `y`");
         };
         let before = before_action(&page).await;
-        let hit = check_point(&page, (x, y), target.as_deref(), &label).await?;
-        page.click(Point::new(x, y))
+        let hit = check_point(&page, aim.at, aim.css.as_deref(), &label).await?;
+        click_aim(&page, &aim, MouseButton::Left)
             .await
             .with_context(|| format!("clicking {label}"))?;
         let after = after_action(&page, before, Some(hit), (&sessions, &session_id)).await;
@@ -607,7 +622,12 @@ impl BrowserSessionServer {
                 .await
                 .with_context(|| format!("pressing {key}"))?;
             if repeat > 1 && i + 1 < repeat {
-                tokio::time::sleep(Duration::from_millis(30)).await;
+                let gap = if crate::humanize::enabled() {
+                    crate::humanize::with_rng(crate::humanize::key_gap)
+                } else {
+                    30.0
+                };
+                crate::humanize::pause(gap).await;
                 trail.push(focused_now(&page).await);
             }
         }
@@ -634,19 +654,11 @@ impl BrowserSessionServer {
         let page = sessions.active_page(&session_id).await?;
         let dx = optional_f64(&args, "deltaX").unwrap_or(0.0);
         let dy = optional_f64(&args, "deltaY").unwrap_or(600.0);
-        let x = optional_f64(&args, "x").unwrap_or(50.0);
-        let y = optional_f64(&args, "y").unwrap_or(50.0);
-        let params = DispatchMouseEventParams::builder()
-            .r#type(DispatchMouseEventType::MouseWheel)
-            .x(x)
-            .y(y)
-            .delta_x(dx)
-            .delta_y(dy)
-            .build()
-            .map_err(|e| anyhow!("scroll: {e}"))?;
-        page.execute(params)
-            .await
-            .context("Input.dispatchMouseEvent")?;
+        let at = match (optional_f64(&args, "x"), optional_f64(&args, "y")) {
+            (Some(x), Some(y)) => Some((x, y)),
+            _ => None,
+        };
+        crate::humanize::scroll(&page, at, dx, dy).await?;
         Ok(ok_text(format!("Scrolled (deltaX={dx}, deltaY={dy})")))
     }
 
@@ -658,7 +670,7 @@ impl BrowserSessionServer {
             let timeout = optional_u64(&args, "timeout").unwrap_or(5_000);
             let (css, note) = resolve_and_wait(&page, sel, timeout).await?;
             (
-                element_center(&page, &css).await?,
+                aim_at(&page, &css).await?.at,
                 note.unwrap_or(css.clone()),
                 Some(css),
             )
@@ -734,9 +746,7 @@ impl BrowserSessionServer {
         let page = sessions.active_page(&session_id).await?;
         let x = optional_f64(&args, "x").ok_or_else(|| anyhow!("`x` is required"))?;
         let y = optional_f64(&args, "y").ok_or_else(|| anyhow!("`y` is required"))?;
-        page.move_mouse(Point::new(x, y))
-            .await
-            .context("Input.dispatchMouseEvent (move)")?;
+        crate::humanize::move_to(&page, (x, y), 20.0, None).await?;
         Ok(ok_text(format!("Moved mouse to ({x}, {y})")))
     }
 
@@ -802,6 +812,9 @@ impl BrowserSessionServer {
         };
         let (shown, confirmed) = shown_value(&page, &css, &chosen).await;
         let mut text = after.render(&format!("Chose {chosen:?} in {label}"));
+        if choice.direct {
+            text.push_str(" Choosing it with the mouse and keyboard didn't take, so it was set directly: the page saw untrusted input and change events, which bot detection can notice.");
+        }
         if confirmed {
             text.push_str(&format!(" The field shows {shown:?}."));
         } else {
@@ -1349,15 +1362,14 @@ impl BrowserSessionServer {
                     }
                     match d.operation.as_str() {
                         "hover" => {
-                            let (x, y) = element_center(&page, &css).await?;
-                            page.move_mouse(Point::new(x, y))
-                                .await
-                                .context("Input.dispatchMouseEvent (move)")?;
+                            let aim = aim_at(&page, &css).await?;
+                            crate::humanize::move_to(&page, aim.at, aim.w, refine(&page, &aim))
+                                .await?;
                             return Ok(("hover".to_string(), None, None));
                         }
                         "right_click" => {
-                            let at = element_center(&page, &css).await?;
-                            right_click(&page, at).await?;
+                            let aim = aim_at(&page, &css).await?;
+                            click_aim(&page, &aim, MouseButton::Right).await?;
                             return Ok(("right_click".to_string(), None, None));
                         }
                         "drag" => {
@@ -1370,8 +1382,8 @@ impl BrowserSessionServer {
                                     )
                                 })?;
                             if let Some(target) = target {
-                                let from = element_center(&page, &css).await?;
-                                let to = element_center(&page, &d.page.css(&target)).await?;
+                                let from = aim_at(&page, &css).await?.at;
+                                let to = aim_at(&page, &d.page.css(&target)).await?.at;
                                 if touch {
                                     touch_swipe(&page, from, to, 400).await?;
                                 } else {
@@ -1389,7 +1401,7 @@ impl BrowserSessionServer {
                         _ => {}
                     }
                     if touch {
-                        let at = element_center(&page, &css).await?;
+                        let at = aim_at(&page, &css).await?.at;
                         check_point(&page, at, Some(&css), &el.desc).await?;
                         touch_tap(&page, at)
                             .await
@@ -3597,6 +3609,10 @@ fn act_done(
 /// Scroll by a fraction of the viewport (positive = down). Used by `act`'s
 /// scroll pseudo-actions.
 async fn scroll_viewport(page: &Page, fraction: f64) -> Result<()> {
+    if crate::humanize::enabled() {
+        let (_, vh) = crate::humanize::viewport(page).await;
+        return crate::humanize::scroll(page, None, 0.0, (vh * fraction).round()).await;
+    }
     let decl = format!(
         "function() {{ window.scrollBy(0, Math.round(window.innerHeight * ({fraction}))); return true; }}"
     );
@@ -3604,11 +3620,29 @@ async fn scroll_viewport(page: &Page, fraction: f64) -> Result<()> {
     Ok(())
 }
 
-/// Set a `<select>` to its option at `index`, firing input/change so page
-/// scripts observe it. The element is targeted by its extraction
-/// reference, and the option by index — labels are clamped to 60 chars
-/// for Jev, so matching on text could miss long ones.
-async fn set_select_option(page: &Page, css: &str, index: u64, label: &str) -> Result<()> {
+/// How [`set_select_option`] chose an option.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Picked {
+    /// With the mouse and keyboard, so the page saw trusted events.
+    ByHand,
+    /// Set directly, with untrusted input and change events.
+    Directly,
+}
+
+/// Set a `<select>` to its option at `index`, the way a person does: click
+/// it, move to the option with the arrow keys (or type its first letters
+/// in a long list) and press Enter, so the page sees trusted input and
+/// change events. When that doesn't take (a list box, a multi-select, a
+/// page that swallows the keys), the value is set directly with input and
+/// change fired, as page scripts would. The element is targeted by its
+/// extraction reference, and the option by index — labels are clamped to
+/// 60 chars for Jev, so matching on text could miss long ones.
+async fn set_select_option(page: &Page, css: &str, index: u64, label: &str) -> Result<Picked> {
+    match select_by_hand(page, css, index as usize).await {
+        Ok(true) => return Ok(Picked::ByHand),
+        Ok(false) => {}
+        Err(e) => tracing::debug!(error = %format!("{e:#}"), "choosing an option by hand failed"),
+    }
     let decl = format!(
         "function() {{ {deep} {native} const h = __bsDeep({css}); if (!h) return false; const el = __bsSelect(h.el); \
          if (!el) return false; const o = el.options[{index}]; if (!o) return false; el.value = o.value; \
@@ -3622,7 +3656,127 @@ async fn set_select_option(page: &Page, css: &str, index: u64, label: &str) -> R
     if v.as_bool() != Some(true) {
         bail!("option {index} ({label:?}) is not in the dropdown");
     }
-    Ok(())
+    Ok(Picked::Directly)
+}
+
+/// Where [`select_by_hand`] keeps the `<select>` it works on, for `jev-ref:`.
+const SELECT_PICK: &str = "5e4";
+
+/// A list longer than this is searched by typing rather than walked with
+/// the arrow keys.
+const ARROW_WALK_MAX: usize = 8;
+
+/// Choose option `index` of the native select at `css` with the mouse and
+/// keyboard; whether it is chosen afterwards. `false` for a select this
+/// doesn't fit (a list box, a multi-select, a disabled one or option).
+async fn select_by_hand(page: &Page, css: &str, index: usize) -> Result<bool> {
+    let read = format!(
+        "function() {{ {deep} {native} var h = __bsDeep({sel}); var s = h && __bsSelect(h.el); if (!s) return null; \
+         var p = globalThis.__bsPicks || (globalThis.__bsPicks = {{ order: [] }}); p[{key}] = [s]; \
+         return {{ cur: s.selectedIndex, list: s.multiple || s.size > 1, off: s.disabled, \
+           options: Array.from(s.options).map(function(o) {{ return [o.text.replace(/\\s+/g, ' ').trim(), o.disabled]; }}) }}; }}",
+        deep = jev::DEEP_FIND_JS,
+        native = NATIVE_SELECT_JS,
+        sel = js_str(css),
+        key = js_str(SELECT_PICK),
+    );
+    let v = iso_eval_function(page, &read).await?;
+    let options: Vec<(String, bool)> =
+        serde_json::from_value(v["options"].clone()).unwrap_or_default();
+    let cur = v["cur"].as_i64().unwrap_or(-1);
+    if v.is_null()
+        || v["list"].as_bool() != Some(false)
+        || v["off"].as_bool() != Some(false)
+        || options.get(index).is_none_or(|o| o.1)
+    {
+        return Ok(false);
+    }
+    if cur == index as i64 {
+        return Ok(true);
+    }
+    let target = format!("jev-ref:{SELECT_PICK}:0");
+    let aim = aim_at(page, &target).await?;
+    check_point(page, aim.at, Some(&target), "the dropdown").await?;
+    click_aim(page, &aim, MouseButton::Left).await?;
+    let human = crate::humanize::enabled();
+    // A moment for the list to open, and to read it.
+    let look = if human {
+        crate::humanize::with_rng(|r| r.uniform(250.0, 600.0))
+    } else {
+        60.0
+    };
+    crate::humanize::pause(look).await;
+    let enabled_between = |lo: i64, hi: i64| {
+        options
+            .iter()
+            .enumerate()
+            .filter(|(i, o)| (*i as i64) > lo && (*i as i64) <= hi && !o.1)
+            .count()
+    };
+    let (presses, key) = if index as i64 > cur {
+        (enabled_between(cur, index as i64), "ArrowDown")
+    } else {
+        (enabled_between(index as i64 - 1, cur - 1), "ArrowUp")
+    };
+    let prefix = (presses > ARROW_WALK_MAX)
+        .then(|| typeahead_prefix(&options, index))
+        .flatten();
+    if let Some(prefix) = prefix {
+        type_chars(page, &prefix, 0).await?;
+    } else {
+        for i in 0..presses {
+            if i > 0 {
+                let gap = if human {
+                    crate::humanize::with_rng(|r| r.log_normal(120.0, 0.3).clamp(60.0, 300.0))
+                } else {
+                    20.0
+                };
+                crate::humanize::pause(gap).await;
+            }
+            dispatch_key(page, key).await?;
+        }
+    }
+    crate::humanize::pause(if human {
+        crate::humanize::with_rng(|r| r.uniform(120.0, 300.0))
+    } else {
+        20.0
+    })
+    .await;
+    dispatch_key(page, "Enter").await?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let now = iso_eval_function(
+        page,
+        &format!(
+            "function() {{ var s = ((globalThis.__bsPicks || {{}})[{key}] || [])[0]; return s ? s.selectedIndex : null; }}",
+            key = js_str(SELECT_PICK)
+        ),
+    )
+    .await?;
+    if now.as_i64() == Some(index as i64) {
+        return Ok(true);
+    }
+    // Leave the list closed for the direct path.
+    dispatch_key(page, "Escape").await.ok();
+    Ok(false)
+}
+
+/// The shortest start of option `index`'s text (up to 8 characters) that
+/// no other enabled option starts with, so typing it in the open list lands
+/// on that option; `None` when there is none.
+fn typeahead_prefix(options: &[(String, bool)], index: usize) -> Option<String> {
+    let want = options.get(index)?.0.to_lowercase();
+    let chars: Vec<char> = want.chars().collect();
+    (1..=chars.len().min(8)).find_map(|n| {
+        let prefix: String = chars[..n].iter().collect();
+        let clash = options
+            .iter()
+            .enumerate()
+            .any(|(i, o)| i != index && !o.1 && o.0.to_lowercase().starts_with(&prefix));
+        (!clash
+            && !prefix.trim().is_empty()
+            && prefix.chars().all(|c| key_def(&c.to_string()).is_some()))
+        .then_some(prefix)
+    })
 }
 
 /// Sets `__bsSelect(el)`: the native `<select>` an element stands for (the
@@ -3915,6 +4069,8 @@ struct Choice {
     chosen: Option<String>,
     /// The options the dropdown showed.
     options: Vec<String>,
+    /// A native select set directly, because choosing by hand didn't take.
+    direct: bool,
 }
 
 /// Pick `want` in the dropdown at `css`, or with `want` `None` only list its
@@ -3949,9 +4105,9 @@ async fn radio_options(page: &Page, css: &str) -> Result<Option<Vec<String>>> {
 /// check that it is now the selected one.
 async fn pick_radio(page: &Page, i: usize, label: &str, option: &str) -> Result<()> {
     let target = format!("jev-ref:{RADIO_TARGETS}:{i}");
-    let at = element_center(page, &target).await?;
-    check_point(page, at, Some(&target), label).await?;
-    page.click(Point::new(at.0, at.1))
+    let aim = aim_at(page, &target).await?;
+    check_point(page, aim.at, Some(&target), label).await?;
+    click_aim(page, &aim, MouseButton::Left)
         .await
         .with_context(|| format!("choosing {option:?} in {label}"))?;
     let checked = format!(
@@ -3976,6 +4132,7 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) 
             return Ok(Choice {
                 chosen: None,
                 options: opts,
+                direct: false,
             });
         };
         let i = pick_option(&opts, want).ok_or_else(|| {
@@ -3988,6 +4145,7 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) 
         return Ok(Choice {
             chosen: Some(opts[i].clone()),
             options: opts,
+            direct: false,
         });
     }
     if let Some(opts) = native_options(page, css).await? {
@@ -3995,6 +4153,7 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) 
             return Ok(Choice {
                 chosen: None,
                 options: opts,
+                direct: false,
             });
         };
         let i = pick_option(&opts, want).ok_or_else(|| {
@@ -4003,19 +4162,21 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) 
                 option_list(&opts)
             )
         })?;
-        set_select_option(page, css, i as u64, &opts[i]).await?;
+        let picked = set_select_option(page, css, i as u64, &opts[i]).await?;
         return Ok(Choice {
             chosen: Some(opts[i].clone()),
             options: opts,
+            direct: picked == Picked::Directly,
         });
     }
-    let ((x, y), opener) = opening_point(page, css).await?;
-    check_point(page, (x, y), Some(&opener), label).await?;
+    let opener = opening_point(page, css).await?;
+    let (x, y) = opener.at;
+    check_point(page, opener.at, opener.css.as_deref(), label).await?;
     let mark = MARK_SHOWING_JS
         .replace("@@DEEP@@", jev::DEEP_FIND_JS)
         .replace("@@SEL@@", &js_str(css));
     iso_eval_function(page, &mark).await.ok();
-    page.click(Point::new(x, y))
+    click_aim(page, &opener, MouseButton::Left)
         .await
         .with_context(|| format!("opening {label}"))?;
     let mut opts = shown_options(page, css, want, 1_000).await;
@@ -4025,7 +4186,7 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) 
         opts = shown_options(page, css, want, 300).await;
         if opts.is_empty() {
             iso_eval_function(page, &mark).await.ok();
-            page.click(Point::new(x, y))
+            click_aim(page, &opener, MouseButton::Left)
                 .await
                 .with_context(|| format!("opening {label}"))?;
             opts = shown_options(page, css, want, 1_000).await;
@@ -4046,6 +4207,7 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) 
         return Ok(Choice {
             chosen: None,
             options: opts,
+            direct: false,
         });
     };
     // What showed before typing, for the error when typing filters it all out.
@@ -4084,10 +4246,10 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) 
         );
     };
     let opt = format!("jev-ref:{OPTION_PICKS}:{i}");
-    let at = settled_center(page, &opt).await?;
+    let aim = settled_aim(page, &opt).await?;
     let what = format!("the option {:?}", opts[i]);
-    check_point(page, at, Some(&opt), &what).await?;
-    page.click(Point::new(at.0, at.1))
+    check_point(page, aim.at, Some(&opt), &what).await?;
+    click_aim(page, &aim, MouseButton::Left)
         .await
         .with_context(|| format!("clicking {what}"))?;
     // A list that picks several (a multi-select) stays open after a pick,
@@ -4101,6 +4263,7 @@ async fn choose_option(page: &Page, css: &str, label: &str, want: Option<&str>) 
     Ok(Choice {
         chosen: Some(opts[i].clone()),
         options: opts,
+        direct: false,
     })
 }
 
@@ -4111,7 +4274,9 @@ async fn close_list(page: &Page, at: (f64, f64)) {
     dispatch_key(page, "Escape").await.ok();
     tokio::time::sleep(Duration::from_millis(150)).await;
     if options_showing(page).await {
-        page.click(Point::new(at.0, at.1)).await.ok();
+        click_aim(page, &Aim::point(at), MouseButton::Left)
+            .await
+            .ok();
     }
 }
 
@@ -4154,47 +4319,54 @@ async fn clear_focused(page: &Page) {
     }
 }
 
-/// Where to click to open a dropdown: the element's center, or when the
-/// element is off the screen or a sliver (a search input parked off screen
-/// or a few pixels wide until the dropdown has focus), the center of the
-/// nearest box around it that is on the screen. Returns the point and a
-/// reference to the box, for the covered check.
-async fn opening_point(page: &Page, css: &str) -> Result<((f64, f64), String)> {
+/// Where to click to open a dropdown: the element, or when the element is
+/// off the screen or a sliver (a search input parked off screen or a few
+/// pixels wide until the dropdown has focus), the nearest box around it
+/// that is on the screen, with a reference to the box for the covered check.
+async fn opening_point(page: &Page, css: &str) -> Result<Aim> {
+    // Brought into view the way a click's target is; a sliver that can't
+    // be measured is scrolled to below.
+    let _ = element_rect(page, css).await;
     let decl = format!(
         "function() {{ {deep} var h = __bsDeep({sel}); if (!h) return null; \
-         h.el.scrollIntoView({{block:'center',inline:'nearest',behavior:'instant'}}); h = __bsDeep({sel}); \
          var ok = function(r) {{ return r.width >= 4 && r.height >= 4 && r.right > 0 && r.bottom > 0 \
            && r.left < innerWidth && r.top < innerHeight; }}; \
+         if (!ok(h.el.getBoundingClientRect())) {{ \
+           h.el.scrollIntoView({{block:'center',inline:'nearest',behavior:'instant'}}); h = __bsDeep({sel}); }} \
          for (var n = h.el, i = 0; n && n.getBoundingClientRect && i < 4; n = n.parentElement, i++) {{ \
            var r = n.getBoundingClientRect(); \
            if (ok(r)) {{ var store = globalThis.__bsPicks || (globalThis.__bsPicks = {{ order: [] }}); \
              store[{key}] = [n]; \
-             return [h.ox + r.left + r.width / 2, h.oy + r.top + r.height / 2]; }} }} \
+             return [h.ox + r.left, h.oy + r.top, r.width, r.height]; }} }} \
          return null; }}",
         deep = jev::DEEP_FIND_JS,
         sel = js_str(css),
         key = js_str(OPENER_PICK),
     );
     let v = iso_eval_function(page, &decl).await?;
-    match v.as_array().map(|a| (a[0].as_f64(), a[1].as_f64())) {
-        Some((Some(x), Some(y))) => Ok(((x, y), format!("jev-ref:{OPENER_PICK}:0"))),
-        _ => Ok((element_center(page, css).await?, css.to_string())),
+    let n = |i: usize| v.get(i).and_then(Value::as_f64);
+    match (n(0), n(1), n(2), n(3)) {
+        (Some(x), Some(y), Some(w), Some(h)) => Ok(Aim::of(
+            Rect { x, y, w, h },
+            format!("jev-ref:{OPENER_PICK}:0"),
+        )),
+        _ => aim_at(page, css).await,
     }
 }
 
-/// An element's center once it stops moving: a menu that grows or slides
-/// in moves its options for a few hundred milliseconds, and some (such as
-/// Material UI's) ignore a click until it has finished. Waits up to a
-/// second.
-async fn settled_center(page: &Page, css: &str) -> Result<(f64, f64)> {
+/// Where to click an element once it stops moving: a menu that grows or
+/// slides in moves its options for a few hundred milliseconds, and some
+/// (such as Material UI's) ignore a click until it has finished. Waits up
+/// to a second.
+async fn settled_aim(page: &Page, css: &str) -> Result<Aim> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(1_000);
-    let mut last = element_center(page, css).await?;
+    let mut last = element_rect(page, css).await?;
     loop {
         tokio::time::sleep(Duration::from_millis(80)).await;
-        let now = element_center(page, css).await?;
-        let still = (now.0 - last.0).abs() < 0.5 && (now.1 - last.1).abs() < 0.5;
+        let now = element_rect(page, css).await?;
+        let still = (now.x - last.x).abs() < 0.5 && (now.y - last.y).abs() < 0.5;
         if still || tokio::time::Instant::now() >= deadline {
-            return Ok(now);
+            return Ok(Aim::of(now, css.to_string()));
         }
         last = now;
     }
@@ -4330,9 +4502,9 @@ async fn current_url_title(page: &Page) -> Option<(String, String)> {
 /// Click an element's center through trusted CDP input, naming `label` in
 /// errors — the shared path of `act`'s element clicks.
 async fn click_label(page: &Page, css: &str, label: &str) -> Result<()> {
-    let (x, y) = element_center(page, css).await?;
-    check_point(page, (x, y), Some(css), label).await?;
-    page.click(Point::new(x, y))
+    let aim = aim_at(page, css).await?;
+    check_point(page, aim.at, Some(css), label).await?;
+    click_aim(page, &aim, MouseButton::Left)
         .await
         .with_context(|| format!("clicking {label}"))?;
     Ok(())
@@ -4444,9 +4616,11 @@ struct Typed {
     set: bool,
 }
 
-/// Optionally clear a field, focus and click it, and type `text` into it:
-/// the shared path of the `type` tool and `act`'s value typing. The click
-/// is best effort (a field can be focusable but covered); focus is not.
+/// Optionally clear a field, focus it by clicking it, and type `text` into
+/// it: the shared path of the `type` tool and `act`'s value typing. The
+/// click is best effort (a field can be focusable but covered); when it
+/// leaves focus elsewhere the field is focused directly, and focus is not
+/// best effort.
 /// Date, time, range and color inputs take no typed text (the browser
 /// splits a date into boxes whose order depends on the locale, and a range
 /// has no text at all), so their value is set the way the page's own
@@ -4459,14 +4633,22 @@ async fn type_into(
     clear: bool,
     delay_ms: u64,
 ) -> Result<Typed> {
-    focus_element(page, css)
-        .await
-        .with_context(|| format!("locating {css}"))?;
-    if let Some(typed) = set_special_value(page, css, text).await? {
-        return Ok(typed);
+    if is_special_input(page, css).await {
+        focus_element(page, css)
+            .await
+            .with_context(|| format!("locating {css}"))?;
+        if let Some(typed) = set_special_value(page, css, text).await? {
+            return Ok(typed);
+        }
     }
-    if let Ok((x, y)) = element_center(page, css).await {
-        page.click(Point::new(x, y)).await.ok();
+    // Focus comes from the click's mousedown, as a person's does.
+    if let Ok(aim) = aim_at(page, css).await {
+        click_aim(page, &aim, MouseButton::Left).await.ok();
+    }
+    if !has_focus(page, css).await {
+        focus_element(page, css)
+            .await
+            .with_context(|| format!("locating {css}"))?;
     }
     if clear {
         clear_field(page, css).await;
@@ -4586,6 +4768,39 @@ async fn clear_typed_marks(page: &Page) {
 /// date field whose visible boxes stand in front of a hidden input), the
 /// page's own select all and delete clear it: Control+A and Backspace as
 /// keys, which those widgets handle as they would for a person. Best effort.
+/// Whether `css` is an input [`set_special_value`] sets rather than types into.
+async fn is_special_input(page: &Page, css: &str) -> bool {
+    let decl = format!(
+        "function() {{ {deep} const h = __bsDeep({sel}); \
+         return !!h && h.el.tagName === 'INPUT' && ['date', 'time', 'datetime-local', 'month', 'week', 'range', 'color'].indexOf(h.el.type) >= 0; }}",
+        deep = jev::DEEP_FIND_JS,
+        sel = js_str(css),
+    );
+    iso_eval_function(page, &decl)
+        .await
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Whether the element at `css` (or something inside it, such as a rich
+/// editor's text area) has keyboard focus.
+async fn has_focus(page: &Page, css: &str) -> bool {
+    let decl = format!(
+        "function() {{ {deep} const h = __bsDeep({sel}); if (!h) return false; \
+         let a = h.el.ownerDocument.activeElement; \
+         while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement; \
+         return !!a && (a === h.el || h.el.contains(a) || (h.el.shadowRoot && h.el.shadowRoot.contains(a))); }}",
+        deep = jev::DEEP_FIND_JS,
+        sel = js_str(css),
+    );
+    iso_eval_function(page, &decl)
+        .await
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 async fn clear_field(page: &Page, css: &str) {
     let decl = format!(
         "function() {{ {deep} const h = __bsDeep({sel}); if (!h) return false; const el = h.el; \
@@ -4630,13 +4845,18 @@ async fn caret_to_end(page: &Page, css: &str) {
 }
 
 /// Type `text` into whatever has focus. Characters on the US keyboard go in
-/// as real key presses, like a person typing; anything else (accents, CJK,
-/// emoji) goes in through `Input.insertText`, the way an IME commits it,
-/// since there is no key to press for it.
+/// as real key presses, like a person typing, with Shift held for shifted
+/// ones; anything else (accents, CJK, emoji) goes in through
+/// `Input.insertText`, the way an IME commits it, since there is no key to
+/// press for it. Humanized, keys follow a person's rhythm (see
+/// [`crate::humanize::typing_plan`]) and text over 60 characters is pasted.
 async fn type_chars(page: &Page, text: &str, delay_ms: u64) -> Result<()> {
+    if crate::humanize::enabled() {
+        return type_like_a_person(page, text, delay_ms).await;
+    }
     for ch in text.chars() {
         let key = ch.to_string();
-        if USKEYBOARD_LAYOUT.iter().any(|k| k.key == key) {
+        if key_def(&key).is_some() {
             dispatch_key(page, &key).await?;
         } else {
             page.execute(InsertTextParams::new(key))
@@ -4648,6 +4868,101 @@ async fn type_chars(page: &Page, text: &str, delay_ms: u64) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn type_like_a_person(page: &Page, text: &str, delay_ms: u64) -> Result<()> {
+    use crate::humanize::{self, KeySpec, KeyStep};
+    if humanize::should_paste(text) {
+        return paste(page, text).await;
+    }
+    let chars: Vec<(String, Option<&'static KeyDefinition>)> = text
+        .chars()
+        .map(|c| {
+            let k = c.to_string();
+            let def = key_def(&k);
+            (k, def)
+        })
+        .collect();
+    let specs: Vec<KeySpec> = text
+        .chars()
+        .zip(&chars)
+        .map(|(ch, (_, def))| KeySpec {
+            ch,
+            code: def.map(|d| d.code),
+            shift: def.is_some_and(|d| needs_shift(d.key)),
+        })
+        .collect();
+    let shift = key_def("Shift").ok_or_else(|| anyhow!("no Shift key in the layout"))?;
+    let plan = humanize::with_rng(|r| humanize::typing_plan(&specs, delay_ms as f64, r));
+    let start = tokio::time::Instant::now();
+    let mut mods = 0;
+    for e in plan {
+        tokio::time::sleep_until(start + Duration::from_secs_f64(e.at_ms / 1000.0)).await;
+        match e.step {
+            KeyStep::ShiftDown => {
+                mods |= 8;
+                key_event(page, DispatchKeyEventType::RawKeyDown, shift, mods, None).await?;
+            }
+            KeyStep::ShiftUp => {
+                mods &= !8;
+                key_event(page, DispatchKeyEventType::KeyUp, shift, mods, None).await?;
+            }
+            KeyStep::Down(i) => match chars[i] {
+                (_, Some(def)) => {
+                    let text = key_text(def, mods);
+                    let kind = if text.is_some() {
+                        DispatchKeyEventType::KeyDown
+                    } else {
+                        DispatchKeyEventType::RawKeyDown
+                    };
+                    key_event(page, kind, def, mods, text).await?;
+                }
+                (ref k, None) => {
+                    page.execute(InsertTextParams::new(k.clone()))
+                        .await
+                        .context("Input.insertText")?;
+                }
+            },
+            KeyStep::Up(i) => {
+                if let (_, Some(def)) = chars[i] {
+                    key_event(page, DispatchKeyEventType::KeyUp, def, mods, None).await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Paste `text` as a person would: Control down, V, the text, then both up.
+/// The V key goes without its key code: with one, Chrome runs its own paste
+/// of the clipboard it keeps for every session, which would put another
+/// session's text in the field.
+async fn paste(page: &Page, text: &str) -> Result<()> {
+    use crate::humanize;
+    let ctrl = key_def("Control").ok_or_else(|| anyhow!("no Control key in the layout"))?;
+    let v = |kind| {
+        DispatchKeyEventParams::builder()
+            .r#type(kind)
+            .key("v")
+            .code("KeyV")
+            .modifiers(2)
+            .build()
+            .map_err(|e| anyhow!("key event: {e}"))
+    };
+    key_event(page, DispatchKeyEventType::RawKeyDown, ctrl, 2, None).await?;
+    humanize::pause(humanize::with_rng(|r| r.uniform(60.0, 140.0))).await;
+    page.execute(v(DispatchKeyEventType::RawKeyDown)?)
+        .await
+        .context("Input.dispatchKeyEvent")?;
+    page.execute(InsertTextParams::new(text))
+        .await
+        .context("Input.insertText")?;
+    humanize::pause(humanize::with_rng(humanize::key_hold)).await;
+    page.execute(v(DispatchKeyEventType::KeyUp)?)
+        .await
+        .context("Input.dispatchKeyEvent")?;
+    humanize::pause(humanize::with_rng(|r| r.uniform(30.0, 80.0))).await;
+    key_event(page, DispatchKeyEventType::KeyUp, ctrl, 0, None).await
 }
 
 /// Accepts JavaScript dialogs (alert, confirm, prompt, beforeunload) on a
@@ -4686,27 +5001,215 @@ impl Drop for DialogGuard {
     }
 }
 
-/// Center of an element in viewport CSS pixels, after scrolling it into view.
-/// Finds it through open shadow roots and same-origin iframes too (see
-/// [`jev::DEEP_FIND_JS`]). Evaluated in an isolated world so it works
-/// regardless of stealth.
-async fn element_center(page: &Page, selector: &str) -> Result<(f64, f64)> {
+/// How [`measure`] treats an element that isn't in full view.
+#[derive(Clone, Copy, PartialEq)]
+enum Reveal {
+    /// Leave the page where it is.
+    Measure,
+    /// Scroll it to the middle unless it is in full view and uncovered.
+    IfHidden,
+    /// Always scroll it to the middle.
+    Center,
+}
+
+/// An element's box as [`measure`] read it.
+#[derive(Clone, Copy)]
+struct Measured {
+    rect: Rect,
+    /// The viewport's size.
+    view: (f64, f64),
+    /// In full view, and what is at its center is it.
+    shown: bool,
+    /// Inside a scrolling box or a frame, which the page's wheel doesn't scroll.
+    inner: bool,
+}
+
+/// An element's box in viewport CSS pixels, through open shadow roots and
+/// same-origin iframes too (see [`jev::DEEP_FIND_JS`]). Evaluated in an
+/// isolated world so it works regardless of stealth.
+async fn measure(page: &Page, selector: &str, reveal: Reveal) -> Result<Measured> {
+    let mode = match reveal {
+        Reveal::Measure => "measure",
+        Reveal::IfHidden => "reveal",
+        Reveal::Center => "center",
+    };
     let decl = format!(
-        "function() {{ {deep} let h = __bsDeep({sel}); if (!h) return null; \
-         h.el.scrollIntoView({{block:'center',inline:'center',behavior:'instant'}}); h = __bsDeep({sel}); \
-         const r = h.el.getBoundingClientRect(); if (!r.width && !r.height) return null; \
-         return [h.ox + r.left + r.width/2, h.oy + r.top + r.height/2]; }}",
+        "function() {{ {deep} var sel = {sel}; var h = __bsDeep(sel); if (!h) return null; \
+         var shown = function(h) {{ var el = h.el, r = el.getBoundingClientRect(); if (!r.width && !r.height) return false; \
+           var w = el.ownerDocument.defaultView || window; \
+           if (r.left < 0 || r.top < 0 || r.right > w.innerWidth || r.bottom > w.innerHeight) return false; \
+           var x = h.ox + r.left, y = h.oy + r.top; \
+           if (x < 0 || y < 0 || x + r.width > innerWidth || y + r.height > innerHeight) return false; \
+           var root = el.getRootNode(); \
+           var at = (root.elementFromPoint ? root : el.ownerDocument).elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); \
+           return !!at && (at === el || el.contains(at) || at.contains(el)); }}; \
+         var mode = {mode:?}; \
+         if (mode === 'center' || (mode === 'reveal' && !shown(h))) {{ \
+           h.el.scrollIntoView({{block:'center',inline:'center',behavior:'instant'}}); h = __bsDeep(sel); if (!h) return null; }} \
+         var r = h.el.getBoundingClientRect(); if (!r.width && !r.height) return null; \
+         var doc = h.el.ownerDocument, inner = doc !== document; \
+         var up = function(n) {{ return n.parentElement || (n.getRootNode && n.getRootNode().host) || null; }}; \
+         for (var n = up(h.el); n && !inner && n !== doc.documentElement && n !== doc.body; n = up(n)) {{ \
+           var s = getComputedStyle(n); \
+           if (/(auto|scroll|overlay)/.test(s.overflowY + ' ' + s.overflowX) \
+             && (n.scrollHeight > n.clientHeight + 1 || n.scrollWidth > n.clientWidth + 1)) inner = true; }} \
+         return [h.ox + r.left, h.oy + r.top, r.width, r.height, innerWidth, innerHeight, shown(h), inner]; }}",
         deep = jev::DEEP_FIND_JS,
-        sel = serde_json::to_string(selector).unwrap_or_else(|_| "''".to_string())
+        sel = js_str(selector),
     );
     let v = iso_eval_function(page, &decl).await?;
-    let arr = v
+    let a = v
         .as_array()
-        .filter(|a| a.len() == 2)
+        .filter(|a| a.len() == 8)
         .ok_or_else(|| anyhow!("element `{selector}` not found or not visible"))?;
-    let x = arr[0].as_f64().ok_or_else(|| anyhow!("bad x coord"))?;
-    let y = arr[1].as_f64().ok_or_else(|| anyhow!("bad y coord"))?;
-    Ok((x, y))
+    let n = |i: usize| a[i].as_f64().unwrap_or(0.0);
+    Ok(Measured {
+        rect: Rect {
+            x: n(0),
+            y: n(1),
+            w: n(2),
+            h: n(3),
+        },
+        view: (n(4), n(5)),
+        shown: a[6].as_bool().unwrap_or(false),
+        inner: a[7].as_bool().unwrap_or(false),
+    })
+}
+
+/// Most wheel notches spent bringing an element into view before it is
+/// scrolled there directly.
+const MAX_WHEEL_NOTCHES: usize = 40;
+
+/// An element's box in viewport CSS pixels, brought into view first when it
+/// isn't in full view (or something covers its center). Humanized, the
+/// page is scrolled with the mouse wheel until the element is in the middle
+/// 60% of the screen, the way a person scrolls to something; an element in
+/// a scrolling box or a frame, or one the wheel doesn't bring closer, is
+/// scrolled to directly.
+async fn element_rect(page: &Page, selector: &str) -> Result<Rect> {
+    // Inside a frame the frame's own scrolling moves the page around it.
+    if crate::frames::current().is_some() {
+        return Ok(measure(page, selector, Reveal::Center).await?.rect);
+    }
+    if !crate::humanize::enabled() {
+        return Ok(measure(page, selector, Reveal::IfHidden).await?.rect);
+    }
+    let mut m = measure(page, selector, Reveal::Measure).await?;
+    if m.shown {
+        return Ok(m.rect);
+    }
+    let sideways = m.rect.x < 0.0 || m.rect.x + m.rect.w > m.view.0;
+    if m.inner || sideways {
+        return Ok(measure(page, selector, Reveal::IfHidden).await?.rect);
+    }
+    let middle = |m: &Measured| {
+        let cy = m.rect.y + m.rect.h / 2.0;
+        cy >= 0.2 * m.view.1 && cy <= 0.8 * m.view.1
+    };
+    if !middle(&m) {
+        let at = crate::humanize::pointer_over_page(page, None).await?;
+        let mut stalls = 0;
+        for _ in 0..MAX_WHEEL_NOTCHES {
+            if middle(&m) {
+                break;
+            }
+            let up = m.rect.y + m.rect.h / 2.0 < m.view.1 / 2.0;
+            crate::humanize::wheel(page, at, 0.0, if up { -100.0 } else { 100.0 }).await?;
+            crate::humanize::pause(crate::humanize::with_rng(crate::humanize::wheel_gap)).await;
+            let now = measure(page, selector, Reveal::Measure).await?;
+            stalls = if (now.rect.y - m.rect.y).abs() < 0.5 {
+                stalls + 1
+            } else {
+                0
+            };
+            m = now;
+            if stalls >= 3 {
+                break;
+            }
+        }
+        // A smooth scroll keeps moving for a moment after the last notch.
+        for _ in 0..12 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let now = measure(page, selector, Reveal::Measure).await?;
+            let still = (now.rect.y - m.rect.y).abs() < 0.5 && (now.rect.x - m.rect.x).abs() < 0.5;
+            m = now;
+            if still {
+                break;
+            }
+        }
+    }
+    if m.shown {
+        return Ok(m.rect);
+    }
+    Ok(measure(page, selector, Reveal::IfHidden).await?.rect)
+}
+
+/// Center of an element in viewport CSS pixels, after bringing it into
+/// view (see [`element_rect`]).
+async fn element_center(page: &Page, selector: &str) -> Result<(f64, f64)> {
+    Ok(element_rect(page, selector).await?.center())
+}
+
+/// Where a click lands: a person's aim inside the element (around its
+/// center, in its middle 70%) when humanized, else its center; with the
+/// element's width for the cursor's path and the element to re-measure on
+/// the way.
+struct Aim {
+    at: (f64, f64),
+    w: f64,
+    center: (f64, f64),
+    css: Option<String>,
+}
+
+impl Aim {
+    fn of(r: Rect, css: String) -> Self {
+        let at = if crate::humanize::enabled() {
+            crate::humanize::with_rng(|g| crate::humanize::aim(r, g))
+        } else {
+            r.center()
+        };
+        Self {
+            at,
+            w: r.w,
+            center: r.center(),
+            css: Some(css),
+        }
+    }
+
+    /// A bare point, such as the click tool's x and y.
+    fn point(at: (f64, f64)) -> Self {
+        Self {
+            at,
+            w: 20.0,
+            center: at,
+            css: None,
+        }
+    }
+}
+
+/// Bring an element into view and aim at it.
+async fn aim_at(page: &Page, css: &str) -> Result<Aim> {
+    Ok(Aim::of(element_rect(page, css).await?, css.to_string()))
+}
+
+/// Re-measures the element `aim` is at, for the end of the cursor's path:
+/// how far it moved since.
+fn refine(page: &Page, aim: &Aim) -> Option<crate::humanize::Refine> {
+    let css = aim.css.clone()?;
+    let (page, was) = (page.clone(), aim.center);
+    Some(Box::pin(async move {
+        let now = measure(&page, &css, Reveal::Measure)
+            .await
+            .ok()?
+            .rect
+            .center();
+        Some((now.0 - was.0, now.1 - was.1))
+    }))
+}
+
+/// Click `aim` with `button`: the one way the tools click with the mouse.
+async fn click_aim(page: &Page, aim: &Aim, button: MouseButton) -> Result<()> {
+    crate::humanize::click(page, aim.at, aim.w, button, refine(page, aim)).await
 }
 
 /// An element's box in document coordinates (for a screenshot clip), after
@@ -5297,8 +5800,18 @@ async fn touch_event(page: &Page, kind: &'static str, point: Option<(f64, f64)>)
 /// touch and pointer events (`pointerType: "touch"`) and the click a tap
 /// makes.
 async fn touch_tap(page: &Page, at: (f64, f64)) -> Result<()> {
+    use crate::humanize;
+    let human = humanize::enabled();
+    if human {
+        humanize::pause(humanize::with_rng(humanize::press_pause)).await;
+    }
     touch_event(page, "touchStart", Some(at)).await?;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let held = if human {
+        humanize::with_rng(humanize::hold)
+    } else {
+        50.0
+    };
+    humanize::pause(held).await;
     touch_event(page, "touchEnd", None).await
 }
 
@@ -5311,6 +5824,19 @@ async fn touch_swipe(
     to: (f64, f64),
     duration_ms: u64,
 ) -> Result<()> {
+    use crate::humanize;
+    if humanize::enabled() {
+        // An uneven pace, as a finger has, but no curve: a swipe's speed at
+        // the end is what flings the page.
+        let path = humanize::with_rng(|r| humanize::swipe_path(from, to, duration_ms as f64, r));
+        humanize::pause(humanize::with_rng(humanize::press_pause)).await;
+        touch_event(page, "touchStart", Some(from)).await?;
+        for s in path {
+            humanize::pause(s.wait_ms).await;
+            touch_event(page, "touchMove", Some((s.x, s.y))).await?;
+        }
+        return touch_event(page, "touchEnd", None).await;
+    }
     let steps = (duration_ms / 16).clamp(5, 120);
     touch_event(page, "touchStart", Some(from)).await?;
     for i in 1..=steps {
@@ -5322,63 +5848,12 @@ async fn touch_swipe(
     touch_event(page, "touchEnd", None).await
 }
 
-/// One CDP mouse event at a viewport point.
-async fn mouse_event(
-    page: &Page,
-    kind: DispatchMouseEventType,
-    (x, y): (f64, f64),
-    button: MouseButton,
-    buttons: i64,
-) -> Result<()> {
-    let params = DispatchMouseEventParams::builder()
-        .r#type(kind)
-        .x(x)
-        .y(y)
-        .button(button)
-        .buttons(buttons)
-        .click_count(1)
-        .build()
-        .map_err(|e| anyhow!("mouse event: {e}"))?;
-    page.execute(params)
-        .await
-        .context("Input.dispatchMouseEvent")?;
-    Ok(())
-}
-
-/// Right-click a point with trusted input, opening the page's context menu
-/// handler (`act`'s right_click).
-async fn right_click(page: &Page, at: (f64, f64)) -> Result<()> {
-    mouse_event(
-        page,
-        DispatchMouseEventType::MouseMoved,
-        at,
-        MouseButton::None,
-        0,
-    )
-    .await?;
-    mouse_event(
-        page,
-        DispatchMouseEventType::MousePressed,
-        at,
-        MouseButton::Right,
-        2,
-    )
-    .await?;
-    mouse_event(
-        page,
-        DispatchMouseEventType::MouseReleased,
-        at,
-        MouseButton::Right,
-        0,
-    )
-    .await
-}
-
 /// Drag from one point to another with trusted input (`act`'s drag). Mouse
-/// down, a few moves and mouse up cover pointer-driven drag libraries; an
-/// HTML5 drag-and-drop is intercepted by Chrome and replayed onto the target
-/// as drag events, the way Playwright's dragTo does it.
+/// down, moves and mouse up cover pointer-driven drag libraries; an HTML5
+/// drag-and-drop is intercepted by Chrome and replayed onto the target as
+/// drag events, the way Playwright's dragTo does it.
 async fn drag(page: &Page, from: (f64, f64), to: (f64, f64)) -> Result<()> {
+    use crate::humanize::{self, mouse_event};
     page.execute(SetInterceptDragsParams::new(true))
         .await
         .context("Input.setInterceptDrags")?;
@@ -5387,33 +5862,33 @@ async fn drag(page: &Page, from: (f64, f64), to: (f64, f64)) -> Result<()> {
         .await
         .context("listening for drags")?;
     let result = async {
-        mouse_event(
-            page,
-            DispatchMouseEventType::MouseMoved,
-            from,
-            MouseButton::None,
-            0,
-        )
-        .await?;
+        let at = humanize::move_to(page, from, 40.0, None).await?;
+        let human = humanize::enabled();
+        if human {
+            humanize::pause(humanize::with_rng(humanize::press_pause)).await;
+        }
         mouse_event(
             page,
             DispatchMouseEventType::MousePressed,
-            from,
+            at,
             MouseButton::Left,
-            1,
         )
         .await?;
-        for i in 1..=5 {
-            let t = f64::from(i) / 5.0;
-            let at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
-            mouse_event(
-                page,
-                DispatchMouseEventType::MouseMoved,
-                at,
-                MouseButton::Left,
-                1,
-            )
-            .await?;
+        if human {
+            humanize::pause(humanize::with_rng(humanize::hold)).await;
+            humanize::move_to(page, to, 40.0, None).await?;
+        } else {
+            for i in 1..=5 {
+                let t = f64::from(i) / 5.0;
+                let at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+                mouse_event(
+                    page,
+                    DispatchMouseEventType::MouseMoved,
+                    at,
+                    MouseButton::None,
+                )
+                .await?;
+            }
         }
         let html5 = tokio::time::timeout(Duration::from_millis(250), intercepted.next())
             .await
@@ -5435,12 +5910,12 @@ async fn drag(page: &Page, from: (f64, f64), to: (f64, f64)) -> Result<()> {
                 .context("Input.dispatchDragEvent")?;
             }
         }
+        let end = humanize::cursor().unwrap_or(to);
         mouse_event(
             page,
             DispatchMouseEventType::MouseReleased,
-            to,
+            end,
             MouseButton::Left,
-            0,
         )
         .await
     }
@@ -5462,94 +5937,147 @@ async fn focus_element(page: &Page, selector: &str) -> Result<()> {
     Ok(())
 }
 
+/// The bit CDP's `modifiers` uses for each modifier key.
+const MODIFIERS: &[(&str, i64)] = &[("Alt", 1), ("Control", 2), ("Meta", 4), ("Shift", 8)];
+
+fn modifier_bit(name: &str) -> i64 {
+    MODIFIERS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or(0, |(_, b)| *b)
+}
+
+/// Whether a character is typed with Shift held on a US keyboard: capitals
+/// and the symbols above the digits and punctuation.
+fn needs_shift(key: &str) -> bool {
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => c.is_ascii_uppercase() || "~!@#$%^&*()_+{}|:\"<>?".contains(c),
+        _ => false,
+    }
+}
+
+/// A key on chromiumoxide's US keyboard layout, by its `key` value.
+fn key_def(key: &str) -> Option<&'static KeyDefinition> {
+    USKEYBOARD_LAYOUT.iter().find(|k| k.key == key)
+}
+
+/// A key event's `location`: the left or right one of a modifier pair, or
+/// the numpad, as `KeyboardEvent.location` reports it.
+fn key_location(code: &str) -> i64 {
+    match code {
+        "ShiftLeft" | "ControlLeft" | "AltLeft" | "MetaLeft" => 1,
+        "ShiftRight" | "ControlRight" | "AltRight" | "MetaRight" => 2,
+        c if c.starts_with("Numpad") => 3,
+        _ => 0,
+    }
+}
+
+/// One CDP key event for `def` with `modifiers` held; `text` is what a
+/// keyDown types.
+async fn key_event(
+    page: &Page,
+    kind: DispatchKeyEventType,
+    def: &KeyDefinition,
+    modifiers: i64,
+    text: Option<&str>,
+) -> Result<()> {
+    let mut ev = DispatchKeyEventParams::builder()
+        .r#type(kind)
+        .key(def.key)
+        .code(def.code)
+        .windows_virtual_key_code(def.key_code)
+        .modifiers(modifiers);
+    let location = key_location(def.code);
+    if location != 0 {
+        ev = ev.location(location);
+    }
+    if let Some(t) = text {
+        ev = ev.text(t);
+    }
+    page.execute(ev.build().map_err(|e| anyhow!("key event: {e}"))?)
+        .await
+        .context("Input.dispatchKeyEvent")?;
+    Ok(())
+}
+
+/// What a key types when pressed with `modifiers`: nothing for a shortcut
+/// (a modifier other than Shift) or a named key.
+fn key_text(def: &KeyDefinition, modifiers: i64) -> Option<&'static str> {
+    if modifiers & !8 != 0 {
+        return None;
+    }
+    def.text.or(if def.key.chars().count() == 1 {
+        Some(def.key)
+    } else {
+        None
+    })
+}
+
 /// Press a key at the page level (on whatever's focused) via CDP Input,
 /// looking the key up in chromiumoxide's US keyboard layout. Printable keys
 /// send `text` with a `keyDown`; named keys (Enter, Tab, Escape, ArrowDown…)
 /// use `rawKeyDown`. keyDown + keyUp are dispatched. A combination such as
 /// `Shift+Tab` or `Control+a` holds its modifiers down around the key; a
-/// lone `+` is still the plus key. `Space` names the space bar.
+/// lone `+` is still the plus key. `Space` names the space bar. A shifted
+/// character (`A`, `!`) is pressed with Shift held, as on a keyboard, and
+/// humanized, keys stay down for a moment.
 async fn dispatch_key(page: &Page, key: &str) -> Result<()> {
-    const MODIFIERS: &[(&str, i64)] = &[("Alt", 1), ("Control", 2), ("Meta", 4), ("Shift", 8)];
-    let (mods, key) = match key.rsplit_once('+') {
+    use crate::humanize;
+    let (mut mods, key) = match key.rsplit_once('+') {
         Some((mods, k))
             if !k.is_empty()
                 && !mods.is_empty()
-                && mods
-                    .split('+')
-                    .all(|m| MODIFIERS.iter().any(|(n, _)| *n == m)) =>
+                && mods.split('+').all(|m| modifier_bit(m) != 0) =>
         {
             (mods.split('+').collect::<Vec<_>>(), k)
         }
         _ => (Vec::new(), key),
     };
     let key = if key == "Space" { " " } else { key };
-    let def = USKEYBOARD_LAYOUT.iter().find(|k| k.key == key).ok_or_else(|| {
+    let def = key_def(key).ok_or_else(|| {
         anyhow!("unknown key `{key}` (use names like Enter, Tab, Escape, ArrowDown, Backspace, Space, a single char, or a combination like Shift+Tab)")
     })?;
-    let mask: i64 = mods
-        .iter()
-        .filter_map(|m| MODIFIERS.iter().find(|(n, _)| n == m).map(|(_, b)| *b))
-        .sum();
-    let modifier_event = |name: &str, kind: DispatchKeyEventType| {
-        let def = USKEYBOARD_LAYOUT.iter().find(|k| k.key == name);
-        let mut ev = DispatchKeyEventParams::builder()
-            .r#type(kind)
-            .key(name)
-            .modifiers(mask);
-        if let Some(d) = def {
-            ev = ev.code(d.code).windows_virtual_key_code(d.key_code);
-        }
-        ev.build().map_err(|e| anyhow!("modifier key: {e}"))
-    };
-    for m in &mods {
-        page.execute(modifier_event(m, DispatchKeyEventType::RawKeyDown)?)
-            .await
-            .context("Input.dispatchKeyEvent (modifier down)")?;
+    if mods.is_empty() && needs_shift(def.key) {
+        mods.push("Shift");
     }
-    // A modifier other than Shift turns a printable key into a shortcut, which
-    // must not also insert its character.
-    let shortcut = mask & !8 != 0;
-    let text: Option<&str> = if shortcut {
-        None
-    } else {
-        def.text.or(if def.key.chars().count() == 1 {
-            Some(def.key)
-        } else {
-            None
-        })
-    };
+    let mask: i64 = mods.iter().map(|m| modifier_bit(m)).sum();
+    let human = humanize::enabled();
+    let mut held = 0;
+    for m in &mods {
+        let d = key_def(m).ok_or_else(|| anyhow!("unknown modifier `{m}`"))?;
+        held |= modifier_bit(m);
+        key_event(page, DispatchKeyEventType::RawKeyDown, d, held, None)
+            .await
+            .context("modifier down")?;
+        if human {
+            humanize::pause(humanize::with_rng(|r| r.uniform(30.0, 80.0))).await;
+        }
+    }
+    let text = key_text(def, mask);
     let down_type = if text.is_some() {
         DispatchKeyEventType::KeyDown
     } else {
         DispatchKeyEventType::RawKeyDown
     };
-    let mut down = DispatchKeyEventParams::builder()
-        .r#type(down_type)
-        .key(def.key)
-        .code(def.code)
-        .windows_virtual_key_code(def.key_code)
-        .modifiers(mask);
-    if let Some(t) = text {
-        down = down.text(t);
+    key_event(page, down_type, def, mask, text)
+        .await
+        .context("key down")?;
+    if human {
+        humanize::pause(humanize::with_rng(humanize::key_hold)).await;
     }
-    page.execute(down.build().map_err(|e| anyhow!("key down: {e}"))?)
+    key_event(page, DispatchKeyEventType::KeyUp, def, mask, None)
         .await
-        .context("Input.dispatchKeyEvent (down)")?;
-    let up = DispatchKeyEventParams::builder()
-        .r#type(DispatchKeyEventType::KeyUp)
-        .key(def.key)
-        .code(def.code)
-        .windows_virtual_key_code(def.key_code)
-        .modifiers(mask)
-        .build()
-        .map_err(|e| anyhow!("key up: {e}"))?;
-    page.execute(up)
-        .await
-        .context("Input.dispatchKeyEvent (up)")?;
+        .context("key up")?;
     for m in mods.iter().rev() {
-        page.execute(modifier_event(m, DispatchKeyEventType::KeyUp)?)
+        let d = key_def(m).ok_or_else(|| anyhow!("unknown modifier `{m}`"))?;
+        if human {
+            humanize::pause(humanize::with_rng(|r| r.uniform(20.0, 60.0))).await;
+        }
+        held &= !modifier_bit(m);
+        key_event(page, DispatchKeyEventType::KeyUp, d, held, None)
             .await
-            .context("Input.dispatchKeyEvent (modifier up)")?;
+            .context("modifier up")?;
     }
     Ok(())
 }
@@ -5823,6 +6351,11 @@ fn tool_defs() -> Vec<Tool> {
                         "name",
                         &str_t,
                         "Reuse the open session with this name, or open one with the login saved under it; its login is saved under the name on takeover and close.",
+                    ),
+                    (
+                        "humanize",
+                        &bool_t,
+                        "Move, click, type and scroll like a person so bot detection that watches input passes: a curved cursor path with held buttons, a typing rhythm, dropdowns chosen with the keyboard, wheel scrolling. Default true; false is faster but detectable. Fixed for the session's life; reopening a named session with it set changes it.",
                     ),
                 ],
                 &[],

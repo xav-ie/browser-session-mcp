@@ -46,6 +46,10 @@ pub struct SessionRecord {
     /// session (not just the first) so screenshots and coordinates agree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewport: Option<Viewport>,
+    /// Opened as a phone or tablet. A User-Agent other than Chrome's sends
+    /// no client hints, so their `mobile` can't say it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mobile: bool,
     /// Throttling the attach guard applies to every tab of the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emulation: Option<Emulation>,
@@ -186,9 +190,12 @@ impl StateStore {
         .await;
     }
 
-    pub async fn set_viewport(&self, session_id: &str, viewport: Viewport) {
-        self.update(session_id, |rec| rec.viewport = Some(viewport))
-            .await;
+    pub async fn set_viewport(&self, session_id: &str, viewport: Viewport, mobile: bool) {
+        self.update(session_id, |rec| {
+            rec.viewport = Some(viewport);
+            rec.mobile = mobile;
+        })
+        .await;
     }
 
     pub async fn viewport(&self, session_id: &str) -> Option<Viewport> {
@@ -198,10 +205,9 @@ impl StateStore {
     /// Whether the session was opened with `useMobileUA`: it then emulates a
     /// phone, touch screen included.
     pub async fn is_mobile(&self, session_id: &str) -> bool {
-        self.get(session_id)
-            .await
-            .and_then(|rec| rec.user_agent_metadata)
-            .is_some_and(|m| m["mobile"] == true)
+        self.get(session_id).await.is_some_and(|rec| {
+            rec.mobile || rec.user_agent_metadata.is_some_and(|m| m["mobile"] == true)
+        })
     }
 
     pub async fn user_agent_override(&self, session_id: &str) -> Option<UaOverride> {
@@ -429,6 +435,7 @@ mod tests {
                 height: 600,
                 scale: 1.0,
             },
+            false,
         )
         .await;
         b.touch("BBB222").await;
