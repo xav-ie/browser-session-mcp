@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "browser-session guest grant",
+  "version": "0.1.0",
+  "description": "Let an agent drive one tab group in your own Chrome, within limits this extension enforces. Your cookies and logins never leave your machine.",
+  "minimum_chrome_version": "120",
+  "permissions": ["debugger", "tabs", "tabGroups", "storage", "webNavigation", "declarativeNetRequest", "sidePanel"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "side_panel": { "default_path": "panel.html" },
+  "action": { "default_title": "Guest grant" },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'"
+  }
+}

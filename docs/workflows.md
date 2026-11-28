@@ -2,10 +2,12 @@
 
 _[← Back to README](../README.md) · [Docs index](README.md)_
 
-Two flows that need more than a single tool call: handing a login to a human,
-and reusing cookies across sessions.
+Three flows that need more than a single tool call: handing a login to a
+human, driving a person's own Chrome through a guest grant, and reusing cookies
+across sessions.
 
 - [Human takeover](#human-takeover)
+- [Guest grant](#guest-grant)
 - [Saved cookie state](#saved-cookie-state)
 
 ## Human takeover
@@ -79,6 +81,151 @@ Security: the URL is a bearer credential (valid 30 minutes by default, `ttlMinut
 browser to open it *claims* it via an `HttpOnly` cookie — a leaked URL is
 useless once the real user has it, and only the claimant can hand back, take
 control or end it.
+
+## Guest grant
+
+A takeover brings a person's login into the operator's Chrome, where the
+operator's agent could misuse it once they hand back. A guest grant goes the
+other way: the person (the guest) lets the agent drive one tab group in
+**their own Chrome**, through a small extension they load themselves. Their
+cookies and logins never leave their machine, and every limit on the agent is
+enforced by that extension, in their browser, not by this server. The
+motivating case: a repo owner clicking through GitHub's settings to install or
+configure a GitHub App for you.
+
+```ts
+const { url, sessionId } = (
+  await tools.browser_session_mcp.request_guest_grant({
+    purpose: "Install the deploy bot on acme/api",
+    requester: "Ana from ops, via her agent",
+    allowedUrlPatterns: [
+      "https://github.com/apps/deploy-bot/*",
+      "https://github.com/organizations/acme/settings/installations*",
+    ],
+    startUrl: "https://github.com/apps/deploy-bot/installations/new",
+    ttlMinutes: 15, // default 15, at most 60
+    approvalMode: "ask", // default: the guest approves every click and Enter
+  })
+).structuredContent;
+// → send `url` to the guest. sessionId is "guest-<token>".
+
+// Once they accept (until then these fail with "hasn't accepted yet"):
+await tools.browser_session_mcp.take_snapshot({ sessionId });
+await tools.browser_session_mcp.click({ sessionId, selector: 'button "Install"' }); // waits for their Allow
+await tools.browser_session_mcp.revoke_guest_grant({ sessionId }); // or let it expire
+```
+
+### What the guest installs
+
+The extension is plain JavaScript with no dependencies or build step, in
+[`extension/`](../extension); the rules are all in
+[`extension/policy.js`](../extension/policy.js), commented for a reader
+checking them. It isn't on the Chrome Web Store, so the guest loads it
+unpacked:
+
+1. Download the source code zip of a
+   [release](https://github.com/xav-ie/browser-session-mcp/releases) (or clone
+   the repository at a release tag) and unzip it.
+2. Open `chrome://extensions`, turn on **Developer mode**, click **Load
+   unpacked**, and choose the `extension` folder.
+3. Pin **browser-session guest grant** and click it: it opens in the side
+   panel.
+4. Paste the grant link and press **Show me what it asks for**.
+
+It asks for `debugger` (to drive the tabs it opens), `tabs`, `tabGroups`,
+`webNavigation` (to see where those tabs go), `declarativeNetRequest` (to block
+navigations outside the grant), `storage` (its log) and `sidePanel`. It has no
+host permissions, no content scripts and no web-accessible resources, so pages
+can't see or probe it. It needs Chrome 120 or newer.
+
+### What the guest sees
+
+The side panel shows the grant before anything connects: who is asking and
+the purpose (both free text from the operator, marked unverified), the relay
+it connects to, the start URL, the allowed URL patterns, the time limit, and
+the approval mode, which the guest may change. **Accept** opens an outbound
+WebSocket to the relay and the start URL in a new tab, in a purple tab group
+named after the purpose. **Decline** tells the relay no.
+
+While it runs, a big banner says **AGENT ACTIVE** with a countdown, and the
+panel has **Pause** and **End now**. Chrome shows its own "browser-session
+guest grant started debugging this browser" bar; that is expected, and its
+Cancel button ends the grant too. In ask mode each click, Enter or Space waits
+in the panel (or in a small window, if the panel is closed) showing what is
+under the pointer (its role and name from the accessibility tree, with a crop
+of the screen around it) or what has focus, and the page URL, with **Allow**
+and **Deny**; no answer in 90 seconds is a deny. The **Action log** keeps every
+forwarded command (typed text shown only as a length), every denial and every
+approval, and exports as JSON.
+
+The grant ends on End now, expiry, closing the tab group or the agent's last
+tab, Cancel on Chrome's bar, the operator's `revoke_guest_grant`, or the
+connection dropping. The debugger then detaches from every tab and nothing is
+forwarded again. The tabs stay, since they are the guest's, and the group is
+renamed "Agent gone".
+
+### What the agent can and can't do
+
+With the guest session id, `navigate`, `take_snapshot`, `take_screenshot`,
+`click` and `type` work; every other tool fails for it. They act on the agent's
+tab (the one the grant opened, or the latest tab opened from it). Selectors are
+CSS, or a line from `take_snapshot` such as `link "Configure"` (the name must
+match exactly); `jev:` and `navigate`'s `waitUntil`/`text` aren't available.
+Snapshots cover the top document only, without iframes or icon hints. In ask
+mode a `click` call waits up to 90 seconds for the guest.
+
+The extension enforces, deny by default:
+
+- **Only the agent's tabs.** The debugger attaches only to tabs the grant
+  opened and tabs opened from them, inside the group. A tab the guest drags in
+  is taken out again; one dragged out stops being the agent's.
+- **Only these CDP commands**, each with its parameters rebuilt from known
+  fields: `Page.navigate`, `Page.captureScreenshot`, `Page.getLayoutMetrics`,
+  `Accessibility.getFullAXTree` and `queryAXTree`, `DOM.getDocument` (root
+  only), `DOM.querySelector` (no selectors that test attribute values, which
+  could spell out a hidden token), `DOM.scrollIntoViewIfNeeded`,
+  `DOM.getBoxModel`, `DOM.focus`, `Input.dispatchMouseEvent` (left button, no
+  modifier keys), `Input.dispatchKeyEvent` (no Alt; Ctrl/Meta only for select
+  all) and `Input.insertText`. So no `Runtime` (no script, no
+  `document.cookie`), no `Network`, `Storage`, `Fetch`, `Target`, `Browser`,
+  `Debugger` or `IO`, no downloads or file uploads. `policy.js` says why each
+  allowed one can't read cookies or reach outside the tab.
+- **Only the grant's URLs.** Every navigation is checked: the agent's own,
+  and every redirect, link and history change in its tabs. Chrome's network
+  rules block top-level requests outside the patterns before they are sent;
+  if a page still ends up outside (a script's `history.pushState`), the agent
+  is locked out of that tab until it is back, and hears only its origin.
+- **Never these, whatever the grant says**: local and private network
+  addresses, and pages for sign-in, passwords, two-factor, security, sessions,
+  tokens, keys and billing (GitHub's `/settings/security`, `/settings/tokens`,
+  `/settings/keys`, `/settings/billing`, `/settings/applications`,
+  `/sessions`, `/login`, repository deploy keys and secrets, and the same words
+  as a path segment on any site). The list is data at the top of `policy.js`.
+
+### Residual risk
+
+- Whatever the agent sees does reach the operator: the text and controls of
+  the allowed pages and their screenshots. Chrome reports password fields
+  masked, but anything else on those pages, the guest shares.
+- In auto mode the agent clicks and types as the guest on the allowed pages,
+  with no one checking each step.
+- The guest trusts the extension code they loaded, so they should load it from
+  a release they can check, and keep the patterns narrow.
+- The relay (this server's takeover daemon) sees every command and result; it
+  can't widen the grant, since the extension only enforces what the guest
+  accepted.
+- A tab the page opens (a `target=_blank` link) joins the group a moment after
+  it starts loading, so its first request can escape the network rules; the
+  agent still can't see it until the extension has checked its URL.
+
+How it's wired: `request_guest_grant` writes a ticket to
+`${STATE_DIR}/takeover/guest/grants/<token>.json` and returns
+`${TAKEOVER_BASE_URL}/guest/<token>`. The takeover daemon serves the grant to
+the extension, accepts its WebSocket at `/guest/<token>/ext` (one per grant),
+and listens on `${STATE_DIR}/takeover/guest/relay.sock`, which the MCP role
+connects to for each tool call, so the MCP role and the daemon need the same
+state dir on the same machine, as they already do for takeovers. A grant that
+ended is recorded in `guest/ended/<token>` and refuses connections.
 
 ## Saved cookie state
 

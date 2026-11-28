@@ -135,7 +135,11 @@ Run on a timer (e.g. every 30min).
 `STATE_DIR`, `BROWSER_URL` (default `http://127.0.0.1:9222`; the Chrome it
 relays the takeover page's CDP socket to),
 `TAKEOVER_WEBROOT` (set automatically by the Nix wrapper). Run as a systemd
-service.
+service. It is also the relay for [guest grants](workflows.md#guest-grant):
+guests' extensions connect to it at `/guest/<token>/ext`, and the MCP role
+reaches it through `$STATE_DIR/takeover/guest/relay.sock`, so the MCP role
+must run on the same machine and see the same state dir (a container with the
+state dir mounted works). Guest grants need nothing else configured.
 
 ## Operational notes
 

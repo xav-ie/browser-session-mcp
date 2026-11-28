@@ -208,7 +208,7 @@ impl Drop for OpenPage {
     }
 }
 
-async fn reject(stream: &mut TcpStream, status: &str, body: &str) -> Result<()> {
+pub(crate) async fn reject(stream: &mut TcpStream, status: &str, body: &str) -> Result<()> {
     let resp = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -218,7 +218,7 @@ async fn reject(stream: &mut TcpStream, status: &str, body: &str) -> Result<()> 
 }
 
 /// The client's `Sec-WebSocket-Key`, if this is a version-13 upgrade.
-fn handshake_key(head: &str) -> Option<String> {
+pub(crate) fn handshake_key(head: &str) -> Option<String> {
     let upgrade = crate::takeover::header(head, "upgrade")?;
     if !upgrade.eq_ignore_ascii_case("websocket") {
         return None;

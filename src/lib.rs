@@ -60,6 +60,8 @@ pub mod chrome_ctx;
 pub mod devices;
 pub mod emulation;
 pub mod frames;
+pub mod guest;
+pub mod guest_tools;
 pub mod humanize;
 pub mod jev;
 pub mod listener;

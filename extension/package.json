@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "description": "Not an npm package: tells Node that policy.js is an ES module, for the tests in tests/extension/. Chrome ignores this file.",
+  "type": "module"
+}

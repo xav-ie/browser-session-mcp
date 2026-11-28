@@ -70,7 +70,7 @@ impl ServerHandler for BrowserSessionServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("browser-session-mcp", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "Per-call isolated browser sessions against a shared persistent Chrome. Call open_browser_session to obtain a sessionId; pass it into every subsequent tool call. For human takeover: show the request_human_takeover URL to the user right away, then call await_human_takeover again and again in a background task until it completes; with no background task, end your turn and call it once the user says they're done.".into(),
+            "Per-call isolated browser sessions against a shared persistent Chrome. Call open_browser_session to obtain a sessionId; pass it into every subsequent tool call. For human takeover: show the request_human_takeover URL to the user right away, then call await_human_takeover again and again in a background task until it completes; with no background task, end your turn and call it once the user says they're done. To act in someone else's own Chrome, where their logins stay, use request_guest_grant.".into(),
         );
         info
     }
@@ -123,6 +123,18 @@ impl ServerHandler for BrowserSessionServer {
             },
             _ => None,
         };
+        // A guest session's tab is in the guest's own Chrome, behind their
+        // extension: its few tools take their own path (see guest_tools).
+        if let Some(token) = args
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .and_then(crate::guest::token_of)
+        {
+            if name != "revoke_guest_grant" {
+                let token = token.to_string();
+                return Ok(crate::guest_tools::call(name, &args, &token).await.into());
+            }
+        }
         let session = args
             .get("sessionId")
             .and_then(Value::as_str)
@@ -1961,6 +1973,69 @@ impl BrowserSessionServer {
         ))
     }
 
+    // --- guest grants ---
+
+    async fn request_guest_grant(&self, args: JsonObject) -> Result<Structured<GuestGrantOut>> {
+        let patterns = match args.get("allowedUrlPatterns") {
+            Some(Value::Array(a)) => a
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| anyhow!("`allowedUrlPatterns` must be strings"))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            _ => bail!("`allowedUrlPatterns` must be a list of URL patterns"),
+        };
+        let base = takeover::base_url().ok_or_else(|| {
+            anyhow!("TAKEOVER_BASE_URL is not configured — the takeover daemon, which relays guest grants, isn't set up on this host")
+        })?;
+        let grant = crate::guest::new_grant(
+            required_str(&args, "purpose")?,
+            required_str(&args, "requester")?,
+            &patterns,
+            required_str(&args, "startUrl")?,
+            optional_u64(&args, "ttlMinutes"),
+            optional_str(&args, "approvalMode"),
+            takeover::now_ms(),
+        )?;
+        let token = crate::guest::issue(&crate::guest::Store::shared(), &grant).await?;
+        let url = format!("{base}/guest/{token}");
+        let session_id = crate::guest::session_id(&token);
+        Ok(ok_text_struct(
+            format!(
+                "Guest grant ready. Send this link to the guest: they load the browser-session guest extension \
+                 into their Chrome, paste the link into its side panel, and press Accept. Then use \
+                 sessionId \"{session_id}\" with navigate, take_snapshot, take_screenshot, click and type; \
+                 until they accept, those calls fail saying so. Their extension enforces the URL patterns, \
+                 blocks sign-in, security, token and billing pages, and in ask mode makes every click and \
+                 Enter wait for them. End it early with revoke_guest_grant.\n{url}"
+            ),
+            GuestGrantOut {
+                url,
+                session_id,
+                expires_at_ms: grant.expires_at_ms,
+                approval_mode: grant.approval_mode,
+            },
+        ))
+    }
+
+    async fn revoke_guest_grant(&self, args: JsonObject) -> Result<Structured<GuestRevokeOut>> {
+        let session_id = required_str(&args, "sessionId")?;
+        let token = crate::guest::token_of(session_id).ok_or_else(|| {
+            anyhow!("`sessionId` must be a guest session id (guest-…) from request_guest_grant")
+        })?;
+        let revoked = crate::guest::revoke(&crate::guest::Store::shared(), token).await?;
+        Ok(ok_text_struct(
+            if revoked {
+                "Revoked. The relay closes the guest's connection within a second, and their extension detaches."
+            } else {
+                "That guest grant had already ended."
+            },
+            GuestRevokeOut { revoked },
+        ))
+    }
+
     // --- per-visit logs ---
 
     async fn list_visits(&self, args: JsonObject) -> Result<Structured<VisitsOut>> {
@@ -2535,6 +2610,8 @@ tools! {
     "remove_init_script" => remove_init_script,
     "request_human_takeover" => request_human_takeover,
     "await_human_takeover" => await_human_takeover,
+    "request_guest_grant" => request_guest_grant,
+    "revoke_guest_grant" => revoke_guest_grant,
     "save_browser_state" => save_state,
     "load_browser_state" => load_state,
     "list_browser_states" => list_states,
@@ -2726,6 +2803,27 @@ struct TakeoverOut {
     token: String,
     /// When the link stops working, in milliseconds since the Unix epoch.
     expires_at_ms: u128,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct GuestGrantOut {
+    /// The link to send the guest, to paste into the guest extension.
+    url: String,
+    /// Pass to navigate, take_snapshot, take_screenshot, click and type once
+    /// the guest accepts, and to revoke_guest_grant.
+    session_id: String,
+    /// When the grant ends, in milliseconds since the Unix epoch.
+    expires_at_ms: u128,
+    /// Whether the extension asks the guest before every click and Enter
+    /// (the guest may choose otherwise when accepting).
+    approval_mode: crate::guest::ApprovalMode,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct GuestRevokeOut {
+    /// False when the grant had already ended.
+    revoked: bool,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -7204,6 +7302,71 @@ fn tool_defs() -> Vec<Tool> {
                 .read_only(false)
                 .destructive(false)
                 .idempotent(false)
+                .open_world(false),
+        ),
+        tool(
+            "request_guest_grant",
+            "Ask a person (the guest) to let you drive tabs in their own Chrome, through the browser-session guest extension they load themselves, so their logins and cookies never leave their machine. Use it when a person must act as themselves on a site (configure a GitHub App on their repo, change a setting only they can reach) and handing their login to this server's Chrome with request_human_takeover would be wrong. Returns a link to send them and a sessionId (`guest-…`). Once they accept in the extension, navigate, take_snapshot, take_screenshot, click and type work with that sessionId; every other tool fails for it, and until they accept those calls fail saying so. Their extension enforces everything: only URLs matching `allowedUrlPatterns`, never sign-in, password, two-factor, security, token, key or billing pages, no scripts, cookies or other tabs, and in ask mode they press Allow before every click and Enter (a click call then waits up to 90 s). Selectors are CSS, or a line from take_snapshot such as `button \"Install\"`; no `jev:`. They may pause or end it at any time. What you see in snapshots and screenshots is what they share with you. Fails if TAKEOVER_BASE_URL isn't configured.",
+            object_schema(
+                &[
+                    (
+                        "purpose",
+                        &str_t,
+                        "What you need, shown to the guest and as their tab group's name, e.g. \"Install the deploy bot on acme/api\". Up to 200 characters.",
+                    ),
+                    (
+                        "requester",
+                        &str_t,
+                        "Who is asking, shown to the guest (marked unverified), e.g. \"Ana from ops, via her AI agent\". Up to 200 characters.",
+                    ),
+                    (
+                        "allowedUrlPatterns",
+                        &obj(&[
+                            ("type", Value::String("array".into())),
+                            ("items", str_t.clone()),
+                            ("minItems", json!(1)),
+                            ("maxItems", json!(crate::guest::MAX_PATTERNS)),
+                        ]),
+                        "Pages you may be on, as scheme://host/path with `*` matching anything in the path, and `*.` allowed at the start of the host for subdomains, e.g. https://github.com/apps/deploy-bot/* or https://github.com/organizations/acme/settings/installations*. The query string isn't matched. Keep them narrow: the guest sees them.",
+                    ),
+                    (
+                        "startUrl",
+                        &url_t,
+                        "Where the new tab opens; must match one of the patterns.",
+                    ),
+                    (
+                        "ttlMinutes",
+                        &pos_int_t,
+                        "Minutes the grant lasts from now, 1 to 60 (larger values are capped). Default 15.",
+                    ),
+                    (
+                        "approvalMode",
+                        &obj(&[
+                            ("type", Value::String("string".into())),
+                            ("enum", json!(["ask", "auto"])),
+                        ]),
+                        "`ask` (default): the guest approves every click, Enter and Space key. `auto`: they don't, though the URL limits stay. The guest picks in the end.",
+                    ),
+                ],
+                &["purpose", "requester", "allowedUrlPatterns", "startUrl"],
+            ),
+            writes(false, true),
+        ),
+        tool(
+            "revoke_guest_grant",
+            "End a guest grant from request_guest_grant now, before it expires: the relay closes the guest's connection within a second and their extension detaches from their tabs, which stay open in their browser. Safe to repeat; returns revoked false if it had already ended (the guest ended it, it expired, or it was revoked).",
+            object_schema(
+                &[(
+                    "sessionId",
+                    &str_t,
+                    "The guest session id (guest-…) request_guest_grant returned.",
+                )],
+                &["sessionId"],
+            ),
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(true)
                 .open_world(false),
         ),
         tool(
